@@ -1,0 +1,23 @@
+{
+  "repositories": {
+    "example-org/example-repo": "~/ghq/github.com/example-org/example-repo"
+  },
+  "teams": [],
+  "pollIntervalSeconds": 60,
+  "notificationTimeoutSeconds": 1800,
+  "maxNotifications": 3,
+  "choices": [
+    {
+      "id": "adr",
+      "label": "ADRレビュー",
+      "skill": "adr-review",
+      "prompt": "[${{.Skill}}]({{.SkillPath}})\nPR: {{.PR.URL}}\nレビュー対象: {{.PR.HeadSHA}}（base: {{.PR.BaseRef}}）\n作業ディレクトリはこのSHAに固定した専用worktreeです。branchやcheckoutは変更しないでください。"
+    },
+    {
+      "id": "code",
+      "label": "コードレビュー",
+      "skill": "code-review",
+      "prompt": "[${{.Skill}}]({{.SkillPath}})\nPR: {{.PR.URL}}\nレビュー対象: {{.PR.HeadSHA}}（base: {{.PR.BaseRef}}）\n作業ディレクトリはこのSHAに固定した専用worktreeです。branchやcheckoutは変更しないでください。"
+    }
+  ]
+}
