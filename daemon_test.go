@@ -69,6 +69,24 @@ func TestLatestRequest(t *testing.T) {
 	}
 }
 
+// A search across all of GitHub always answers incomplete results, so every direct-request query is scoped.
+func TestRequestQueriesAreScopedToConfiguredOwners(t *testing.T) {
+	cfg := &Config{Repositories: map[string]string{"zeta/one": "/a", "acme/app": "/b", "acme/lib": "/c"}}
+	owners := cfg.owners()
+	if strings.Join(owners, ",") != "acme,zeta" {
+		t.Fatalf("owners = %v", owners)
+	}
+	want := []string{
+		"is:pr is:open archived:false user-review-requested:@me user:acme",
+		"is:pr is:open archived:false user-review-requested:@me user:zeta",
+		"is:pr is:open archived:false team-review-requested:acme/backend",
+	}
+	got := requestQueries(owners, []string{"acme/backend"})
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("queries = %q", got)
+	}
+}
+
 // A re-request bumps the PR's updated_at, so the cache must not hide it; unchanged PRs cost no event reads.
 func TestPendingRequestsRereadsEventsOnlyForUpdatedPRs(t *testing.T) {
 	r := &fakeRunner{}
@@ -79,17 +97,17 @@ func TestPendingRequestsRereadsEventsOnlyForUpdatedPRs(t *testing.T) {
 	events := `[` + requestedEvent(7, "tanaka", "me") + `]`
 	r.on("gh api --paginate repos/acme/app/issues/3/events", func([]string) ([]byte, error) { return []byte(events), nil })
 
-	found, cache, err := pendingRequests(context.Background(), r, "gh", "me", nil, nil)
+	found, cache, err := pendingRequests(context.Background(), r, "gh", "me", []string{"acme"}, nil, nil)
 	if err != nil || len(found) != 1 || found[0].Key != "acme/app#3@7" {
 		t.Fatalf("found = %+v, %v", found, err)
 	}
 	r.calls = nil
-	if _, _, err := pendingRequests(context.Background(), r, "gh", "me", nil, cache); err != nil || r.ran("gh api --paginate repos/") {
+	if _, _, err := pendingRequests(context.Background(), r, "gh", "me", []string{"acme"}, nil, cache); err != nil || r.ran("gh api --paginate repos/") {
 		t.Fatalf("an unchanged PR must come from the cache: %v", err)
 	}
 	// The second page of the events, as gh writes it.
 	updated, events = "2026-10-20T11:00:00Z", events+"\n["+requestedEvent(8, "sato", "me")+"]"
-	found, _, err = pendingRequests(context.Background(), r, "gh", "me", nil, cache)
+	found, _, err = pendingRequests(context.Background(), r, "gh", "me", []string{"acme"}, nil, cache)
 	if err != nil || found[0].Key != "acme/app#3@8" || found[0].Requester != "sato" {
 		t.Fatalf("found = %+v, %v", found, err)
 	}

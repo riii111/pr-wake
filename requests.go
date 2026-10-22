@@ -28,9 +28,9 @@ type cachedPR struct {
 }
 
 // Lists the pending requests. Events are read again only for PRs updated since the last poll.
-func pendingRequests(ctx context.Context, r Runner, gh, login string, teams []string, cache map[string]cachedPR) ([]Found, map[string]cachedPR, error) {
+func pendingRequests(ctx context.Context, r Runner, gh, login string, owners, teams []string, cache map[string]cachedPR) ([]Found, map[string]cachedPR, error) {
 	hits := map[string]searchHit{}
-	for _, q := range requestQueries(teams) {
+	for _, q := range requestQueries(owners, teams) {
 		found, err := searchPRs(ctx, r, gh, q)
 		if err != nil {
 			return nil, nil, err
@@ -73,8 +73,13 @@ func pendingRequests(ctx context.Context, r Runner, gh, login string, teams []st
 }
 
 // Search lists what is pending now, independent of whether a notification was read on another device.
-func requestQueries(teams []string) []string {
-	queries := []string{"is:pr is:open archived:false user-review-requested:@me"}
+// A search across all of GitHub always times out into incomplete results, so each query is limited to
+// the owners of the configured repositories (user: matches organizations too).
+func requestQueries(owners, teams []string) []string {
+	var queries []string
+	for _, owner := range owners {
+		queries = append(queries, "is:pr is:open archived:false user-review-requested:@me user:"+owner)
+	}
 	for _, team := range teams {
 		queries = append(queries, "is:pr is:open archived:false team-review-requested:"+team)
 	}

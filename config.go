@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"text/template"
 )
@@ -24,6 +25,21 @@ type Config struct {
 	MaxNotifications int      `json:"maxNotifications"`
 	Commands         Commands `json:"commands"`
 	Choices          []Choice `json:"choices"`
+}
+
+// Sorted owners of the configured repositories.
+func (c *Config) owners() []string {
+	seen := map[string]bool{}
+	var owners []string
+	for repo := range c.Repositories {
+		owner, _, _ := strings.Cut(repo, "/")
+		if !seen[owner] {
+			seen[owner] = true
+			owners = append(owners, owner)
+		}
+	}
+	sort.Strings(owners)
+	return owners
 }
 
 // Absolute paths that replace the fixed-directory lookup.

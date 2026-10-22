@@ -176,7 +176,7 @@ func runCheck(ctx context.Context, args []string, env Env, r Runner, stdout io.W
 		return err
 	}
 	out.printf("github login: %s\n", login)
-	for _, q := range requestQueries(t.Cfg.Teams) {
+	for _, q := range requestQueries(t.Cfg.owners(), t.Cfg.Teams) {
 		hits, err := searchPRs(ctx, r, c.GH, q)
 		if err != nil {
 			return err

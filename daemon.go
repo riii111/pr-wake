@@ -92,7 +92,7 @@ func (d *Daemon) pollOnce(ctx context.Context) error {
 			return d.recordError(err)
 		}
 	}
-	found, next, err := pendingRequests(ctx, t.R, t.Cmds.GH, login, t.Cfg.Teams, cache)
+	found, next, err := pendingRequests(ctx, t.R, t.Cmds.GH, login, t.Cfg.owners(), t.Cfg.Teams, cache)
 	if err != nil {
 		return d.recordError(err)
 	}
