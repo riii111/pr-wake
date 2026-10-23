@@ -238,7 +238,7 @@ func runSmoke(ctx context.Context, args []string, env Env, r Runner, stdout io.W
 		if err != nil {
 			return err
 		}
-		out.printf("worktree: %s\nlink: %s\n", path, deepLink(prompt, path))
+		out.printf("worktree: %s\nlink: %s\n", path, deepLink(prompt, t.Cfg.ChatHome))
 		return out.err
 	}
 	res, err := launch(ctx, t, sel.Choice, pr.Repo, pr.Number, *requester)

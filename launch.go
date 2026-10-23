@@ -30,7 +30,7 @@ func launch(ctx context.Context, t Tools, ch *Choice, repo string, number int, r
 	if err != nil {
 		return Launched{PR: pr, Worktree: path}, err
 	}
-	if err := openDeepLink(ctx, t.R, t.Cmds.Open, deepLink(prompt, path)); err != nil {
+	if err := openDeepLink(ctx, t.R, t.Cmds.Open, deepLink(prompt, t.Cfg.ChatHome)); err != nil {
 		return Launched{PR: pr, Worktree: path}, fmt.Errorf("open deep link: %w", err)
 	}
 	return Launched{PR: pr, Worktree: path}, nil

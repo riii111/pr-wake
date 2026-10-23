@@ -21,6 +21,9 @@ type Config struct {
 	PollIntervalSeconds        int      `json:"pollIntervalSeconds"`
 	WorktreeRoot               string   `json:"worktreeRoot"`
 	NotificationTimeoutSeconds int      `json:"notificationTimeoutSeconds"`
+	// Folder every review chat opens in, shared with the harnexus reviewers. A chat in each worktree
+	// would add one Codex project, and one trust prompt, per PR.
+	ChatHome string `json:"-"`
 	// Notifications waiting for an answer at the same time; more requests wait in the queue.
 	MaxNotifications int      `json:"maxNotifications"`
 	Commands         Commands `json:"commands"`
@@ -150,6 +153,7 @@ func (c *Config) resolve(env Env) error {
 		return fmt.Errorf("worktreeRoot must be absolute: %q", c.WorktreeRoot)
 	}
 	c.WorktreeRoot = filepath.Clean(root)
+	c.ChatHome = filepath.Join(env.Home, "review-home")
 
 	for repo, path := range c.Repositories {
 		if !repoName.MatchString(repo) {

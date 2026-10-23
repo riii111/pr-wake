@@ -283,7 +283,7 @@ func TestDaemonNotifiesEachRequestOnceAndOpensTheChoice(t *testing.T) {
 	worktree := worktreePath(f.d.tools.Cfg.WorktreeRoot, PullRequest{Repo: "acme/app", Number: 12, HeadSHA: headSHA})
 	skill := filepath.Join(f.env.CodexHome, "skills", "code-review", "SKILL.md")
 	want := "[$code-review](" + skill + ") https://github.com/acme/app/pull/12 " + headSHA + " " + worktree
-	if q := u.Query(); q.Get("prompt") != want || q.Get("path") != worktree {
+	if q := u.Query(); q.Get("prompt") != want || q.Get("path") != filepath.Join(f.env.Home, "review-home") {
 		t.Errorf("link = %s", f.opened[0])
 	}
 

@@ -10,7 +10,7 @@ flowchart LR
   S --> Q[通知キュー<br/>同時に最大3件<br/>超えたら古い通知を閉じる]
   Q --> A[alerter]
   A -->|Skillを選択| W[head SHAに固定した<br/>専用worktree]
-  W --> D[codex://new<br/>prompt・path]
+  W --> D[codex://new<br/>prompt・~/review-home]
   A -->|見送る・閉じる・放置・入れ替え| S
 ```
 
@@ -39,6 +39,10 @@ flowchart LR
 **レビューの開始**
 
 Skillを選ぶと、その時点のPRのheadに固定した専用worktreeを作り、Codex Appに新しいスレッドを開く。
+スレッドは`~/review-home`で開く。
+PRごとにCodexのプロジェクトと信頼確認が増えず、harnexusのレビュアーと同じ場所にまとまる。
+`~/review-home`は空のフォルダを作り、Codex Appのプロジェクトとして追加しておく。
+レビュー対象のコードはworktreeにあるので、プロンプトに`{{.Worktree}}`で渡す。
 プロンプトは入力済みで、Enterを押すとレビューが始まる。
 普段のcheckoutのbranch・HEAD・作業中の変更は変わらない。
 worktreeは自動で削除しない。
