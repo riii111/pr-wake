@@ -245,18 +245,24 @@ func (f *daemonFixture) status(t *testing.T, key string) Status {
 	return req.Status
 }
 
-func (f *daemonFixture) notifyInBackground(t *testing.T) {
+// The returned stop waits for the loop to end, so a poll after it cannot be consumed concurrently.
+func (f *daemonFixture) notifyInBackground(t *testing.T) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { f.d.notifyLoop(ctx); close(done) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("notifyLoop did not stop")
-		}
-	})
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("notifyLoop did not stop")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 func (f *daemonFixture) waitStatus(t *testing.T, key string, want Status) {
@@ -277,13 +283,13 @@ func chooseCodeReview(string) string {
 func TestDaemonNotifiesEachRequestOnceAndOpensTheChoice(t *testing.T) {
 	f := newDaemonFixture(t)
 	f.answer = chooseCodeReview
-	f.notifyInBackground(t)
 	f.request("acme/app", 1, requestedEvent(10, "tanaka", "me"))
 	f.poll(t)
 	if f.d.queuedCount() != 0 {
 		t.Fatal("the first poll is only a baseline")
 	}
 
+	stop := f.notifyInBackground(t)
 	f.request("acme/app", 12, requestedEvent(30, "sato", "me"))
 	f.poll(t)
 	f.waitStatus(t, "acme/app#12@30", StatusLaunched)
@@ -300,14 +306,14 @@ func TestDaemonNotifiesEachRequestOnceAndOpensTheChoice(t *testing.T) {
 	}
 
 	// After a restart, nothing already handled comes back; a re-request of the same PR does.
+	stop()
 	st, _, _ := f.store.Load()
-	f.d.mu.Lock()
 	f.d.st = st
-	f.d.mu.Unlock()
 	f.poll(t)
 	if f.d.queuedCount() != 0 {
 		t.Error("a launched request must not be notified again")
 	}
+	f.notifyInBackground(t)
 	f.request("acme/app", 12, requestedEvent(30, "sato", "me"), requestedEvent(31, "sato", "me"))
 	f.poll(t)
 	f.waitStatus(t, "acme/app#12@31", StatusLaunched)
@@ -328,10 +334,11 @@ func TestDaemonAnswersOtherThanAChoiceStartNothing(t *testing.T) {
 			f := newDaemonFixture(t)
 			f.answer = func(string) string { return c.answer }
 			f.poll(t)
-			f.notifyInBackground(t)
+			stop := f.notifyInBackground(t)
 			f.request("acme/app", 1, requestedEvent(10, "tanaka", "me"))
 			f.poll(t)
 			f.waitStatus(t, "acme/app#1@10", c.want)
+			stop()
 			f.poll(t)
 			if f.d.queuedCount() != 0 || f.r.ran("git") || len(f.openedLinks()) != 0 {
 				t.Error("the request must start nothing and not come back")
