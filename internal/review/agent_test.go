@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestReplaceLegacyCarriesConfigAndStateOverOnce(t *testing.T) {
+func TestLegacyConfigAndStateAreCarriedOverOnce(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
@@ -25,6 +25,9 @@ func TestReplaceLegacyCarriesConfigAndStateOverOnce(t *testing.T) {
 	write(filepath.Join(legacyStateDir(home), "state.json"), "old state")
 	write(legacyBinary(env), "binary")
 
+	if err := copyIfMissing(legacyConfigPath(home), defaultConfigPath(home), io.Discard); err != nil {
+		t.Fatal(err)
+	}
 	if err := replaceLegacy(env, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +43,7 @@ func TestReplaceLegacyCarriesConfigAndStateOverOnce(t *testing.T) {
 
 	// A config edited after the move is never overwritten by the old one.
 	write(defaultConfigPath(home), "new config")
-	if err := replaceLegacy(env, io.Discard); err != nil {
+	if err := copyIfMissing(legacyConfigPath(home), defaultConfigPath(home), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if data, _ := os.ReadFile(defaultConfigPath(home)); string(data) != "new config" {

@@ -39,15 +39,18 @@ func install(ctx context.Context, env Env, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := replaceLegacy(env, stdout); err != nil {
+	config := defaultConfigPath(env.Home)
+	if err := copyIfMissing(legacyConfigPath(env.Home), config, stdout); err != nil {
 		return err
 	}
-	config := defaultConfigPath(env.Home)
 	if _, err := os.Stat(config); errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("%s not found; copy config.example.json from the pr-wake repository and edit it", config)
 	}
-	// Fails before the agent is loaded if the config, a command or the GitHub API is not usable.
+	// Fails before review-notifier is stopped or the agent is loaded, so a bad config leaves the running one alone.
 	if err := runCheck(ctx, nil, env, execRunner{}, stdout); err != nil {
+		return err
+	}
+	if err := replaceLegacy(env, stdout); err != nil {
 		return err
 	}
 	u, err := user.Current()
@@ -57,7 +60,7 @@ func install(ctx context.Context, env Env, stdout io.Writer) error {
 	return launchagent.Install(agent(env, exe), u.Username, stdout)
 }
 
-// Stops review-notifier and carries its config and state over; worktrees it made stay where they are.
+// Stops review-notifier and carries its state over; worktrees it made stay where they are.
 func replaceLegacy(env Env, stdout io.Writer) error {
 	old := legacyAgent(env)
 	if _, err := os.Stat(old.Plist()); err == nil {
@@ -65,13 +68,16 @@ func replaceLegacy(env Env, stdout io.Writer) error {
 			return err
 		}
 	}
-	if err := os.Remove(legacyBinary(env)); err == nil {
-		fmt.Fprintf(stdout, "removed %s\n", legacyBinary(env))
-	}
-	if err := copyIfMissing(legacyConfigPath(env.Home), defaultConfigPath(env.Home), stdout); err != nil {
+	if err := moveIfMissing(legacyStateDir(env.Home), defaultStateDir(env.Home), stdout); err != nil {
 		return err
 	}
-	return moveIfMissing(legacyStateDir(env.Home), defaultStateDir(env.Home), stdout)
+	if err := os.Remove(legacyBinary(env)); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(stdout, "removed %s\n", legacyBinary(env))
+	return err
 }
 
 func copyIfMissing(from, to string, stdout io.Writer) error {
@@ -90,8 +96,8 @@ func copyIfMissing(from, to string, stdout io.Writer) error {
 	if err := os.WriteFile(to, data, 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "copied %s to %s\n", from, to)
-	return nil
+	_, err = fmt.Fprintf(stdout, "copied %s to %s\n", from, to)
+	return err
 }
 
 func moveIfMissing(from, to string, stdout io.Writer) error {
@@ -107,8 +113,8 @@ func moveIfMissing(from, to string, stdout io.Writer) error {
 	if err := os.Rename(from, to); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "moved %s to %s\n", from, to)
-	return nil
+	_, err := fmt.Fprintf(stdout, "moved %s to %s\n", from, to)
+	return err
 }
 
 func uninstall(env Env, stdout io.Writer) error {
@@ -119,8 +125,8 @@ func uninstall(env Env, stdout io.Writer) error {
 	if err := launchagent.Uninstall(agent(env, exe), stdout); err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, "config, state, logs and review worktrees are kept")
-	return nil
+	_, err = fmt.Fprintln(stdout, "config, state, logs and review worktrees are kept")
+	return err
 }
 
 func start(env Env, stdout io.Writer) error {
@@ -144,7 +150,9 @@ func runAgentStatus(env Env, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	launchagent.PrintLoaded(agent(env, exe), stdout)
+	if err := launchagent.PrintLoaded(agent(env, exe), stdout); err != nil {
+		return err
+	}
 	return runStatus(env, stdout)
 }
 

@@ -41,8 +41,8 @@ func Run(args []string, stdout io.Writer) error {
 		if err := launchagent.Uninstall(a, stdout); err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, "config, state and logs are kept")
-		return nil
+		_, err := fmt.Fprintln(stdout, "config, state and logs are kept")
+		return err
 	case "start":
 		return launchagent.Start(a, stdout)
 	case "stop":
@@ -86,15 +86,16 @@ func install(home string, stdout io.Writer) error {
 			return fmt.Errorf("%s not found; %s", item.path, item.hint)
 		}
 	}
+	// Fails before the old agent is stopped or the new one is loaded if the config, a gh account
+	// or the GitHub API is not usable.
+	// The dry run lists every comment of every open PR, so only its failure is shown.
+	if err := launchagent.RunQuiet(stdout, binaryPath(home), "watch", "--dry-run"); err != nil {
+		return err
+	}
 	if old := legacyAgent(home); fileExists(old.Plist()) {
 		if err := launchagent.Uninstall(old, stdout); err != nil {
 			return err
 		}
-	}
-	// Fails before the agent is loaded if the config, a gh account or the GitHub API is not usable.
-	// The dry run lists every comment of every open PR, so only its failure is shown.
-	if err := launchagent.RunQuiet(stdout, binaryPath(home), "watch", "--dry-run"); err != nil {
-		return err
 	}
 	u, err := user.Current()
 	if err != nil {
@@ -104,7 +105,9 @@ func install(home string, stdout io.Writer) error {
 }
 
 func status(home string, stdout io.Writer) error {
-	launchagent.PrintLoaded(agent(home), stdout)
+	if err := launchagent.PrintLoaded(agent(home), stdout); err != nil {
+		return err
+	}
 	binary := binaryPath(home)
 	if !fileExists(binary) {
 		return fmt.Errorf("%s not found", binary)
@@ -117,10 +120,8 @@ func status(home string, stdout io.Writer) error {
 		_, _ = os.Stderr.Write(stderr.Bytes())
 		return err
 	}
-	for _, line := range statusLines(out.Bytes()) {
-		fmt.Fprintln(stdout, line)
-	}
-	return nil
+	_, err := fmt.Fprintln(stdout, strings.Join(statusLines(out.Bytes()), "\n"))
+	return err
 }
 
 type shownPR struct {

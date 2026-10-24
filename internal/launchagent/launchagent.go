@@ -73,18 +73,19 @@ func Start(a Agent, out io.Writer) error {
 
 func Stop(a Agent, out io.Writer) error {
 	if !Loaded(a) {
-		fmt.Fprintf(out, "%s is not running\n", a.Label)
-		return nil
+		_, err := fmt.Fprintf(out, "%s is not running\n", a.Label)
+		return err
 	}
 	return Run(out, "launchctl", "bootout", a.service())
 }
 
-func PrintLoaded(a Agent, out io.Writer) {
+func PrintLoaded(a Agent, out io.Writer) error {
 	state := "not loaded"
 	if Loaded(a) {
 		state = "loaded"
 	}
-	fmt.Fprintf(out, "%s: %s\n", a.Label, state)
+	_, err := fmt.Fprintf(out, "%s: %s\n", a.Label, state)
+	return err
 }
 
 func Logs(a Agent, follow bool, out io.Writer) error {
@@ -169,7 +170,9 @@ func domain() string {
 
 // Run prints and runs a command, passing its output through.
 func Run(out io.Writer, name string, args ...string) error {
-	fmt.Fprintln(out, "$", strings.Join(append([]string{name}, args...), " "))
+	if err := printCommand(out, name, args); err != nil {
+		return err
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Stdout, cmd.Stderr = out, os.Stderr
 	return cmd.Run()
@@ -177,7 +180,9 @@ func Run(out io.Writer, name string, args ...string) error {
 
 // RunQuiet is for a check whose full output is long, so only its failure is shown.
 func RunQuiet(out io.Writer, name string, args ...string) error {
-	fmt.Fprintln(out, "$", strings.Join(append([]string{name}, args...), " "))
+	if err := printCommand(out, name, args); err != nil {
+		return err
+	}
 	var stderr bytes.Buffer
 	cmd := exec.Command(name, args...)
 	cmd.Stderr = &stderr
@@ -186,4 +191,9 @@ func RunQuiet(out io.Writer, name string, args ...string) error {
 		return err
 	}
 	return nil
+}
+
+func printCommand(out io.Writer, name string, args []string) error {
+	_, err := fmt.Fprintln(out, "$", strings.Join(append([]string{name}, args...), " "))
+	return err
 }
