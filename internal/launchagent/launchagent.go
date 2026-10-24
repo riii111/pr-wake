@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -23,7 +25,9 @@ type Agent struct {
 	Command string
 	Home    string
 	Program []string
-	Log     string
+	// Set in the agent's environment besides HOME, PATH and LANG.
+	Env map[string]string
+	Log string
 	// Interactive for an agent the owner answers, as notifications are; Background otherwise.
 	ProcessType string
 }
@@ -139,7 +143,11 @@ func Render(a Agent, user string) []byte {
 	b.WriteString("\t</array>\n")
 	key("EnvironmentVariables")
 	b.WriteString("\t<dict>\n")
-	for _, kv := range [][2]string{{"HOME", a.Home}, {"PATH", path}, {"LANG", "en_US.UTF-8"}} {
+	env := [][2]string{{"HOME", a.Home}, {"PATH", path}, {"LANG", "en_US.UTF-8"}}
+	for _, name := range slices.Sorted(maps.Keys(a.Env)) {
+		env = append(env, [2]string{name, a.Env[name]})
+	}
+	for _, kv := range env {
 		fmt.Fprintf(&b, "\t\t<key>%s</key>\n", kv[0])
 		str("\t\t", kv[1])
 	}

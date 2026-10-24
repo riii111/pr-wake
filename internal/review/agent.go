@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"time"
 
 	"github.com/riii111/pr-wake/internal/launchagent"
 )
@@ -20,9 +21,22 @@ func agent(env Env, exe string) launchagent.Agent {
 		Command:     "review",
 		Home:        env.Home,
 		Program:     []string{exe, "review", "run"},
+		Env:         xdgEnv(),
 		Log:         filepath.Join(env.Home, "Library", "Logs", "pr-wake", "review.log"),
 		ProcessType: "Interactive",
 	}
+}
+
+// launchd does not pass the installing shell's environment, so the agent is given the XDG homes
+// install checked and migrated against.
+func xdgEnv() map[string]string {
+	out := map[string]string{}
+	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
+		if value := os.Getenv(name); filepath.IsAbs(value) {
+			out[name] = value
+		}
+	}
+	return out
 }
 
 // review-notifier from dotfiles, replaced on install so two watchers never notify the same request.
@@ -68,7 +82,7 @@ func replaceLegacy(env Env, stdout io.Writer) error {
 			return err
 		}
 	}
-	if err := moveIfMissing(legacyStateDir(env.Home), defaultStateDir(env.Home), stdout); err != nil {
+	if err := moveLegacyState(env, stdout); err != nil {
 		return err
 	}
 	if err := os.Remove(legacyBinary(env)); errors.Is(err, fs.ErrNotExist) {
@@ -79,6 +93,24 @@ func replaceLegacy(env Env, stdout io.Writer) error {
 	_, err := fmt.Fprintf(stdout, "removed %s\n", legacyBinary(env))
 	return err
 }
+
+// bootout returns before review-notifier has exited, and its last save would land in the old directory,
+// so the state is moved only once its lock is free.
+func moveLegacyState(env Env, stdout io.Writer) error {
+	dir := legacyStateDir(env.Home)
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	lock, err := waitForLock(dir, legacyExitTimeout)
+	if err != nil {
+		return err
+	}
+	// The lock file moves with the directory; it is released before the new agent locks it there.
+	defer func() { _ = lock.Close() }()
+	return moveIfMissing(dir, defaultStateDir(env.Home), stdout)
+}
+
+const legacyExitTimeout = 30 * time.Second
 
 func copyIfMissing(from, to string, stdout io.Writer) error {
 	if _, err := os.Stat(to); err == nil {

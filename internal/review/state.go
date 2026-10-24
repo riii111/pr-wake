@@ -133,6 +133,24 @@ func (s Store) Save(st *State) error {
 }
 
 // Held for the life of the watcher, so a second instance cannot notify or launch the same request.
+func waitForLock(dir string, timeout time.Duration) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+			return nil, errors.Join(fmt.Errorf("%s is still locked after %s: %w", f.Name(), timeout, err), f.Close())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func lockDir(dir string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
