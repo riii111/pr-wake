@@ -1,7 +1,4 @@
 // Package watch runs `harnexus-task watch` as a per-user LaunchAgent.
-//
-// The watch tells each task worker what happened on its PR. It is kept apart from
-// the review notifier, which notifies the owner, so either can be stopped alone.
 package watch
 
 import (
@@ -72,7 +69,6 @@ func agent(home string) launchagent.Agent {
 	}
 }
 
-// The agent dotfiles installed, replaced on install so two watches never send the same message.
 func legacyAgent(home string) launchagent.Agent {
 	return launchagent.Agent{Label: "io.github.riii111.pr-watch", Home: home}
 }
@@ -86,8 +82,7 @@ func install(home string, stdout io.Writer) error {
 			return fmt.Errorf("%s not found; %s", item.path, item.hint)
 		}
 	}
-	// Fails before the old agent is stopped or the new one is loaded if the config, a gh account
-	// or the GitHub API is not usable.
+	// Validate before replacing the legacy agent so a failed check leaves it running.
 	// The dry run lists every comment of every open PR, so only its failure is shown.
 	if err := launchagent.RunQuiet(stdout, binaryPath(home), "watch", "--dry-run"); err != nil {
 		return err

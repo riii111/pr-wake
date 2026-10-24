@@ -1,7 +1,4 @@
 // Package launchagent manages a resident command as a per-user LaunchAgent.
-//
-// The review notifier and the harnexus PR watch run the same way, so how an agent is
-// written, loaded, stopped and read lives here once.
 package launchagent
 
 import (
@@ -108,8 +105,7 @@ func Loaded(a Agent) bool {
 }
 
 func Render(a Agent, user string) []byte {
-	// launchd starts the agent without the login shell, so PATH is fixed here for
-	// gh, git and the helpers they start themselves.
+	// launchd does not inherit the login shell's PATH.
 	path := strings.Join([]string{
 		filepath.Join(a.Home, ".nix-profile", "bin"),
 		filepath.Join("/etc/profiles/per-user", user, "bin"),

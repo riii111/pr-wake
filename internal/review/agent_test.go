@@ -11,10 +11,16 @@ import (
 	"github.com/riii111/pr-wake/internal/launchagent"
 )
 
+// The old agent used the paths under home, while the installing shell may point XDG elsewhere.
+func useOtherXDGHomes(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "xdg-state"))
+}
+
 func TestLegacyConfigAndStateAreCarriedOverOnce(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("XDG_STATE_HOME", "")
+	useOtherXDGHomes(t, home)
 	env := Env{Home: home}
 	write := func(path, data string) {
 		t.Helper()
@@ -25,8 +31,8 @@ func TestLegacyConfigAndStateAreCarriedOverOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(legacyConfigPath(home), "old config")
-	write(filepath.Join(legacyStateDir(home), "state.json"), "old state")
+	write(filepath.Join(home, ".config", "review-notifier", "config.json"), "old config")
+	write(filepath.Join(home, ".local", "state", "review-notifier", "state.json"), "old state")
 	write(legacyBinary(env), "binary")
 
 	if err := copyIfMissing(legacyConfigPath(home), defaultConfigPath(home), io.Discard); err != nil {
@@ -35,17 +41,16 @@ func TestLegacyConfigAndStateAreCarriedOverOnce(t *testing.T) {
 	if err := replaceLegacy(env, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if data, _ := os.ReadFile(defaultConfigPath(home)); string(data) != "old config" {
+	if data, _ := os.ReadFile(filepath.Join(home, "xdg-config", "pr-wake", "review.json")); string(data) != "old config" {
 		t.Fatalf("config = %q", data)
 	}
-	if data, _ := os.ReadFile(filepath.Join(defaultStateDir(home), "state.json")); string(data) != "old state" {
+	if data, _ := os.ReadFile(filepath.Join(home, "xdg-state", "pr-wake", "review", "state.json")); string(data) != "old state" {
 		t.Fatalf("state = %q", data)
 	}
 	if _, err := os.Stat(legacyBinary(env)); !os.IsNotExist(err) {
 		t.Fatalf("legacy binary is still there: %v", err)
 	}
 
-	// A config edited after the move is never overwritten by the old one.
 	write(defaultConfigPath(home), "new config")
 	if err := copyIfMissing(legacyConfigPath(home), defaultConfigPath(home), io.Discard); err != nil {
 		t.Fatal(err)
@@ -57,9 +62,9 @@ func TestLegacyConfigAndStateAreCarriedOverOnce(t *testing.T) {
 
 func TestLegacyStateMovesOnlyAfterTheOldWatcherReleasesItsLock(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", "")
+	useOtherXDGHomes(t, home)
 	env := Env{Home: home}
-	old := legacyStateDir(home)
+	old := filepath.Join(home, ".local", "state", "review-notifier")
 	held, err := lockDir(old)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +92,9 @@ func TestLegacyStateMovesOnlyAfterTheOldWatcherReleasesItsLock(t *testing.T) {
 func TestAgentReadsTheXDGHomesInstallUsed(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/Users/me/conf")
 	t.Setenv("XDG_STATE_HOME", "/Users/me/st")
-	plist := string(launchagent.Render(agent(Env{Home: "/Users/me"}, "/Users/me/.local/bin/pr-wake"), "me"))
+	a := agent(Env{Home: "/Users/me"})
+	a.Env = xdgEnv()
+	plist := string(launchagent.Render(a, "me"))
 	for _, want := range []string{
 		"<key>XDG_CONFIG_HOME</key>\n\t\t<string>/Users/me/conf</string>",
 		"<key>XDG_STATE_HOME</key>\n\t\t<string>/Users/me/st</string>",
@@ -99,7 +106,7 @@ func TestAgentReadsTheXDGHomesInstallUsed(t *testing.T) {
 
 	t.Setenv("XDG_CONFIG_HOME", "relative")
 	t.Setenv("XDG_STATE_HOME", "")
-	if env := agent(Env{Home: "/Users/me"}, "pr-wake").Env; len(env) != 0 {
+	if env := xdgEnv(); len(env) != 0 {
 		t.Fatalf("env = %v; a home the code ignores must not be passed on", env)
 	}
 }

@@ -2,7 +2,6 @@ package watch
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -19,35 +18,34 @@ func TestAgentRunsHarnexusTaskWatch(t *testing.T) {
 	}
 }
 
-func TestStatusLinesReadTheStatusHarnexusTaskPrints(t *testing.T) {
-	output := `{"prs": [
-		{"pr": "https://github.com/org/pay/pull/7", "status": "watching", "reason": null, "pending": 2, "awaitingAnswer": true},
-		{"pr": "https://github.com/org/pay/pull/8", "status": "stopped", "reason": "worker thread is gone", "pending": 0, "awaitingAnswer": false}
-	]}`
-	got := statusLines([]byte(output))
-	want := []string{
-		"https://github.com/org/pay/pull/7 watching pending=2 awaiting answer",
-		"https://github.com/org/pay/pull/8 stopped (worker thread is gone) pending=0",
-	}
-	if !reflect.DeepEqual(got[:len(got)-1], want) {
-		t.Fatalf("lines = %q, want %q", got, want)
-	}
-}
-
-func TestStatusLinesShowOtherOutputAsItIs(t *testing.T) {
-	if got := statusLines([]byte("not json\n")); !reflect.DeepEqual(got, []string{"not json"}) {
-		t.Fatalf("lines = %q", got)
-	}
-}
-
-func TestSenderLineNamesTheSenderAnUnreadableRecordOrHowToRegisterOne(t *testing.T) {
-	if got := statusLines([]byte(`{"sender": "chat-1", "prs": []}`)); !reflect.DeepEqual(got, []string{"sender: chat-1"}) {
-		t.Fatalf("lines = %q", got)
-	}
-	if got := senderLine(shown{SenderError: "bad JSON"}); got != "sender: unreadable (bad JSON)" {
-		t.Fatalf("line = %q", got)
-	}
-	if got := senderLine(shown{}); !strings.Contains(got, "harnexus-task watch --sender") {
-		t.Fatalf("line = %q", got)
+func TestStatusLines(t *testing.T) {
+	register := "sender: none; run `harnexus-task watch --sender` in a chat kept for it"
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   []string
+	}{
+		{
+			name: "watched PRs",
+			output: `{"prs": [
+				{"pr": "https://github.com/org/pay/pull/7", "status": "watching", "reason": null, "pending": 2, "awaitingAnswer": true},
+				{"pr": "https://github.com/org/pay/pull/8", "status": "stopped", "reason": "worker thread is gone", "pending": 0, "awaitingAnswer": false}
+			]}`,
+			want: []string{
+				"https://github.com/org/pay/pull/7 watching pending=2 awaiting answer",
+				"https://github.com/org/pay/pull/8 stopped (worker thread is gone) pending=0",
+				register,
+			},
+		},
+		{name: "output that is not JSON", output: "not json\n", want: []string{"not json"}},
+		{name: "sender", output: `{"sender": "chat-1", "prs": []}`, want: []string{"sender: chat-1"}},
+		{name: "unreadable sender", output: `{"senderError": "bad JSON", "prs": []}`, want: []string{"sender: unreadable (bad JSON)"}},
+		{name: "no sender", output: `{"prs": []}`, want: []string{register}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statusLines([]byte(tc.output)); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("lines = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

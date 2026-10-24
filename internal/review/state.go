@@ -66,8 +66,9 @@ func defaultStateDir(home string) string {
 }
 
 // Where review-notifier in dotfiles kept its state, moved once by install so no request is notified again.
+// Its plist passed no XDG variables, so the path is under home whatever the installing shell sets.
 func legacyStateDir(home string) string {
-	return filepath.Join(stateHome(home), "review-notifier")
+	return filepath.Join(home, ".local", "state", "review-notifier")
 }
 
 func stateHome(home string) string {
@@ -132,7 +133,7 @@ func (s Store) Save(st *State) error {
 	return os.Rename(tmp.Name(), s.path)
 }
 
-// Held for the life of the watcher, so a second instance cannot notify or launch the same request.
+// The caller owns the returned lock and must close it after migration.
 func waitForLock(dir string, timeout time.Duration) (*os.File, error) {
 	f, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -151,6 +152,7 @@ func waitForLock(dir string, timeout time.Duration) (*os.File, error) {
 	}
 }
 
+// Held for the life of the watcher, so a second instance cannot notify or launch the same request.
 func lockDir(dir string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err

@@ -88,8 +88,9 @@ func defaultConfigPath(home string) string {
 }
 
 // Where review-notifier in dotfiles kept its config, read once by install to carry it over.
+// Its plist passed no XDG variables, so the path is under home whatever the installing shell sets.
 func legacyConfigPath(home string) string {
-	return filepath.Join(configHome(home), "review-notifier", "config.json")
+	return filepath.Join(home, ".config", "review-notifier", "config.json")
 }
 
 func configHome(home string) string {
