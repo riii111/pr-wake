@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"bytes"
@@ -84,10 +84,19 @@ const (
 )
 
 func defaultConfigPath(home string) string {
+	return filepath.Join(configHome(home), "pr-wake", "review.json")
+}
+
+// Where review-notifier in dotfiles kept its config, read once by install to carry it over.
+func legacyConfigPath(home string) string {
+	return filepath.Join(configHome(home), "review-notifier", "config.json")
+}
+
+func configHome(home string) string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, "review-notifier", "config.json")
+		return xdg
 	}
-	return filepath.Join(home, ".config", "review-notifier", "config.json")
+	return filepath.Join(home, ".config")
 }
 
 func loadConfig(path string, env Env) (*Config, error) {
@@ -146,7 +155,7 @@ func (c *Config) resolve(env Env) error {
 
 	root := c.WorktreeRoot
 	if root == "" {
-		root = filepath.Join(env.Home, ".local", "share", "review-notifier", "worktrees")
+		root = filepath.Join(env.Home, ".local", "share", "pr-wake", "worktrees")
 	}
 	root = expandHome(root, env.Home)
 	if !filepath.IsAbs(root) {

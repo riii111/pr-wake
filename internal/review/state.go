@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"encoding/json"
@@ -62,10 +62,19 @@ func newState() *State {
 }
 
 func defaultStateDir(home string) string {
+	return filepath.Join(stateHome(home), "pr-wake", "review")
+}
+
+// Where review-notifier in dotfiles kept its state, moved once by install so no request is notified again.
+func legacyStateDir(home string) string {
+	return filepath.Join(stateHome(home), "review-notifier")
+}
+
+func stateHome(home string) string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, "review-notifier")
+		return xdg
 	}
-	return filepath.Join(home, ".local", "state", "review-notifier")
+	return filepath.Join(home, ".local", "state")
 }
 
 type Store struct {
@@ -133,7 +142,7 @@ func lockDir(dir string) (*os.File, error) {
 		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return nil, errors.Join(fmt.Errorf("another review-notifier is running (%s): %w", f.Name(), err), f.Close())
+		return nil, errors.Join(fmt.Errorf("another pr-wake review is running (%s): %w", f.Name(), err), f.Close())
 	}
 	return f, nil
 }

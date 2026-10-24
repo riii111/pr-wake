@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"context"
@@ -202,7 +202,7 @@ func newDaemonFixture(t *testing.T) *daemonFixture {
 		return []byte(prJSON(parts[1]+"/"+parts[2], n)), nil
 	})
 	f.r.on("alerter", func(args []string) ([]byte, error) {
-		return []byte(f.answer(strings.TrimPrefix(argValue(t, args, "--group"), "review-notifier:"))), nil
+		return []byte(f.answer(strings.TrimPrefix(argValue(t, args, "--group"), "pr-wake:"))), nil
 	})
 	checkout := cfg.Repositories["acme/app"]
 	f.r.reply("git -C "+checkout+" config --get remote.origin.url", "git@github.com:acme/app.git\n")
@@ -397,7 +397,7 @@ func TestDaemonClosesTheOldestNotificationForANewRequest(t *testing.T) {
 			var mu sync.Mutex
 			var closed []string
 			f.r.onCtx("alerter", func(ctx context.Context, args []string) ([]byte, error) {
-				key := strings.TrimPrefix(argValue(t, args, "--group"), "review-notifier:")
+				key := strings.TrimPrefix(argValue(t, args, "--group"), "pr-wake:")
 				if strings.HasPrefix(key, "acme/app#4@") {
 					return []byte(`{"activationType":"closed"}`), nil
 				}

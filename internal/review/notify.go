@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"context"
@@ -99,7 +99,7 @@ func alerterArgs(n Notice, choices []Choice, timeoutSeconds int) []string {
 		"--message", fmt.Sprintf("%s\n%s #%d", requester, n.PR.Repo, n.PR.Number),
 		"--actions", strings.Join(labels, ","),
 		"--close-label", declineLabel,
-		"--group", "review-notifier:" + n.Key,
+		"--group", "pr-wake:" + n.Key,
 		"--timeout", strconv.Itoa(timeoutSeconds),
 		"--json",
 	}

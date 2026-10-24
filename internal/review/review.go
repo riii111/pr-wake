@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"context"
@@ -8,31 +8,22 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/signal"
 	"os/user"
 	"path/filepath"
 	"sort"
-	"syscall"
 )
 
-var errUsage = errors.New(`usage:
-  review-notifier run [--config PATH]
-  review-notifier status
-  review-notifier check [--config PATH]
-  review-notifier smoke --pr OWNER/REPO#N|URL [--requester LOGIN] [--no-open] [--config PATH]`)
+var ErrUsage = errors.New(`usage:
+  pr-wake review run [--config PATH]
+  pr-wake review status
+  pr-wake review check [--config PATH]
+  pr-wake review smoke --pr OWNER/REPO#N|URL [--requester LOGIN] [--no-open] [--config PATH]
+  pr-wake review install|uninstall|start|stop
+  pr-wake review logs [-f]`)
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "review-notifier:", err)
-		os.Exit(1)
-	}
-}
-
-func run(ctx context.Context, args []string, stdout io.Writer) error {
+func Run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errUsage
+		return ErrUsage
 	}
 	env, err := currentEnv()
 	if err != nil {
@@ -42,13 +33,23 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	case "run":
 		return runWatch(ctx, args[1:], env)
 	case "status":
-		return runStatus(env, stdout)
+		return runAgentStatus(env, stdout)
 	case "check":
 		return runCheck(ctx, args[1:], env, execRunner{}, stdout)
 	case "smoke":
 		return runSmoke(ctx, args[1:], env, execRunner{}, stdout)
+	case "install":
+		return install(ctx, env, stdout)
+	case "uninstall":
+		return uninstall(env, stdout)
+	case "start":
+		return start(env, stdout)
+	case "stop":
+		return stop(env, stdout)
+	case "logs":
+		return logs(args[1:], env, stdout)
 	default:
-		return errUsage
+		return ErrUsage
 	}
 }
 

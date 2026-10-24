@@ -1,6 +1,25 @@
-# review-notifier
+# pr-wake
 
-自分宛てのGitHubレビュー依頼をmacOSに通知し、選んだSkillのプロンプトを入力済みのCodexスレッドを開く。
+PRで起きたことを、自分とAIのタスクワーカーへ届ける常駐ツール。macOS専用。
+
+- `pr-wake review`: 自分宛てのGitHubレビュー依頼を通知し、選んだSkillのプロンプトを入力済みのCodexスレッドを開く
+- `pr-wake watch`: harnexusの`harnexus-task watch`を常駐させ、各タスクワーカーへ自分のPRのレビューコメント・競合・必須チェックの失敗を伝える
+
+2つは別々の常駐プロセスとして動き、片方だけ止められる。
+
+## 導入
+
+Go 1.24以上で`~/.local/bin`にビルドする。
+更新時も同じコマンドでビルドし、使っている機能ごとに`install`をやり直す。
+
+```bash
+go build -o ~/.local/bin/pr-wake ./cmd/pr-wake
+```
+
+常駐プロセスはビルドした実行ファイルのパスを記録するので、ビルド先を変えたら`install`をやり直す。
+
+## review
+
 レビューするかの判断と送信は自分で行う。
 
 ```mermaid
@@ -14,7 +33,7 @@ flowchart LR
   A -->|見送る・閉じる・放置・入れ替え| S
 ```
 
-## 動作
+### 動作
 
 **通知**
 
@@ -58,42 +77,43 @@ cloneや別のディレクトリでの起動はしない。
 GitHubの通知の既読化、レビュー投稿、Approve、マージは行わない。
 モデル・推論の強さ・スレッド名は指定できず、Codex Appの既定値になる。
 
-## 導入
+### 導入
 
 alerterはnix-darwinのHomebrew（`vjeantet/tap/alerter`）で入る。
 
 ```bash
-mkdir -p ~/.config/review-notifier
-cp ~/ghq/github.com/riii111/dotfiles/tools/review-notifier/config.example.json ~/.config/review-notifier/config.json
-# config.jsonを編集してから
-~/bin/dotctl review-notifier install
+mkdir -p ~/.config/pr-wake
+cp config.example.json ~/.config/pr-wake/review.json
+# review.jsonを編集してから
+pr-wake review install
 ```
 
 `install`は設定・コマンド・GitHub APIを確認し、問題がなければ常駐を始める。
-更新時も同じコマンドを実行する。
+dotfilesのreview-notifierが残っていれば、止めて実行ファイルを消し、設定と通知済みの記録を引き継ぐ。
+review-notifierが作ったworktreeは元の場所に残る。
 初回の通知時に、macOSでalerterの通知を許可する。
 
 ```bash
-~/bin/dotctl review-notifier status     # 常駐の状態と最近の依頼
-~/bin/dotctl review-notifier logs -f    # ログ
-~/bin/dotctl review-notifier stop
-~/bin/dotctl review-notifier start      # 開始、または再起動
-~/bin/dotctl review-notifier uninstall  # 設定・状態・ログ・worktreeは残す
+pr-wake review status     # 常駐の状態と最近の依頼
+pr-wake review logs -f    # ログ
+pr-wake review stop
+pr-wake review start      # 開始、または再起動
+pr-wake review uninstall  # 設定・状態・ログ・worktreeは残す
 ```
 
-## 設定
+### 設定
 
-設定を変えたら`dotctl review-notifier start`で再起動する。
+設定を変えたら`pr-wake review start`で再起動する。
 知らない項目があるとエラーになる。
 
 ```text
-~/.config/review-notifier/config.json      端末ごとの設定（Git管理しない）
+~/.config/pr-wake/review.json              端末ごとの設定（Git管理しない）
 ├── repositories                           owner/repo → ローカルcheckoutの絶対パス（~/ 可）
 ├── teams                                  通知するチーム宛て依頼（org/team-slug）。空なら自分宛てだけ
 ├── pollIntervalSeconds                    確認間隔。既定60、最小30
 ├── notificationTimeoutSeconds             通知を閉じるまでの秒数。既定1800
 ├── maxNotifications                       応答待ちで同時に出す通知の数。既定3、最大10
-├── worktreeRoot                           worktreeの置き場所。既定 ~/.local/share/review-notifier/worktrees
+├── worktreeRoot                           worktreeの置き場所。既定 ~/.local/share/pr-wake/worktrees
 ├── commands                               gh・git・alerter・open・osascriptの絶対パス。省略時は自動で探す
 └── choices[]                              通知メニューに並ぶ順の選択肢。追加・削除・並べ替えはここだけで反映
     ├── id                                 英小文字・数字・-
@@ -110,20 +130,50 @@ cp ~/ghq/github.com/riii111/dotfiles/tools/review-notifier/config.example.json ~
 ```
 
 ```text
-~/.local/state/review-notifier/state.json  通知済み・見送りなどの記録。消すと初回起動と同じ扱い
-~/Library/Logs/review-notifier.log         ログ
-~/.local/share/review-notifier/worktrees/  <owner>/<repo>/pr-<番号>-<SHA先頭12桁>（2つ目以降は -2 など）
+~/.local/state/pr-wake/review/state.json   通知済み・見送りなどの記録。消すと初回起動と同じ扱い
+~/Library/Logs/pr-wake/review.log          ログ
+~/.local/share/pr-wake/worktrees/          <owner>/<repo>/pr-<番号>-<SHA先頭12桁>（2つ目以降は -2 など）
 ```
 
-## 試す
+### 試す
 
 常駐させずに、指定したPRで通知からスレッドを開くまでを試せる。
 記録は残らない。
 
 ```bash
-review-notifier check                                                         # 設定・コマンド・GitHub APIの確認
-review-notifier smoke --pr owner/repo#123 --requester someone
-review-notifier smoke --pr https://github.com/owner/repo/pull/123 --no-open  # 開く代わりにリンクを表示する
+pr-wake review check                                                         # 設定・コマンド・GitHub APIの確認
+pr-wake review smoke --pr owner/repo#123 --requester someone
+pr-wake review smoke --pr https://github.com/owner/repo/pull/123 --no-open  # 開く代わりにリンクを表示する
 ```
 
 不要になったworktreeは`git -C <checkout> worktree remove <path>`で消す。
+
+## watch
+
+監視の本体は[harnexus](https://github.com/riii111/harnexus)の`harnexus-task watch`で、pr-wakeは常駐の登録と状態の表示だけを受け持つ。
+先にharnexusのcheckoutで`bun run install:task`を実行し、`~/.local/bin/harnexus-task`を入れておく。
+設定は`~/.config/harnexus/pr-watch.json`に、harnexusのREADMEに従って書く。
+待ち合わせるAIレビューbotは、この設定の`reviewBots`で指定する。
+
+```bash
+pr-wake watch install
+```
+
+`install`は`harnexus-task watch --dry-run`で設定・ghのアカウント・GitHub APIを確認し、問題がなければ常駐を始める。
+dotfilesで登録した常駐（`io.github.riii111.pr-watch`）が残っていれば、止めて置き換える。
+
+メッセージはすべて1つのチャットから送られる。
+導入後、送信用に残しておくCodexのチャットで`harnexus-task watch --sender`を一度実行する。
+それまでは何も送られない。
+
+```bash
+pr-wake watch status                   # 常駐の状態と監視中のPR（harnexus-task watch --statusを読む）
+pr-wake watch logs -f
+pr-wake watch stop
+pr-wake watch start                    # 開始、または再起動
+pr-wake watch uninstall                # 設定・状態・ログは残す
+harnexus-task watch --dry-run          # 送らずに、送る内容を表示する
+harnexus-task watch --link <PR URL>    # 任意のチャットから、そのPRの出来事を受け取るよう登録する
+```
+
+ログは`~/Library/Logs/pr-wake/watch.log`に出る。

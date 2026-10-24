@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"context"
@@ -132,7 +132,7 @@ func TestConfigRejectsSettingsThatWouldMisbehave(t *testing.T) {
 
 func TestExampleConfigLoads(t *testing.T) {
 	env := testEnv(t, "adr-review", "code-review")
-	if _, err := loadConfig("config.example.json", env); err != nil {
+	if _, err := loadConfig("../../config.example.json", env); err != nil {
 		t.Fatal(err)
 	}
 }

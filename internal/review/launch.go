@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"context"
@@ -42,6 +42,6 @@ func notifyFailure(ctx context.Context, r Runner, osascript, subtitle, message s
 		"-e", "on run argv",
 		"-e", "display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv)",
 		"-e", "end run",
-		message, "review-notifier", subtitle)
+		message, "pr-wake", subtitle)
 	return err
 }
