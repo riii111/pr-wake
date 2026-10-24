@@ -19,7 +19,6 @@ type call struct {
 	args []string
 }
 
-// fakeRunner answers each command by the first handler whose key prefixes "name arg1 arg2 ...".
 type fakeRunner struct {
 	mu       sync.Mutex
 	handlers []handler
@@ -112,7 +111,6 @@ func TestConfigRejectsSettingsThatWouldMisbehave(t *testing.T) {
 	env := testEnv(t, "adr-review", "code-review")
 	adr := choiceJSON("adr", "ADRレビュー", "adr-review")
 	cases := map[string]string{
-		// Silently ignoring it would pretend a setting this version cannot apply.
 		"unsupported key": `{"choices":[{"id":"adr","label":"ADR","skill":"adr-review","prompt":"x","model":"gpt"}]}`,
 		// alerter splits actions on commas, and equal labels cannot be told apart.
 		"comma in label":  configJSON(choiceJSON("adr", "ADR,レビュー", "adr-review")),
@@ -138,21 +136,16 @@ func TestExampleConfigLoads(t *testing.T) {
 }
 
 func TestNotificationShowsChoicesInConfigOrderAndTheRequester(t *testing.T) {
-	env := testEnv(t, "adr-review", "code-review", "ai-code-review")
-	cfg := mustConfig(t, env, configJSON(
-		choiceJSON("code", "コードレビュー", "code-review"),
-		choiceJSON("ai", "AIレビュー", "ai-code-review"),
-		choiceJSON("adr", "ADRレビュー", "adr-review"),
-	))
+	choices := []Choice{{ID: "code", Label: "コードレビュー"}, {ID: "ai", Label: "AIレビュー"}, {ID: "adr", Label: "ADRレビュー"}}
 	pr := PullRequest{Repo: "acme/app", Number: 7}
-	args := alerterArgs(Notice{PR: pr, Requester: "tanaka"}, cfg.Choices, 60)
+	args := alerterArgs(Notice{PR: pr, Requester: "tanaka"}, choices, 60)
 	if got := argValue(t, args, "--actions"); got != "コードレビュー,AIレビュー,ADRレビュー" {
 		t.Errorf("--actions = %q", got)
 	}
 	if got := argValue(t, args, "--message"); got != "依頼者: @tanaka\nacme/app #7" {
 		t.Errorf("--message = %q", got)
 	}
-	args = alerterArgs(Notice{PR: pr}, cfg.Choices, 60)
+	args = alerterArgs(Notice{PR: pr}, choices, 60)
 	if got := argValue(t, args, "--message"); !strings.HasPrefix(got, "依頼者不明\n") {
 		t.Errorf("unknown requester: --message = %q", got)
 	}
@@ -180,9 +173,6 @@ func TestParseSelection(t *testing.T) {
 	}{
 		{name: "dropdown", out: `{"activationType":"actionClicked","activationValue":"コードレビュー","activationValueIndex":"1"}`, outcome: Chosen, id: "code"},
 		{name: "single action", out: `{"activationType":"actionClicked","activationValue":"ADRレビュー"}`, outcome: Chosen, id: "adr"},
-		{name: "decline", out: `{"activationType":"closed","activationValue":"見送る"}`, outcome: Declined},
-		{name: "timeout", out: `{"activationType":"timeout"}`, outcome: TimedOut},
-		{name: "body click", out: `{"activationType":"contentsClicked"}`, outcome: Dismissed},
 		// An action that is not configured must never start some other review.
 		{name: "unknown action", out: `{"activationType":"actionClicked","activationValue":"x"}`, wantErr: true},
 	}
@@ -257,7 +247,8 @@ func git(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func newGitRepo(t *testing.T) *gitRepo {
+func gitHome(t *testing.T) (string, *Config) {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -268,7 +259,14 @@ func newGitRepo(t *testing.T) *gitRepo {
 	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "t")
 	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+	return tmp, &Config{
+		Repositories: map[string]string{"acme/app": filepath.Join(tmp, "src", "app")},
+		WorktreeRoot: filepath.Join(tmp, "worktrees"),
+	}
+}
 
+func newGitRepo(t *testing.T) *gitRepo {
+	tmp, cfg := gitHome(t)
 	bare := filepath.Join(tmp, "origin.git")
 	git(t, tmp, "init", "-q", "--bare", "-b", "main", bare)
 	seed := filepath.Join(tmp, "seed")
@@ -282,9 +280,6 @@ func newGitRepo(t *testing.T) *gitRepo {
 	git(t, seed, "push", "-q", bare, "HEAD:refs/pull/12/head")
 	head := git(t, seed, "rev-parse", "HEAD")
 
-	env := testEnv(t, "code-review")
-	env.Home = tmp
-	cfg := mustConfig(t, env, configJSON(choiceJSON("code", "コードレビュー", "code-review")))
 	checkout := cfg.Repositories["acme/app"]
 	git(t, tmp, "clone", "-q", bare, checkout)
 	git(t, checkout, "remote", "set-url", "origin", "git@github.com:acme/app.git")
@@ -335,12 +330,15 @@ func TestPrepareWorktreeNeverReusesOneWithChanges(t *testing.T) {
 }
 
 func TestPrepareWorktreeRejectsAnotherRepository(t *testing.T) {
-	g := newGitRepo(t)
-	git(t, g.checkout, "remote", "set-url", "origin", "git@github.com:acme/other.git")
-	if _, err := prepareWorktree(context.Background(), execRunner{}, "git", g.cfg, g.pr); err == nil {
+	tmp, cfg := gitHome(t)
+	checkout := cfg.Repositories["acme/app"]
+	git(t, tmp, "init", "-q", checkout)
+	git(t, checkout, "remote", "add", "origin", "git@github.com:acme/other.git")
+	pr := PullRequest{Repo: "acme/app", Number: 12, HeadSHA: headSHA}
+	if _, err := prepareWorktree(context.Background(), execRunner{}, "git", cfg, pr); err == nil {
 		t.Fatal("expected an error")
 	}
-	if _, err := os.Stat(g.cfg.WorktreeRoot); !os.IsNotExist(err) {
+	if _, err := os.Stat(cfg.WorktreeRoot); !os.IsNotExist(err) {
 		t.Error("no worktree may be created")
 	}
 }

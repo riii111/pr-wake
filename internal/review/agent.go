@@ -39,10 +39,7 @@ func install(ctx context.Context, env Env, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	a := agent(env)
-	a.Program = []string{exe, "review", "run"}
-	a.Env = xdgEnv()
-	return launchagent.Install(a, u.Username, stdout)
+	return launchagent.Install(installedAgent(env, exe), u.Username, stdout)
 }
 
 func uninstall(env Env, stdout io.Writer) error {
@@ -85,6 +82,13 @@ func agent(env Env) launchagent.Agent {
 		Log:         filepath.Join(env.Home, "Library", "Logs", "pr-wake", "review.log"),
 		ProcessType: "Interactive",
 	}
+}
+
+func installedAgent(env Env, exe string) launchagent.Agent {
+	a := agent(env)
+	a.Program = []string{exe, "review", "run"}
+	a.Env = xdgEnv()
+	return a
 }
 
 // launchd does not inherit the installer's XDG paths.

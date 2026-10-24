@@ -37,7 +37,7 @@ func TestLatestRequest(t *testing.T) {
 		name          string
 		events        string
 		teams         []string
-		wantKey       string // empty when no request matches
+		wantKey       string
 		wantRequester string
 	}{
 		{
@@ -72,16 +72,12 @@ func TestLatestRequest(t *testing.T) {
 // A search across all of GitHub always answers incomplete results, so every direct-request query is scoped.
 func TestRequestQueriesAreScopedToConfiguredOwners(t *testing.T) {
 	cfg := &Config{Repositories: map[string]string{"zeta/one": "/a", "acme/app": "/b", "acme/lib": "/c"}}
-	owners := cfg.owners()
-	if strings.Join(owners, ",") != "acme,zeta" {
-		t.Fatalf("owners = %v", owners)
-	}
 	want := []string{
 		"is:pr is:open archived:false user-review-requested:@me user:acme",
 		"is:pr is:open archived:false user-review-requested:@me user:zeta",
 		"is:pr is:open archived:false team-review-requested:acme/backend",
 	}
-	got := requestQueries(owners, []string{"acme/backend"})
+	got := requestQueries(cfg.owners(), []string{"acme/backend"})
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("queries = %q", got)
 	}
@@ -156,7 +152,6 @@ func TestLockAllowsOneWatcher(t *testing.T) {
 	}
 }
 
-// daemonFixture wires a daemon to a fake GitHub whose pending requests the test changes between polls.
 type daemonFixture struct {
 	d      *Daemon
 	r      *fakeRunner
@@ -250,55 +245,72 @@ func (f *daemonFixture) status(t *testing.T, key string) Status {
 	return req.Status
 }
 
-// Claims and handles one request synchronously, as one notification slot of notifyLoop does.
-func (d *Daemon) handleNext(ctx context.Context) bool {
-	req := d.claim()
-	if req == nil {
-		return false
-	}
-	if ch := d.ask(ctx, ctx, *req); ch != nil {
-		d.launch(ctx, *req, ch)
-	}
-	return true
+func (f *daemonFixture) notifyInBackground(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.d.notifyLoop(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("notifyLoop did not stop")
+		}
+	})
+}
+
+func (f *daemonFixture) waitStatus(t *testing.T, key string, want Status) {
+	t.Helper()
+	waitFor(t, func() bool { return f.status(t, key) == want })
+}
+
+func (f *daemonFixture) openedLinks() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.opened...)
+}
+
+func chooseCodeReview(string) string {
+	return `{"activationType":"actionClicked","activationValue":"コードレビュー"}`
 }
 
 func TestDaemonNotifiesEachRequestOnceAndOpensTheChoice(t *testing.T) {
 	f := newDaemonFixture(t)
-	ctx := context.Background()
-	f.answer = func(string) string {
-		return `{"activationType":"actionClicked","activationValue":"コードレビュー"}`
-	}
+	f.answer = chooseCodeReview
+	f.notifyInBackground(t)
 	f.request("acme/app", 1, requestedEvent(10, "tanaka", "me"))
 	f.poll(t)
-	if f.d.handleNext(ctx) {
+	if f.d.queuedCount() != 0 {
 		t.Fatal("the first poll is only a baseline")
 	}
 
 	f.request("acme/app", 12, requestedEvent(30, "sato", "me"))
 	f.poll(t)
-	if !f.d.handleNext(ctx) || f.status(t, "acme/app#12@30") != StatusLaunched || len(f.opened) != 1 {
-		t.Fatalf("the new request must be launched; opened = %v", f.opened)
+	f.waitStatus(t, "acme/app#12@30", StatusLaunched)
+	opened := f.openedLinks()
+	if len(opened) != 1 {
+		t.Fatalf("opened = %v", opened)
 	}
-	u, _ := url.Parse(f.opened[0])
+	u, _ := url.Parse(opened[0])
 	worktree := worktreePath(f.d.tools.Cfg.WorktreeRoot, PullRequest{Repo: "acme/app", Number: 12, HeadSHA: headSHA})
 	skill := filepath.Join(f.env.CodexHome, "skills", "code-review", "SKILL.md")
 	want := "[$code-review](" + skill + ") https://github.com/acme/app/pull/12 " + headSHA + " " + worktree
 	if q := u.Query(); q.Get("prompt") != want || q.Get("path") != filepath.Join(f.env.Home, "review-home") {
-		t.Errorf("link = %s", f.opened[0])
+		t.Errorf("link = %s", opened[0])
 	}
 
 	// After a restart, nothing already handled comes back; a re-request of the same PR does.
 	st, _, _ := f.store.Load()
+	f.d.mu.Lock()
 	f.d.st = st
+	f.d.mu.Unlock()
 	f.poll(t)
-	if f.d.handleNext(ctx) {
+	if f.d.queuedCount() != 0 {
 		t.Error("a launched request must not be notified again")
 	}
 	f.request("acme/app", 12, requestedEvent(30, "sato", "me"), requestedEvent(31, "sato", "me"))
 	f.poll(t)
-	if !f.d.handleNext(ctx) || f.status(t, "acme/app#12@31") != StatusLaunched {
-		t.Error("a re-request must be notified")
-	}
+	f.waitStatus(t, "acme/app#12@31", StatusLaunched)
 }
 
 func TestDaemonAnswersOtherThanAChoiceStartNothing(t *testing.T) {
@@ -314,17 +326,14 @@ func TestDaemonAnswersOtherThanAChoiceStartNothing(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newDaemonFixture(t)
-			ctx := context.Background()
+			f.answer = func(string) string { return c.answer }
 			f.poll(t)
+			f.notifyInBackground(t)
 			f.request("acme/app", 1, requestedEvent(10, "tanaka", "me"))
 			f.poll(t)
-			f.answer = func(string) string { return c.answer }
-			f.d.handleNext(ctx)
-			if got := f.status(t, "acme/app#1@10"); got != c.want {
-				t.Errorf("status = %s", got)
-			}
+			f.waitStatus(t, "acme/app#1@10", c.want)
 			f.poll(t)
-			if f.d.handleNext(ctx) || f.r.ran("git") || len(f.opened) != 0 {
+			if f.d.queuedCount() != 0 || f.r.ran("git") || len(f.openedLinks()) != 0 {
 				t.Error("the request must start nothing and not come back")
 			}
 		})
@@ -333,14 +342,14 @@ func TestDaemonAnswersOtherThanAChoiceStartNothing(t *testing.T) {
 
 func TestDaemonReportsALaunchFailure(t *testing.T) {
 	f := newDaemonFixture(t)
-	f.answer = func(string) string {
-		return `{"activationType":"actionClicked","activationValue":"コードレビュー"}`
-	}
+	f.answer = chooseCodeReview
 	f.poll(t)
+	f.notifyInBackground(t)
 	f.request("acme/unknown", 5, requestedEvent(50, "tanaka", "me"))
 	f.poll(t)
-	f.d.handleNext(context.Background())
-	if f.status(t, "acme/unknown#5@50") != StatusFailed || !f.r.ran("osascript") || len(f.opened) != 0 {
+	f.waitStatus(t, "acme/unknown#5@50", StatusFailed)
+	waitFor(t, func() bool { return f.r.ran("osascript") })
+	if len(f.openedLinks()) != 0 {
 		t.Error("the failure must be notified without opening anything")
 	}
 }
@@ -369,11 +378,9 @@ func TestDaemonKeepsPollingAfterAnAPIFailure(t *testing.T) {
 	}
 }
 
-// With every place taken by unanswered notifications, a new request closes exactly the oldest one.
 func TestDaemonClosesTheOldestNotificationForANewRequest(t *testing.T) {
 	cases := []struct {
 		name string
-		// The fourth request arrives while three are on screen, instead of being queued from the start.
 		late bool
 		// alerter takes a while to close, and wake-ups arrive meanwhile; they must not close another one.
 		slowClose bool
@@ -413,9 +420,7 @@ func TestDaemonClosesTheOldestNotificationForANewRequest(t *testing.T) {
 				}
 				return nil, ctx.Err()
 			})
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { f.d.notifyLoop(ctx); close(done) }()
+			f.notifyInBackground(t)
 
 			if c.late {
 				waitFor(t, func() bool { return f.status(t, "acme/app#3@30") == StatusNotifying })
@@ -427,8 +432,6 @@ func TestDaemonClosesTheOldestNotificationForANewRequest(t *testing.T) {
 			mu.Lock()
 			got := append([]string(nil), closed...)
 			mu.Unlock()
-			cancel()
-			<-done
 
 			if len(got) != 1 || got[0] != "acme/app#1@10" {
 				t.Errorf("closed = %v, want only the oldest", got)

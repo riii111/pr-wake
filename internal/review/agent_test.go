@@ -89,13 +89,12 @@ func TestLegacyStateMovesOnlyAfterTheOldWatcherReleasesItsLock(t *testing.T) {
 	_ = lock.Close()
 }
 
-func TestAgentReadsTheXDGHomesInstallUsed(t *testing.T) {
+func TestInstalledAgentRunsWithTheXDGHomesInstallUsed(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/Users/me/conf")
 	t.Setenv("XDG_STATE_HOME", "/Users/me/st")
-	a := agent(Env{Home: "/Users/me"})
-	a.Env = xdgEnv()
-	plist := string(launchagent.Render(a, "me"))
+	plist := string(launchagent.Render(installedAgent(Env{Home: "/Users/me"}, "/Users/me/.local/bin/pr-wake"), "me"))
 	for _, want := range []string{
+		"<string>/Users/me/.local/bin/pr-wake</string>\n\t\t<string>review</string>\n\t\t<string>run</string>",
 		"<key>XDG_CONFIG_HOME</key>\n\t\t<string>/Users/me/conf</string>",
 		"<key>XDG_STATE_HOME</key>\n\t\t<string>/Users/me/st</string>",
 	} {
@@ -106,7 +105,7 @@ func TestAgentReadsTheXDGHomesInstallUsed(t *testing.T) {
 
 	t.Setenv("XDG_CONFIG_HOME", "relative")
 	t.Setenv("XDG_STATE_HOME", "")
-	if env := xdgEnv(); len(env) != 0 {
+	if env := installedAgent(Env{Home: "/Users/me"}, "pr-wake").Env; len(env) != 0 {
 		t.Fatalf("env = %v; a home the code ignores must not be passed on", env)
 	}
 }
