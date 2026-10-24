@@ -65,8 +65,7 @@ func defaultStateDir(home string) string {
 	return filepath.Join(stateHome(home), "pr-wake", "review")
 }
 
-// Where review-notifier in dotfiles kept its state, moved once by install so no request is notified again.
-// Its plist passed no XDG variables, so the path is under home whatever the installing shell sets.
+// review-notifier's plist passed no XDG variables, so its state is always under home.
 func legacyStateDir(home string) string {
 	return filepath.Join(home, ".local", "state", "review-notifier")
 }
@@ -106,7 +105,7 @@ func (s Store) Load() (*State, bool, error) {
 	return st, true, nil
 }
 
-// Written to a temporary file and renamed, so a crash leaves either the old or the new state.
+// Rename a complete temporary file so readers never see partial JSON.
 func (s Store) Save(st *State) error {
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -119,7 +118,6 @@ func (s Store) Save(st *State) error {
 	if err != nil {
 		return err
 	}
-	// Fails harmlessly once the rename has moved the file.
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
 		return errors.Join(err, tmp.Close())
@@ -167,7 +165,6 @@ func lockDir(dir string) (*os.File, error) {
 	return f, nil
 }
 
-// Records one poll. The first poll of a new state only records a baseline.
 func (st *State) applyPoll(found []Found, now time.Time, baseline bool) []string {
 	active := map[string]bool{}
 	activePR := map[string]bool{}
@@ -218,8 +215,7 @@ func (st *State) nextQueued() *Request {
 	return next
 }
 
-// A notification or launch cut short by a crash or restart. A shown notification is shown again;
-// a launch is never repeated because the App may already have opened the chat.
+// Retry interrupted notifications, but never a launch that may already have opened a chat.
 func (st *State) recover(now time.Time) {
 	for _, req := range st.Requests {
 		switch req.Status {

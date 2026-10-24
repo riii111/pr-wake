@@ -21,16 +21,13 @@ type Config struct {
 	PollIntervalSeconds        int      `json:"pollIntervalSeconds"`
 	WorktreeRoot               string   `json:"worktreeRoot"`
 	NotificationTimeoutSeconds int      `json:"notificationTimeoutSeconds"`
-	// Folder every review chat opens in, shared with the harnexus reviewers. A chat in each worktree
-	// would add one Codex project, and one trust prompt, per PR.
-	ChatHome string `json:"-"`
-	// Notifications waiting for an answer at the same time; more requests wait in the queue.
+	// Share a chat home to avoid one Codex project and trust prompt per PR.
+	ChatHome         string   `json:"-"`
 	MaxNotifications int      `json:"maxNotifications"`
 	Commands         Commands `json:"commands"`
 	Choices          []Choice `json:"choices"`
 }
 
-// Sorted owners of the configured repositories.
 func (c *Config) owners() []string {
 	seen := map[string]bool{}
 	var owners []string
@@ -87,8 +84,7 @@ func defaultConfigPath(home string) string {
 	return filepath.Join(configHome(home), "pr-wake", "review.json")
 }
 
-// Where review-notifier in dotfiles kept its config, read once by install to carry it over.
-// Its plist passed no XDG variables, so the path is under home whatever the installing shell sets.
+// review-notifier's plist passed no XDG variables, so its config is always under home.
 func legacyConfigPath(home string) string {
 	return filepath.Join(home, ".config", "review-notifier", "config.json")
 }

@@ -93,7 +93,6 @@ func runWatch(ctx context.Context, args []string, env Env) error {
 	if err != nil {
 		return err
 	}
-	// Closing releases the lock; the process is ending either way.
 	defer func() { _ = lock.Close() }()
 	store := Store{path: filepath.Join(dir, "state.json")}
 	st, _, err := store.Load()
@@ -145,7 +144,6 @@ func runStatus(env Env, stdout io.Writer) error {
 	return out.err
 }
 
-// Checks the config, the commands and that the GitHub API answers the queries the watcher uses.
 func runCheck(ctx context.Context, args []string, env Env, r Runner, stdout io.Writer) error {
 	out := &printer{w: stdout}
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
@@ -192,7 +190,6 @@ func runCheck(ctx context.Context, args []string, env Env, r Runner, stdout io.W
 	return out.err
 }
 
-// Notification, selection, worktree and deep link for one given PR, without watching GitHub or keeping state.
 func runSmoke(ctx context.Context, args []string, env Env, r Runner, stdout io.Writer) error {
 	out := &printer{w: stdout}
 	fs := flag.NewFlagSet("smoke", flag.ContinueOnError)
@@ -230,7 +227,6 @@ func runSmoke(ctx context.Context, args []string, env Env, r Runner, stdout io.W
 	out.printf("choice: %s (%s)\n", sel.Choice.ID, sel.Choice.Skill)
 
 	if *noOpen {
-		// The steps of launch, stopping before the App is opened.
 		path, err := prepareWorktree(ctx, r, t.Cmds.Git, t.Cfg, pr)
 		if err != nil {
 			return err

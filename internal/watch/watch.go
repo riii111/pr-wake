@@ -83,7 +83,6 @@ func install(home string, stdout io.Writer) error {
 		}
 	}
 	// Validate before replacing the legacy agent so a failed check leaves it running.
-	// The dry run lists every comment of every open PR, so only its failure is shown.
 	if err := launchagent.RunQuiet(stdout, binaryPath(home), "watch", "--dry-run"); err != nil {
 		return err
 	}

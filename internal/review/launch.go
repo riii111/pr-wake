@@ -16,7 +16,6 @@ type Launched struct {
 	Worktree string
 }
 
-// Reads the PR as it is when the choice was made, pins a worktree to that head and opens the prefilled chat.
 func launch(ctx context.Context, t Tools, ch *Choice, repo string, number int, requester string) (Launched, error) {
 	pr, err := fetchPR(ctx, t.R, t.Cmds.GH, repo, number)
 	if err != nil {

@@ -11,8 +11,7 @@ import (
 	"strings"
 )
 
-// A review request is one review_requested event, so a re-request of the same PR is a new request
-// while comments and pushes keep the key unchanged.
+// Key requests by review_requested events so only re-requests trigger another notification.
 type Found struct {
 	Key       string `json:"key"`
 	Repo      string `json:"repo"`
@@ -27,7 +26,6 @@ type cachedPR struct {
 	Found     *Found `json:"found,omitempty"`
 }
 
-// Lists the pending requests. Events are read again only for PRs updated since the last poll.
 func pendingRequests(ctx context.Context, r Runner, gh, login string, owners, teams []string, cache map[string]cachedPR) ([]Found, map[string]cachedPR, error) {
 	hits := map[string]searchHit{}
 	for _, q := range requestQueries(owners, teams) {
@@ -72,9 +70,7 @@ func pendingRequests(ctx context.Context, r Runner, gh, login string, owners, te
 	return result, next, nil
 }
 
-// Search lists what is pending now, independent of whether a notification was read on another device.
-// A search across all of GitHub always times out into incomplete results, so each query is limited to
-// the owners of the configured repositories (user: matches organizations too).
+// Scope searches by owner to avoid incomplete results from broad GitHub searches (user: matches organizations too).
 func requestQueries(owners, teams []string) []string {
 	var queries []string
 	for _, owner := range owners {
@@ -165,8 +161,7 @@ func currentLogin(ctx context.Context, r Runner, gh string) (string, error) {
 	return user.Login, nil
 }
 
-// The latest review_requested event addressed to the login or to one of the configured teams.
-// The requester is the person who asked for the review, never the PR author as a stand-in.
+// Use the review requester, never the PR author, as the notification's requester.
 func latestRequest(events []issueEvent, hit searchHit, login string, teams []string) (Found, bool) {
 	owner, _, _ := strings.Cut(hit.Repo, "/")
 	var best *issueEvent
@@ -176,12 +171,12 @@ func latestRequest(events []issueEvent, hit searchHit, login string, teams []str
 		if ev.Event != "review_requested" {
 			continue
 		}
+		mine := ev.RequestedReviewer != nil && strings.EqualFold(ev.RequestedReviewer.Login, login)
 		matched := ""
-		switch {
-		case ev.RequestedReviewer != nil && strings.EqualFold(ev.RequestedReviewer.Login, login):
-		case ev.RequestedTeam != nil && configuredTeam(teams, owner, ev.RequestedTeam.Slug) != "":
+		if !mine && ev.RequestedTeam != nil {
 			matched = configuredTeam(teams, owner, ev.RequestedTeam.Slug)
-		default:
+		}
+		if !mine && matched == "" {
 			continue
 		}
 		if best == nil || ev.ID > best.ID {

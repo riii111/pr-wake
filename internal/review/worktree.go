@@ -11,8 +11,7 @@ import (
 	"strings"
 )
 
-// Creates a detached worktree at the PR head, or returns a clean one an earlier selection created.
-// Only objects are fetched into the checkout; its branches, HEAD and working tree are left alone.
+// Fetch objects without changing the checkout's branch, HEAD, or working files.
 func prepareWorktree(ctx context.Context, r Runner, git string, cfg *Config, pr PullRequest) (string, error) {
 	checkout, ok := lookupRepo(cfg.Repositories, pr.Repo)
 	if !ok {
@@ -58,10 +57,9 @@ func prepareWorktree(ctx context.Context, r Runner, git string, cfg *Config, pr 
 	return path, nil
 }
 
-// Earlier worktrees of the same head are kept with whatever was done in them, so one is reused
-// only while it is clean; otherwise the next numbered path is used.
 const maxWorktreeCopies = 20
 
+// Reuse only clean worktrees; preserve any existing changes.
 func pickWorktree(ctx context.Context, r Runner, git, base, sha string) (string, bool, error) {
 	for i := 1; i <= maxWorktreeCopies; i++ {
 		path := base

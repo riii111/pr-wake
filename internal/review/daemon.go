@@ -124,9 +124,7 @@ type shownNotice struct {
 	replacing bool
 }
 
-// Up to maxNotifications notifications wait for an answer at once. When they are all on screen and
-// another request is queued, the oldest one is closed as if it timed out, so a new request is never
-// held back by notifications left unanswered and the number of alerter processes stays bounded.
+// Bound alerter processes without letting unanswered notices block new requests.
 func (d *Daemon) notifyLoop(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -157,7 +155,6 @@ func (d *Daemon) notifyLoop(ctx context.Context) {
 					delete(shown, req.Key)
 					mu.Unlock()
 					cancel(nil)
-					// The freed place may let a queued request through.
 					d.signal()
 					if ch != nil {
 						d.launch(ctx, *req, ch)
@@ -174,7 +171,6 @@ func (d *Daemon) notifyLoop(ctx context.Context) {
 	}
 }
 
-// Shows one request and records the answer. Returns the choice when the user picked one.
 func (d *Daemon) ask(ctx, nctx context.Context, req Request) *Choice {
 	t := d.tools
 	notice := Notice{Key: req.Key, PR: PullRequest{Repo: req.Repo, Number: req.Number, Title: req.Title}, Requester: req.Requester, Team: req.Team}
@@ -214,8 +210,7 @@ func (d *Daemon) ask(ctx, nctx context.Context, req Request) *Choice {
 }
 
 func (d *Daemon) launch(ctx context.Context, req Request, ch *Choice) {
-	// Recorded before anything is opened, so a restart never opens the same request twice.
-	// Without that record nothing is opened.
+	// Persist the launch before opening the App to prevent duplicate chats after a restart.
 	if err := d.update(req.Key, func(r *Request) { r.Status, r.Choice, r.Error = StatusLaunching, ch.ID, "" }); err != nil {
 		d.log.Printf("%s: not launched: %v", req.Key, err)
 		d.reportFailure(ctx, req, err)
@@ -264,7 +259,6 @@ func replacing(shown map[string]*shownNotice) int {
 	return n
 }
 
-// Closes the longest-shown notification that is not already being closed.
 func (d *Daemon) replaceOldest(shown map[string]*shownNotice) {
 	var oldest *shownNotice
 	key := ""
@@ -281,8 +275,6 @@ func (d *Daemon) replaceOldest(shown map[string]*shownNotice) {
 	oldest.cancel(errReplaced)
 }
 
-// Marks the oldest queued request as being notified and returns a copy, or nil when none is queued
-// or the mark could not be saved.
 func (d *Daemon) claim() *Request {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -304,8 +296,7 @@ func (d *Daemon) claim() *Request {
 
 var errUnknownRequest = errors.New("request is not in the state")
 
-// Applies the change and saves it. On a failed save the change is undone in memory too,
-// so memory never claims a step the state file does not hold.
+// Keep in-memory state aligned with disk when a save fails.
 func (d *Daemon) update(key string, change func(*Request)) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
