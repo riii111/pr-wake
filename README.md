@@ -17,10 +17,12 @@ AIのタスクワーカーが出したPRにレビューコメント・競合・�
 sequenceDiagram
   participant W as タスクワーカー（Codex）
   participant G as GitHub
+  participant H as harnexus-task watch
   participant P as pr-wake watch
+  P->>H: 常駐させる
   W->>G: PRを出す
-  G-->>P: レビューコメント・競合・チェック失敗
-  P->>W: チャットへメッセージを送る
+  G-->>H: レビューコメント・競合・チェック失敗
+  H->>W: チャットへメッセージを送る
   W->>G: 対応してpush
 ```
 
