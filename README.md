@@ -5,8 +5,12 @@ GitHubのPRで起きたことを知らせる、macOS用の常駐ツール。
 コマンドの一覧は`pr-wake watch`・`pr-wake review`で表示される。
 
 ```bash
-go build -o ~/.local/bin/pr-wake ./cmd/pr-wake
+scripts/install.sh
 ```
+
+Go 1.24とBun 1.4.4で`pr-wake`と監視エンジン`pr-wake-engine`をビルドし、`~/.local/bin`へ入れる。
+`PREFIX=<dir>`を付けると`<dir>/bin`へ入れる。
+常駐の登録は変えないので、切り替えは`pr-wake watch install`などで行う。
 
 ## watch
 
@@ -17,22 +21,31 @@ AIのタスクワーカーが出したPRにレビューコメント・競合・�
 sequenceDiagram
   participant W as タスクワーカー（Codex）
   participant G as GitHub
-  participant H as harnexus-task watch
   participant P as pr-wake watch
-  P->>H: 常駐させる
+  participant H as harnexus
+  W->>P: watch linkでPRを紐づける
   W->>G: PRを出す
-  G-->>H: レビューコメント・競合・チェック失敗
+  G-->>P: レビューコメント・競合・チェック失敗
+  P->>H: 公開call socketで送信を頼む
   H->>W: チャットへメッセージを送る
   W->>G: 対応してpush
 ```
 
-監視の本体は[harnexus](https://github.com/riii111/harnexus)の`harnexus-task watch`で、pr-wakeはその常駐を管理する。
+監視の本体は同梱の`pr-wake-engine`で、`pr-wake watch`がその常駐を管理する。
+チャットへの送信には[harnexus](https://github.com/riii111/harnexus)の公開call socketを使う。
+設定は`~/.config/harnexus/pr-watch.json`、記録は`~/.local/state/taskctl/watch/`を使い、`harnexus-task watch`から移るときもそのまま引き継ぐ。
 
 ### 導入
 
-1. harnexusのREADMEに従って`harnexus-task`を入れ、`~/.config/harnexus/pr-watch.json`を書く
-2. `pr-wake watch install`を実行する
-3. 送信に使うCodexのチャットで`harnexus-task watch --sender`を一度実行する。それまでは何も送られない
+1. harnexusのAppをcall socketを有効にして起動し、`~/.config/harnexus/pr-watch.json`を書く
+2. `scripts/install.sh`で`pr-wake`と`pr-wake-engine`を入れる
+3. `pr-wake watch install`を実行する。`harnexus-task watch`を常駐させていた場合は、この常駐に置き換わる
+4. 送信に使うCodexのチャットで`pr-wake watch sender`を一度実行する。それまでは何も送られない
+
+ワーカーのチャットで`pr-wake watch link <PRのURL>`を実行すると、そのPRが監視される。
+別のチャットが監視中のPRは、`--take-over`を付けると引き継ぐ。
+`pr-wake watch status`で監視中のPRと送信元を、`--json`でその元のJSONを表示する。
+止まったPRは`pr-wake watch release <PRのURL>`で再開し、`pr-wake watch dry-run`で送る内容を記録を変えずに確かめられる。
 
 ## review
 

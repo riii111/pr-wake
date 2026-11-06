@@ -16,6 +16,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
+		var exit *watch.ExitCode
+		if errors.As(err, &exit) {
+			stop()
+			os.Exit(exit.Code)
+		}
 		fmt.Fprintln(os.Stderr, "pr-wake:", err)
 		os.Exit(1)
 	}
