@@ -32,6 +32,8 @@ export const watchForever = (
   deps: WatchDeps,
   sleep: (ms: number) => Promise<unknown>,
   replaced: () => Promise<boolean> = async () => false,
+  // Why the watch must end before its next cycle, such as a bridge it may no longer write to.
+  ended: () => string | null = () => null,
 ) =>
   Result.gen(async function* () {
     yield* Result.await(acquireLock(deps.paths.state));
@@ -39,6 +41,12 @@ export const watchForever = (
 
     const cycleDeps = { ...deps, over: deps.over ?? new Set<string>() };
     for (;;) {
+      const reason = ended();
+      if (reason !== null) {
+        deps.log({ event: "ended_watch", reason });
+        return refuse(reason);
+      }
+
       // Checked before each cycle, so no cycle runs on a program replaced while the watch slept.
       if (await replaced()) {
         deps.log({ event: "replaced" });

@@ -178,7 +178,9 @@ const fixture = async (config: Fields = {}, { firstRead = false } = {}) => {
     if (tool === "read_thread") {
       if (world.gone)
         return {
-          outcome: "tool_error",
+          version: 1,
+          outcome: "rejected",
+          message: "No Codex thread found for threadId",
           result: {
             content: [
               { type: "text", text: "No Codex thread found for threadId" },

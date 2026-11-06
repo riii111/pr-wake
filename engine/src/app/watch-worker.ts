@@ -43,8 +43,8 @@ export const codexWorkers = (
   },
 });
 
-// The outcomes the call socket reports for a request that never reached the app.
-const NOT_SENT = ["not_sent", "rejected", "invalid"];
+// The outcomes the call socket reports for a request that never reached the app; unsupported is the client's own, for a bridge it never wrote to.
+const NOT_SENT = ["not_sent", "rejected", "invalid", "unsupported"];
 
 const answerOf = (turn: Turn): Answer => ({
   status:
@@ -138,7 +138,9 @@ const readPage = async (
     ...(cursor === null ? {} : { cursor }),
   });
   const text = resultText(answer);
-  if (answer.outcome === "tool_error" && text.includes(NO_THREAD))
+  // Protocol 1 names a failed tool by its kind and repeats the app's text as the message.
+  const failure = typeof answer.message === "string" ? answer.message : text;
+  if (answer.outcome !== "done" && failure.includes(NO_THREAD))
     return { gone: true as const };
   if (answer.outcome !== "done") return null;
 
