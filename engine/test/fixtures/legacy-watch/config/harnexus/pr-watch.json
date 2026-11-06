@@ -1,0 +1,9 @@
+{
+ "repositories": {
+  "org/pay": {
+   "account": "owner"
+  }
+ },
+ "quietHours": null,
+ "instructions": "$task-worker"
+}
