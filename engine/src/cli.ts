@@ -1,7 +1,7 @@
 import { Result, TaggedError } from "better-result";
 
 import { type AppCall, callApp } from "./app/call.ts";
-import { type ProtocolCheck, unverifiedV0 } from "./app/protocol.ts";
+import { checkV1, type ProtocolCheck } from "./app/protocol.ts";
 import { programWatch } from "./app/watch-program.ts";
 import { codexWorkers, senderFor } from "./app/watch-worker.ts";
 import { type OptionTypes, parseOptions } from "./lib/args.boundary.ts";
@@ -9,7 +9,7 @@ import type { Fields } from "./lib/object.ts";
 import { runCommand } from "./lib/process.boundary.ts";
 import { type Env, watchPaths } from "./paths.ts";
 import { dryRun, release, status, watchForever } from "./prwatch/commands.ts";
-import { createGitHub, type RunCommand } from "./prwatch/github.ts";
+import { createGitHub, type GitHub } from "./prwatch/github.ts";
 import {
   githubPr,
   linkedChat,
@@ -23,7 +23,7 @@ export const NAME = "pr-wake-engine";
 
 export type EngineDeps = {
   env: Env;
-  runCommand: RunCommand;
+  github: GitHub;
   callApp: AppCall;
   checkProtocol: ProtocolCheck;
   // Only the watch writes as it runs, since it never returns.
@@ -35,10 +35,12 @@ export type EngineDeps = {
 
 export const engineDeps = (env: Env): EngineDeps => ({
   env,
-  runCommand: (argv, runEnv) =>
-    runCommand(argv[0] ?? "gh", argv.slice(1), runEnv),
+  github: createGitHub(
+    (argv, runEnv) => runCommand(argv[0] ?? "gh", argv.slice(1), runEnv),
+    env,
+  ),
   callApp: (caller, tool, args) => callApp(env, caller, tool, args),
-  checkProtocol: unverifiedV0,
+  checkProtocol: checkV1(env),
   print: (line) => {
     process.stdout.write(line);
   },
@@ -73,7 +75,7 @@ const watch = async (args: WatchArgs, deps: EngineDeps) => {
   if (args.sender) return registerSender(deps, paths.state);
   if (args.link !== undefined)
     return linkCaller(deps, args.link, args.takeOver);
-  const github = createGitHub(deps.runCommand, deps.env);
+  const { github } = deps;
   if (args.dryRun) return dryRun({ paths, github }, args.prs);
   const log = (entry: Fields) =>
     deps.print(
@@ -92,23 +94,32 @@ const watch = async (args: WatchArgs, deps: EngineDeps) => {
       ...(registered.isErr() ? { error: registered.error.message } : {}),
     });
   // Checked before the watch can send, so a harnexus without the expected protocol is never written to.
-  if (registered.isOk() && registered.value !== null) {
-    const supported = await deps.checkProtocol(
-      deps.callApp,
-      registered.value,
-    );
-    if (supported.isErr()) return Result.err(supported.error);
-  }
+  const supported = await deps.checkProtocol();
+  if (supported.isErr()) return Result.err(supported.error);
+  // A bridge replaced by an older one while the watch runs ends it between cycles, as at start; a closed app only waits.
+  let unsupported: string | null = null;
+  const callApp: AppCall = async (caller, tool, sent) => {
+    const answer = await deps.callApp(caller, tool, sent);
+    if (answer.outcome === "unsupported" && unsupported === null) {
+      unsupported = String(answer.message ?? "unsupported");
+      log({ event: "protocol_unsupported", message: unsupported });
+    }
+    return answer;
+  };
   return watchForever(
     {
       paths,
       github,
-      workers: codexWorkers(deps.callApp, () => loadSender(paths.state)),
+      workers: codexWorkers(callApp, () => loadSender(paths.state)),
       now: () => new Date(),
       log,
     },
     deps.sleep,
     replaced ?? undefined,
+    () =>
+      unsupported === null
+        ? null
+        : `cannot use the harnexus call socket: ${unsupported}`,
   );
 };
 

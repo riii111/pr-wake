@@ -7,11 +7,22 @@ import { join } from "node:path";
 import { Result } from "better-result";
 
 import { callApp, callSocketPath } from "./app/call.ts";
-import { ProtocolUnsupported } from "./app/protocol.ts";
+import { checkV1, ProtocolUnsupported } from "./app/protocol.ts";
 import { type EngineDeps, runEngine } from "./cli.ts";
 import type { Fields } from "./lib/object.ts";
+import type { GitHub } from "./prwatch/github.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
+
+// No test here reaches GitHub.
+const unreachable = async () => {
+  throw new Error("no test reaches GitHub");
+};
+const GITHUB: GitHub = {
+  summaries: unreachable,
+  detail: unreachable,
+  openPulls: unreachable,
+};
 
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -40,9 +51,7 @@ const fixture = async () => {
   ) => {
     const run = await runEngine(args, {
       env,
-      runCommand: async () => {
-        throw new Error("no command runs in these tests");
-      },
+      github: GITHUB,
       callApp: async (caller, tool, sent) => {
         calls.push({ caller, tool, ...sent });
         return { outcome: "done" };
@@ -204,18 +213,93 @@ describe("pr-wake-engine watch", () => {
   });
 });
 
+// A bridge on a socket that answers each request line as the test says, keeping the lines it was sent.
+const bridge = async (answer: (request: Fields) => Fields | null) => {
+  const root = await mkdtemp(join(tmpdir(), "pr-wake-bridge-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "call.sock");
+  const lines: Fields[] = [];
+  const server = createServer((socket) => {
+    let data = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      data += chunk;
+      if (!data.endsWith("\n")) return;
+      const request = JSON.parse(data) as Fields;
+      lines.push(request);
+      const answered = answer(request);
+      // Null keeps the connection open without an answer, as a bridge stuck mid-call does.
+      if (answered !== null) socket.end(`${JSON.stringify(answered)}\n`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(path, resolve));
+  cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+  return { env: { HARNEXUS_CALL_SOCKET: path }, lines };
+};
+
+const OFFERED = {
+  version: 1,
+  outcome: "done",
+  operations: ["read_thread", "send_message_to_thread", "name_thread"],
+};
+
+// What a bridge from before protocol 1 answers any line naming a version.
+const OLD_BRIDGE = { outcome: "invalid", message: "expected a call" };
+
+const v1Bridge = (call: (request: Fields) => Fields | null) =>
+  bridge((request) =>
+    request.query === "capabilities" ? OFFERED : call(request),
+  );
+
 describe("callApp", () => {
-  test("reports a connected call without an answer in time as unknown", async () => {
-    const { root } = await fixture();
-    const silent = join(root, "silent.sock");
-    const server = createServer(() => {});
-    await new Promise<void>((resolve) => server.listen(silent, resolve));
-    cleanups.push(async () => {
-      server.close();
+  test("asks for protocol 1 and sends the call in its form", async () => {
+    const { env, lines } = await v1Bridge(() => ({
+      version: 1,
+      outcome: "done",
+      result: 1,
+    }));
+
+    const answer = await callApp(env, "caller", "read_thread", {
+      threadId: "w",
     });
 
+    expect(answer).toEqual({ version: 1, outcome: "done", result: 1 });
+    expect(lines).toEqual([
+      { version: 1, query: "capabilities" },
+      {
+        version: 1,
+        threadId: "caller",
+        tool: "read_thread",
+        arguments: { threadId: "w" },
+      },
+    ]);
+  });
+
+  test("sends nothing to a bridge without protocol 1, never falling back to the versionless form", async () => {
+    const { env, lines } = await bridge(() => OLD_BRIDGE);
+
+    const answer = await callApp(env, "caller", "send_message_to_thread", {
+      threadId: "w",
+      prompt: "hi",
+    });
+
+    expect(answer.outcome).toBe("unsupported");
+    expect(lines).toEqual([{ version: 1, query: "capabilities" }]);
+  });
+
+  test("sends nothing for a tool the bridge does not offer", async () => {
+    const { env, lines } = await v1Bridge(() => ({ outcome: "done" }));
+
+    const answer = await callApp(env, "caller", "create_thread", {});
+
+    expect([answer.outcome, lines.length]).toEqual(["unsupported", 1]);
+  });
+
+  test("reports a connected call without an answer in time as unknown", async () => {
+    const { env } = await v1Bridge(() => null);
+
     const answer = await callApp(
-      { HARNEXUS_CALL_SOCKET: silent },
+      env,
       "caller",
       "send_message_to_thread",
       {},
@@ -223,35 +307,6 @@ describe("callApp", () => {
     );
 
     expect(answer.outcome).toBe("unknown");
-  });
-
-  test("sends one request line and reads the answer line", async () => {
-    const { root } = await fixture();
-    const path = join(root, "call.sock");
-    const lines: string[] = [];
-    const server = createServer((socket) => {
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk: string) => {
-        lines.push(chunk);
-        socket.end(`${JSON.stringify({ outcome: "done", result: 1 })}\n`);
-      });
-    });
-    await new Promise<void>((resolve) => server.listen(path, resolve));
-    cleanups.push(async () => {
-      server.close();
-    });
-
-    const answer = await callApp(
-      { HARNEXUS_CALL_SOCKET: path },
-      "caller",
-      "read_thread",
-      { threadId: "w" },
-    );
-
-    expect(answer).toEqual({ outcome: "done", result: 1 });
-    expect(lines.map((line) => JSON.parse(line))).toEqual([
-      { threadId: "caller", tool: "read_thread", arguments: { threadId: "w" } },
-    ]);
   });
 
   test("takes a missing socket as not sent", async () => {
@@ -265,6 +320,50 @@ describe("callApp", () => {
     );
 
     expect(answer.outcome).toBe("not_sent");
+  });
+});
+
+describe("checkV1", () => {
+  test("accepts a bridge offering protocol 1 with the watch's tools", async () => {
+    const { env } = await v1Bridge(() => null);
+
+    expect((await checkV1(env)()).isOk()).toBe(true);
+  });
+
+  test.each([
+    {
+      name: "a bridge from before protocol 1",
+      answer: OLD_BRIDGE,
+      says: "does not offer call protocol 1",
+    },
+    {
+      name: "a bridge without send_message_to_thread",
+      answer: { ...OFFERED, operations: ["read_thread"] },
+      says: "does not offer send_message_to_thread",
+    },
+    {
+      name: "a bridge offering another version",
+      answer: { ...OFFERED, version: 2 },
+      says: "does not offer call protocol 1",
+    },
+  ])("refuses $name", async ({ answer, says }) => {
+    const { env } = await bridge(() => answer);
+
+    const checked = await checkV1(env)();
+
+    expect(checked.isErr() && checked.error.message).toContain(says);
+  });
+
+  test("refuses when the bridge cannot be asked", async () => {
+    const { root } = await fixture();
+
+    const checked = await checkV1({
+      HARNEXUS_CALL_SOCKET: join(root, "missing.sock"),
+    })();
+
+    expect(checked.isErr() && checked.error.message).toContain(
+      "cannot use the harnexus call socket",
+    );
   });
 });
 

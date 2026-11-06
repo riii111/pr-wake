@@ -141,8 +141,11 @@ describe("codexWorkers.look", () => {
   test.each([
     {
       name: "a deleted thread as gone",
+      // Protocol 1 answers a failed tool by its kind, with the app's text as the message.
       answer: {
-        outcome: "tool_error",
+        version: 1,
+        outcome: "rejected",
+        message: "No Codex thread found for threadId: w",
         result: {
           content: [
             { type: "text", text: "No Codex thread found for threadId: w" },
@@ -154,7 +157,12 @@ describe("codexWorkers.look", () => {
     },
     {
       name: "an app that cannot be reached as unknown",
-      answer: { outcome: "not_sent", error: "ENOENT" },
+      answer: { outcome: "not_sent", message: "ENOENT" },
+      expected: null,
+    },
+    {
+      name: "a bridge without protocol 1 as unknown",
+      answer: { outcome: "unsupported", message: "old bridge" },
       expected: null,
     },
   ])("reports $name", async ({ answer, expected }) => {
@@ -250,4 +258,23 @@ const delegatedTurn = (startedAt: number, input: string) => ({
     },
     { type: "agentMessage", phase: "final_answer", text: "answered" },
   ],
+});
+
+describe("codexWorkers.send", () => {
+  test.each([
+    { outcome: "done", expected: "done" },
+    { outcome: "not_sent", expected: "not_sent" },
+    { outcome: "rejected", expected: "not_sent" },
+    { outcome: "invalid", expected: "not_sent" },
+    // The client asked the bridge first and wrote nothing to it.
+    { outcome: "unsupported", expected: "not_sent" },
+    { outcome: "unknown", expected: "unknown" },
+  ])("takes protocol 1's $outcome as $expected", async ({ outcome, expected }) => {
+    const sent = await codexWorkers(
+      async () => ({ version: 1, outcome }),
+      async () => Result.ok(null),
+    ).send("reviewer", "worker", "hi");
+
+    expect(sent.outcome).toBe(expected);
+  });
 });

@@ -115,8 +115,9 @@ const legacyCopy = async () => {
       };
     }
 
+    if (bridge.send.outcome === "unsupported") return bridge.send;
     sent.push({ caller, tool, ...args });
-    return { outcome: "done" };
+    return bridge.send;
   };
 
   const logs: Fields[] = [];
@@ -135,12 +136,12 @@ const legacyCopy = async () => {
     expect(ran.isOk()).toBe(true);
   };
 
+  // What the bridge answers a send; a test sets it to answer as a bridge without protocol 1.
+  const bridge = { send: { outcome: "done" } as Fields };
   const engine = async (args: string[], extra: Record<string, string> = {}) => {
     const deps: EngineDeps = {
       env: { ...env, ...extra },
-      runCommand: async () => {
-        throw new Error("no command runs in these tests");
-      },
+      github,
       callApp,
       checkProtocol: async () => Result.ok(),
       print: () => {},
@@ -158,7 +159,7 @@ const legacyCopy = async () => {
   const record = async (key: string, file: "link" | "state") =>
     JSON.parse(await readFile(join(paths.state, key, `${file}.json`), "utf8"));
 
-  return { paths, sent, logs, cycle, engine, record };
+  return { paths, sent, logs, cycle, engine, record, bridge };
 };
 
 const KEY = {
@@ -276,6 +277,23 @@ describe("records harnexus-task watch left", () => {
     expect(taken.out).toEqual({ threadId: "other", watched: url(9) });
     expect(moved.worker).toBe("other");
     expect(moved.linkedAt).not.toBe("2026-10-20T00:00:00.000Z");
+  });
+
+  test("end the watch before writing once the bridge stops offering protocol 1, keeping what was queued", async () => {
+    const { engine, record, sent, bridge } = await legacyCopy();
+    bridge.send = { outcome: "unsupported", message: "old bridge" };
+
+    const ended = await engine([]);
+
+    expect([ended.code, ended.err]).toEqual([
+      1,
+      expect.stringContaining("cannot use the harnexus call socket: old bridge"),
+    ]);
+    expect(sent).toEqual([]);
+    const queued = await record(KEY[9], "state");
+    expect([queued.status, queued.pending.length]).toEqual(["watching", 1]);
+    const handed = await record(KEY[7], "state");
+    expect(handed.status).toBe("watching");
   });
 
   // The lock is taken with O_EXLOCK, which only macOS honors.

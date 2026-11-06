@@ -40,7 +40,7 @@ export type GitHub = {
 
 type Env = Record<string, string | undefined>;
 
-export type RunCommand = (
+type RunCommand = (
   argv: readonly string[],
   env: Env,
 ) => Promise<Result<CommandOutput, CommandFailed>>;
