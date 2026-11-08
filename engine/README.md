@@ -11,7 +11,7 @@ bun run test
 bun run build   # dist/pr-wake-engine
 ```
 
-設定は`~/.config/harnexus/pr-watch.json`、記録は`$XDG_STATE_HOME/taskctl/watch/`（既定`~/.local/state/taskctl/watch/`）を、`harnexus-task watch`の形式のまま使う。
+設定は`~/.config/harnexus/pr-watch.json`、記録は`$XDG_STATE_HOME/harnexus-crew/watch/`（既定`~/.local/state/harnexus-crew/watch/`）を使う。
 ワーカーへの送信には、harnexusの公開call socketのprotocol 1だけを使う。
 常駐の開始時と各呼び出しの前に版と操作の一覧を照会し、protocol 1と`read_thread`・`send_message_to_thread`が揃わないbridgeには書き込まない。
 旧版のbridgeが照会に`invalid`を返したときは、版なしの形式へ切り替えず常駐を終える。

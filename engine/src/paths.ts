@@ -11,7 +11,7 @@ export const homeOf = (env: Env) => env.HOME ?? homedir();
 const absoluteOr = (value: string | undefined, fallback: string) =>
   value?.startsWith("/") ? value : fallback;
 
-// The config and records harnexus-task watch kept, so a watch moved to pr-wake goes on from them.
+// The watch shares its state directory with harnexus-crew.
 export const watchPaths = (env: Env): WatchPaths => ({
   config: join(
     absoluteOr(env.XDG_CONFIG_HOME, join(homeOf(env), ".config")),
@@ -20,7 +20,7 @@ export const watchPaths = (env: Env): WatchPaths => ({
   ),
   state: join(
     absoluteOr(env.XDG_STATE_HOME, join(homeOf(env), ".local/state")),
-    "taskctl",
+    "harnexus-crew",
     "watch",
   ),
 });
