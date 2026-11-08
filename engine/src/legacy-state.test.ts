@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -72,6 +72,7 @@ const legacyCopy = async () => {
   const root = await mkdtemp(join(tmpdir(), "pr-wake-legacy-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   await cp(LEGACY, root, { recursive: true });
+  await rename(join(root, "state/taskctl"), join(root, "state/harnexus-crew"));
   const env = {
     HOME: root,
     XDG_CONFIG_HOME: join(root, "config"),

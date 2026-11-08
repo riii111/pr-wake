@@ -33,7 +33,7 @@ sequenceDiagram
 
 監視の本体は同梱の`pr-wake-engine`で、`pr-wake watch`がその常駐を管理する。
 チャットへの送信には[harnexus](https://github.com/riii111/harnexus)の公開call socketを使う。
-設定は`~/.config/harnexus/pr-watch.json`、記録は`~/.local/state/taskctl/watch/`を使い、`harnexus-task watch`から移るときもそのまま引き継ぐ。
+設定は`~/.config/harnexus/pr-watch.json`、記録は`~/.local/state/harnexus-crew/watch/`を使う。
 
 ### 導入
 
