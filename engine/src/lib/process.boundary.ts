@@ -71,3 +71,50 @@ export const captureCommand = (
 const COMMAND_TIMEOUT_MS = 10_000;
 
 const COMMAND_OUTPUT_LIMIT = 16 * 1024 * 1024;
+
+export class InputCommandFailed extends TaggedError("InputCommandFailed")<{
+  command: string;
+  // Whether the command ran, so a caller can tell a command that may have acted from one that never started.
+  started: boolean;
+  message: string;
+}> {}
+
+// Runs a command with its input on stdin, so a message never shows in the process list or passes for an option.
+export const runWithInput = (
+  file: string,
+  args: readonly string[],
+  input: string,
+  env: Record<string, string | undefined>,
+  timeoutMs: number,
+) => {
+  let started = false;
+  return Result.tryPromise({
+    try: async (): Promise<CommandOutput> => {
+      const child = Bun.spawn([file, ...args], {
+        env,
+        stdin: new Blob([input]),
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: timeoutMs,
+      });
+      started = true;
+      const [stdout, stderr, status] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      if (child.signalCode !== null)
+        throw new Error(`${file} was stopped by ${child.signalCode}`);
+      return { status, stdout, stderr };
+    },
+    catch: (cause) =>
+      new InputCommandFailed({
+        command: file,
+        started,
+        message:
+          cause instanceof Error && started
+            ? cause.message
+            : `cannot run ${file}`,
+      }),
+  });
+};

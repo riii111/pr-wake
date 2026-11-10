@@ -12,7 +12,8 @@ bun run build   # dist/pr-wake-engine
 ```
 
 設定は`~/.config/harnexus/pr-watch.json`、記録は`$XDG_STATE_HOME/harnexus-crew/watch/`（既定`~/.local/state/harnexus-crew/watch/`）を使う。
-ワーカーへの送信には、harnexusの公開call socketのprotocol 1だけを使う。
+Codex Appのワーカーへの送信には、harnexusの公開call socketのprotocol 1だけを使う。
+T3 Codeのワーカーへは、T3 Codeの`t3 thread send`で送り、`t3 thread show`で様子を見る。
 常駐の開始時と各呼び出しの前に版と操作の一覧を照会し、protocol 1と`read_thread`・`send_message_to_thread`が揃わないbridgeには書き込まない。
 旧版のbridgeが照会に`invalid`を返したときは、版なしの形式へ切り替えず常駐を終える。
 

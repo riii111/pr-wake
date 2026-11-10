@@ -145,6 +145,7 @@ const legacyCopy = async () => {
       github,
       callApp,
       checkProtocol: async () => Result.ok(),
+      runT3: async () => ({ ran: false, started: false, message: "no t3" }),
       print: () => {},
       sleep: async () => {},
       program: { path: "/nonexistent", compiled: false },

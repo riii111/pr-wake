@@ -1,13 +1,22 @@
 import { Result, TaggedError } from "better-result";
 
 import { type AppCall, callApp } from "./app/call.ts";
+import { appWorkers } from "./app/app-workers.ts";
 import { checkV1, type ProtocolCheck } from "./app/protocol.ts";
+import {
+  isT3Worker,
+  T3_SENDER,
+  T3_WORKER,
+  t3Binary,
+  type T3Run,
+  t3Workers,
+} from "./app/t3-worker.ts";
 import { programWatch } from "./app/watch-program.ts";
 import { codexWorkers, senderFor } from "./app/watch-worker.ts";
 import { type OptionTypes, parseOptions } from "./lib/args.boundary.ts";
 import type { Fields } from "./lib/object.ts";
-import { runCommand } from "./lib/process.boundary.ts";
-import { type Env, watchPaths } from "./paths.ts";
+import { runCommand, runWithInput } from "./lib/process.boundary.ts";
+import { type Env, homeOf, watchPaths } from "./paths.ts";
 import { dryRun, release, status, watchForever } from "./prwatch/commands.ts";
 import { createGitHub, type GitHub } from "./prwatch/github.ts";
 import {
@@ -26,6 +35,7 @@ export type EngineDeps = {
   github: GitHub;
   callApp: AppCall;
   checkProtocol: ProtocolCheck;
+  runT3: T3Run;
   // Only the watch writes as it runs, since it never returns.
   print: (line: string) => void;
   sleep: (ms: number) => Promise<unknown>;
@@ -41,6 +51,21 @@ export const engineDeps = (env: Env): EngineDeps => ({
   ),
   callApp: (caller, tool, args) => callApp(env, caller, tool, args),
   checkProtocol: checkV1(env),
+  runT3: async (args, input, timeoutMs) => {
+    const bin = t3Binary(env, homeOf(env), (name) =>
+      Bun.which(name, { PATH: env.PATH ?? "" }),
+    );
+    if (bin === null)
+      return {
+        ran: false,
+        started: false,
+        message: "HARNEXUS_T3_BIN must be an absolute path",
+      };
+    const ran = await runWithInput(bin, args, input, env, timeoutMs);
+    return ran.isOk()
+      ? { ran: true, ...ran.value }
+      : { ran: false, started: ran.error.started, message: ran.error.message };
+  },
   print: (line) => {
     process.stdout.write(line);
   },
@@ -110,7 +135,10 @@ const watch = async (args: WatchArgs, deps: EngineDeps) => {
     {
       paths,
       github,
-      workers: codexWorkers(callApp, () => loadSender(paths.state)),
+      workers: appWorkers(
+        codexWorkers(callApp, () => loadSender(paths.state)),
+        t3Workers(deps.runT3),
+      ),
       now: () => new Date(),
       log,
     },
@@ -127,6 +155,10 @@ const watch = async (args: WatchArgs, deps: EngineDeps) => {
 const registerSender = (deps: EngineDeps, root: string) =>
   Result.gen(async function* () {
     const thread = yield* callerId(deps.env);
+    if (isT3Worker(thread))
+      return fail(
+        "watch --sender is for a Codex App chat; a T3 Code worker is sent to through the t3 CLI, without a sender",
+      );
     yield* Result.await(recordSender(root, thread));
     return Result.ok<Fields>({ sender: thread });
   });
@@ -162,7 +194,9 @@ const linkCaller = (deps: EngineDeps, value: string, takeOver: boolean) =>
       }),
     );
     // Warns about a linked chat nothing can send to, which the link alone would show as watched.
-    const sender = senderFor(await loadSender(root), worker);
+    const sender = isT3Worker(worker)
+      ? T3_SENDER
+      : senderFor(await loadSender(root), worker);
     return Result.ok<Fields>({
       threadId: worker,
       watched: pr.url,
@@ -171,14 +205,20 @@ const linkCaller = (deps: EngineDeps, value: string, takeOver: boolean) =>
   });
 
 const callerId = (env: Env) => {
-  const value = env.CODEX_THREAD_ID;
+  // T3 Code sets its thread for every agent and job it starts, and runs Codex there with a CODEX_THREAD_ID of Codex's own, so its variable decides first.
+  const t3 = env[T3_THREAD_ENV];
+  const variable =
+    t3 !== undefined && t3 !== "" ? T3_THREAD_ENV : "CODEX_THREAD_ID";
+  const value = env[variable];
   if (value === undefined || value === "")
     return fail(`CODEX_THREAD_ID is not set; run ${NAME} from a thread`);
-  // A chat ID is pasted into socket requests, so it may carry no whitespace or control characters.
+  // A chat ID is pasted into socket requests and t3 arguments, so it may carry no whitespace or control characters.
   if (!/^[^\s\p{Cc}]+$/u.test(value) || value.startsWith("client-new-thread:"))
-    return fail("CODEX_THREAD_ID must be a confirmed chat ID without whitespace");
-  return Result.ok(value);
+    return fail(`${variable} must be a confirmed chat ID without whitespace`);
+  return Result.ok(variable === T3_THREAD_ENV ? `${T3_WORKER}${value}` : value);
 };
+
+const T3_THREAD_ENV = "T3CODE_THREAD_ID";
 
 const EXECUTION_ENV = "HARNEXUS_EXECUTION_ENV";
 
