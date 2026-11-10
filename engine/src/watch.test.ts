@@ -308,7 +308,11 @@ describe("runCycle for a worker in T3 Code", () => {
     expect(sent?.args).toEqual(["thread", "send", "mcp:w1", "-", "--json"]);
     expect(sent?.input).toContain(PR);
     const after = await state();
-    expect([after.status, after.pending]).toEqual(["watching", []]);
+    expect([after.status, after.pending, after.delivered]).toEqual([
+      "watching",
+      [],
+      null,
+    ]);
   });
 });
 
