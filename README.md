@@ -44,6 +44,9 @@ sequenceDiagram
 
 ワーカーのチャットで`pr-wake watch link <PRのURL>`を実行すると、そのPRが監視される。
 別のチャットが監視中のPRは、`--take-over`を付けると引き継ぐ。
+T3 Codeのスレッドで実行すると、そのスレッドへはT3 Codeの`t3` CLIで送るので、送信元のチャットは要らない。
+`t3`は`HARNEXUS_T3_BIN`、`PATH`、`~/.t3/bin/t3`の順に探す。
+T3 Codeのスレッドは送られた時刻を示さないので、持ち主が話しかけた直後でも、ワーカーが動いていなければ送る。
 `pr-wake watch status`で監視中のPRと送信元を、`--json`でその元のJSONを表示する。
 止まったPRは`pr-wake watch release <PRのURL>`で再開し、`pr-wake watch dry-run`で送る内容を記録を変えずに確かめられる。
 

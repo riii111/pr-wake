@@ -57,6 +57,7 @@ const fixture = async () => {
         return { outcome: "done" };
       },
       checkProtocol: async () => Result.ok(),
+      runT3: async () => ({ ran: false, started: false, message: "no t3" }),
       print: () => {},
       sleep: async () => {},
       program: { path: "/nonexistent", compiled: false },
@@ -171,6 +172,26 @@ describe("pr-wake-engine watch", () => {
     expect([refused.code, refused.err]).toEqual([
       1,
       expect.stringContaining("CODEX_THREAD_ID"),
+    ]);
+  });
+
+  test("links a T3 Code thread as a T3 Code worker, which needs no sender", async () => {
+    const { env, invoke } = await fixture();
+    const pr = "https://github.com/org/pay/pull/9";
+    // T3 Code runs Codex with a CODEX_THREAD_ID of Codex's own.
+    env.T3CODE_THREAD_ID = "mcp:w1";
+
+    const linked = await invoke(["watch", "--link", pr]);
+    const sender = await invoke(["watch", "--sender"]);
+    const shown = await invoke(["watch", "--status"]);
+
+    expect(linked.out).toEqual({ threadId: "t3:mcp:w1", watched: pr });
+    expect([sender.code, sender.err]).toEqual([
+      1,
+      expect.stringContaining("without a sender"),
+    ]);
+    expect(shown.out.prs.map((each: Fields) => each.worker)).toEqual([
+      "t3:mcp:w1",
     ]);
   });
 

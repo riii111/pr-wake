@@ -18,6 +18,8 @@ import {
 } from "./prwatch/store.ts";
 import { runCycle } from "./prwatch/watcher.ts";
 import { watchPaths } from "./paths.ts";
+import { appWorkers } from "./app/app-workers.ts";
+import { type T3Run, t3Workers } from "./app/t3-worker.ts";
 import { codexWorkers } from "./app/watch-worker.ts";
 
 const PR = "https://github.com/org/pay/pull/7";
@@ -110,7 +112,10 @@ const delegatedTurn = (
   });
 
 // Starts from a PR the watch already read once, unless a test checks the first read.
-const fixture = async (config: Fields = {}, { firstRead = false } = {}) => {
+const fixture = async (
+  config: Fields = {},
+  { firstRead = false, worker = "worker" } = {},
+) => {
   const root = await mkdtemp(join(tmpdir(), "pr-wake-watch-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const env = {
@@ -132,7 +137,7 @@ const fixture = async (config: Fields = {}, { firstRead = false } = {}) => {
     repo: "org/pay",
     number: 7,
     url: PR,
-    worker: "worker",
+    worker,
     linkedAt: LINKED_AT,
   });
   if (!firstRead)
@@ -153,8 +158,23 @@ const fixture = async (config: Fields = {}, { firstRead = false } = {}) => {
     // The chat registered with watch --sender.
     sender: "reviewer" as string | null,
     now: NOON,
+    // A worker in T3 Code as t3 thread show prints it.
+    t3: {
+      thread: {
+        status: "completed",
+        activeRunId: null,
+        latestRunId: null,
+        pendingRequestCount: 0,
+      } as Fields,
+      messages: [] as Fields[],
+    },
   };
-  const calls = { summaries: 0, details: 0, sent: [] as Fields[] };
+  const calls = {
+    summaries: 0,
+    details: 0,
+    sent: [] as Fields[],
+    t3: [] as { args: string[]; input: string }[],
+  };
 
   const github: GitHub = {
     summaries: async (_account, refs) => {
@@ -205,12 +225,27 @@ const fixture = async (config: Fields = {}, { firstRead = false } = {}) => {
     return { outcome: world.sendOutcome };
   };
 
+  const runT3: T3Run = async (args, input) => {
+    if (args[1] === "show")
+      return {
+        ran: true,
+        status: 0,
+        stdout: JSON.stringify(world.t3),
+        stderr: "",
+      };
+    calls.t3.push({ args, input });
+    return { ran: true, status: 0, stdout: "{}", stderr: "" };
+  };
+
   const logs: Fields[] = [];
   const cycle = async (over?: Set<string>) => {
     const ran = await runCycle({
       paths,
       github,
-      workers: codexWorkers(callApp, async () => Result.ok(world.sender)),
+      workers: appWorkers(
+        codexWorkers(callApp, async () => Result.ok(world.sender)),
+        t3Workers(runT3),
+      ),
       now: () => world.now,
       log: (entry) => logs.push(entry),
       ...(over === undefined ? {} : { over }),
@@ -229,6 +264,57 @@ const fixture = async (config: Fields = {}, { firstRead = false } = {}) => {
 
   return { env, paths, world, calls, logs, cycle, state, later };
 };
+
+describe("runCycle for a worker in T3 Code", () => {
+  test("sends through T3 Code once the worker is idle, needing no registered sender, and takes its reply as the answer", async () => {
+    const { world, calls, cycle, state, later } = await fixture(
+      {},
+      { worker: "t3:mcp:w1" },
+    );
+    world.sender = null;
+    world.comments = [comment({})];
+    world.t3.thread = {
+      ...world.t3.thread,
+      status: "running",
+      activeRunId: "r0",
+    };
+
+    await cycle();
+    const waited = calls.t3.length;
+    world.t3.thread = {
+      ...world.t3.thread,
+      status: "completed",
+      activeRunId: null,
+      latestRunId: "r0",
+    };
+    later(1);
+    await cycle();
+    const [sent] = calls.t3;
+    world.t3.messages = [
+      { role: "user", runId: "r1", text: sent?.input ?? "" },
+      {
+        role: "assistant",
+        runId: "r1",
+        text: `${PR}#discussion_r1 を直してpushした`,
+      },
+    ];
+    world.t3.thread = { ...world.t3.thread, latestRunId: "r1" };
+    later(1);
+    await cycle();
+
+    expect(waited).toBe(0);
+    expect(calls.sent).toEqual([]);
+    expect(calls.t3).toHaveLength(1);
+    expect(sent?.args).toEqual(["thread", "send", "mcp:w1", "-", "--json"]);
+    expect(sent?.input).toContain(PR);
+    const after = await state();
+    expect([after.status, after.pending, after.delivered]).toEqual([
+      "watching",
+      [],
+      null,
+    ]);
+  });
+});
 
 describe("runCycle", () => {
   test("sends a completed CodeRabbit review with its new findings in one message from the registered chat", async () => {
