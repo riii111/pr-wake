@@ -1525,6 +1525,105 @@ mod tests {
         }
     }
 
+    // The records harnexus-task watch left on a Mac, with the comments they had already seen
+    // still on GitHub.
+    mod legacy_records {
+        use super::*;
+
+        #[test]
+        fn first_cycle_hands_a_pr_over_and_sends_what_each_record_still_held() {
+            let fixture = legacy_fixture();
+
+            fixture.cycle();
+
+            let sent = fixture
+                .sent()
+                .into_iter()
+                .map(|sent| {
+                    (
+                        sent.thread,
+                        sent.prompt.contains("pull/7#discussion_r71"),
+                        sent.prompt.contains("pull/9#discussion_r91"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sent,
+                [
+                    ("next-chat".to_owned(), true, false),
+                    ("w9".to_owned(), false, true)
+                ]
+            );
+            let handed = fixture.logged("handed_over");
+            assert_eq!(handed.len(), 1);
+            assert!(
+                [("from", json!("old-chat")), ("to", json!("next-chat"))]
+                    .iter()
+                    .all(|field| handed[0].fields.contains(field)),
+                "{handed:?}"
+            );
+        }
+
+        #[test]
+        fn restarted_watch_sends_nothing_twice() {
+            let fixture = legacy_fixture();
+            fixture.cycle();
+            let first = fixture.sent().len();
+
+            fixture.later(2);
+            fixture.cycle();
+            fixture.later(2);
+            fixture.cycle();
+
+            assert_eq!((first, fixture.sent().len()), (2, 2));
+        }
+
+        #[test]
+        fn halted_pr_stays_halted_and_gets_nothing() {
+            let fixture = legacy_fixture();
+
+            fixture.cycle();
+
+            assert!(fixture.sent().iter().all(|sent| sent.thread != "w10"));
+            let halted = watch_record::load_watch_state(&fixture.paths.state, &numbered(10))
+                .expect("load PR 10");
+            assert_eq!(halted.status, WatchStatus::Halted);
+            assert!(halted.halted.is_some());
+        }
+
+        fn legacy_fixture() -> Fixture {
+            let fixture = Fixture::new(json!({}), Read::First, "next-chat");
+            let fixtures =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch");
+            for number in [7, 8, 9, 10] {
+                let key = watch_record::pr_key(&numbered(number));
+                let directory = fixture.paths.state.join(&key);
+                fs::create_dir_all(&directory).expect("create the PR directory");
+                for file in ["link.json", "state.json"] {
+                    fs::copy(fixtures.join(&key).join(file), directory.join(file))
+                        .expect("copy the record");
+                }
+            }
+            fixture.update(|world| {
+                world.comments = [7, 8, 9, 10]
+                    .map(|number| PrComment {
+                        id: format!("inline:{number}1"),
+                        url: format!(
+                            "https://github.com/org/pay/pull/{number}#discussion_r{number}1"
+                        ),
+                        created_at: "2026-10-21T00:00:00Z".to_owned(),
+                        ..comment()
+                    })
+                    .into();
+            });
+            fixture
+        }
+
+        fn numbered(number: u64) -> PrRef {
+            PrRef { number, ..pay() }
+        }
+    }
+
     mod forever {
         use std::cell::Cell;
 
@@ -1887,7 +1986,7 @@ mod tests {
         fn detail(
             &mut self,
             _account: &str,
-            _pr: &PrRef,
+            pr: &PrRef,
             _bots: &[ReviewBot],
         ) -> Result<PrDetail, ReadError> {
             self.0.calls.borrow_mut().details += 1;
@@ -1898,12 +1997,19 @@ mod tests {
                     message: "GitHub is down".to_owned(),
                 });
             }
+            let url = format!("https://github.com/{}/pull/{}", pr.repo, pr.number);
+            let comments = world
+                .comments
+                .iter()
+                .filter(|comment| comment.url.starts_with(&format!("{url}#")))
+                .cloned()
+                .collect();
             Ok(PrDetail {
                 summary: world.summary.clone(),
-                url: PR.to_owned(),
+                url,
                 title: "Pay".to_owned(),
                 failed_required: world.failed_required.clone(),
-                comments: world.comments.clone(),
+                comments,
                 no_actionable: world.no_actionable.clone(),
             })
         }
