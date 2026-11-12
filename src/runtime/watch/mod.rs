@@ -42,24 +42,23 @@ use crate::{
         t3::{T3Ran, T3Workers, find_on_path, t3_binary},
         watch_record::{self, WatchPaths},
     },
-    runtime::termination::{self, ProgramWatch},
+    runtime::{
+        Env, agent, output,
+        termination::{self, ProgramWatch},
+    },
 };
 
-pub(crate) const NAME: &str = "pr-wake-engine";
-
-// What `pr-wake-engine watch` was asked to do.
+// What `pr-wake watch` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Mode {
     Run,
     DryRun(Vec<String>),
     Release(String),
-    Status,
+    // Lines for a person unless `json`, which a program such as harnexus-crew reads.
+    Status { json: bool },
     Sender,
     Link { pr: String, take_over: bool },
 }
-
-// The process environment, read through this so a test can give its own.
-pub(crate) type Env<'env> = &'env dyn Fn(&str) -> Option<OsString>;
 
 // A failure's message is shown to whoever ran the command and may carry a path or what a command
 // printed, so the log records the tag alone.
@@ -190,17 +189,15 @@ const STOP_CHECK: Duration = Duration::from_millis(200);
 // A command prints its result as one JSON line; the watch itself prints only its log.
 pub(crate) fn run(mode: Mode, env: Env<'_>) -> Result<Option<String>, Failure> {
     refuse_in_cloud(env)?;
-    let paths = BaseDirectories::from_environment()
-        .map(|directories| WatchPaths::of(&directories))
-        .ok_or_else(|| {
-            Failure::Refused(
-                "the home directory is unknown, so the watch has no records".to_owned(),
-            )
-        })?;
+    let paths = watch_paths()?;
     let now = Timestamp::now();
     match mode {
         Mode::Release(url) => json(&release(&paths.state, &url)?),
-        Mode::Status => json(&status(&paths.state)?),
+        Mode::Status { json: true } => json(&status(&paths.state)?),
+        Mode::Status { json: false } => {
+            agent::print_loaded(agent::WATCH);
+            Ok(Some(status_text(&status(&paths.state)?)))
+        }
         Mode::Sender => json(&register_sender(env, &paths.state, now)?),
         Mode::Link { pr, take_over } => json(&link(env, &paths.state, &pr, take_over, now)?),
         Mode::DryRun(urls) => {
@@ -209,6 +206,33 @@ pub(crate) fn run(mode: Mode, env: Env<'_>) -> Result<Option<String>, Failure> {
         }
         Mode::Run => daemon(env, &paths).map(|()| None),
     }
+}
+
+// The config is checked with a dry run before the running agent stops, so a failed check leaves
+// it running.
+pub(crate) fn install(env: Env<'_>) -> Result<(), String> {
+    let config = watch_paths().map_err(|failure| failure.to_string())?.config;
+    if !config.exists() {
+        return Err(format!(
+            "{} not found; write it as the README shows",
+            config.display()
+        ));
+    }
+    output::write_stdout("$ pr-wake watch dry-run\n");
+    run(Mode::DryRun(Vec::new()), env).map_err(|failure| failure.to_string())?;
+    let home = home_of(env).ok_or("the home directory is unknown")?;
+    agent::remove_legacy(agent::LEGACY_WATCH, &home)?;
+    agent::install(agent::WATCH, &home, agent::user().as_deref(), env)
+}
+
+fn watch_paths() -> Result<WatchPaths, Failure> {
+    BaseDirectories::from_environment()
+        .map(|directories| WatchPaths::of(&directories))
+        .ok_or_else(|| {
+            Failure::Refused(
+                "the home directory is unknown, so the watch has no records".to_owned(),
+            )
+        })
 }
 
 fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
@@ -330,7 +354,7 @@ fn caller_id(env: Env<'_>) -> Result<String, Failure> {
     );
     let Some(value) = value else {
         return Err(Failure::Refused(format!(
-            "{CODEX_THREAD_ENV} is not set; run {NAME} from a thread"
+            "{CODEX_THREAD_ENV} is not set; run pr-wake from a thread"
         )));
     };
     // A chat ID is pasted into socket requests and t3 arguments, so it may carry no whitespace or
@@ -358,7 +382,7 @@ fn register_sender(env: Env<'_>, root: &Path, now: Timestamp) -> Result<SenderOu
     let thread = caller_id(env)?;
     if workers::is_t3_worker(&thread) {
         return Err(Failure::Refused(
-            "watch --sender is for a Codex App chat; a T3 Code worker is sent to through the t3 CLI, without a sender".to_owned(),
+            "pr-wake watch sender is for a Codex App chat; a T3 Code worker is sent to through the t3 CLI, without a sender".to_owned(),
         ));
     }
     watch_record::record_sender(root, &thread, &time::format_timestamp(now))
@@ -425,7 +449,7 @@ fn link(
 fn release(root: &Path, url: &str) -> Result<ReleaseOutput, Failure> {
     let Some(named) = pr::github_pr(url) else {
         return Err(Failure::Refused(
-            "--release must be a GitHub pull request URL".to_owned(),
+            "pr-wake watch release needs a GitHub pull request URL".to_owned(),
         ));
     };
     let link = find_link(root, &named.pr)?
@@ -484,6 +508,42 @@ fn status(root: &Path) -> Result<StatusOutput, Failure> {
             prs,
         },
     })
+}
+
+// One line for each PR and one for the sender, as a person reads them.
+fn status_text(status: &StatusOutput) -> String {
+    let mut lines = status
+        .prs
+        .iter()
+        .map(|pr| match pr {
+            PrStatus::Unreadable {
+                pr, status, reason, ..
+            } => format!("{pr} {status} ({reason}) pending=0"),
+            PrStatus::Read(read) => {
+                let reason = read
+                    .reason
+                    .as_ref()
+                    .map_or_else(String::new, |reason| format!(" ({reason})"));
+                let awaiting = if read.awaiting_answer {
+                    " awaiting answer"
+                } else {
+                    ""
+                };
+                format!(
+                    "{} {}{reason} pending={}{awaiting}",
+                    read.pr,
+                    read.status.name(),
+                    read.pending
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    lines.push(match (&status.sender_error, &status.sender) {
+        (Some(error), _) => format!("sender: unreadable ({error})"),
+        (None, Some(sender)) => format!("sender: {sender}"),
+        (None, None) => "sender: none; run `pr-wake watch sender` in a chat kept for it".to_owned(),
+    });
+    lines.join("\n")
 }
 
 // Decides from each PR's saved watch state what the watch would send, without writing any.
@@ -950,9 +1010,8 @@ mod tests {
             assert!(unlinked.is_err_and(
                 |failure| failure.to_string() == format!("{PR} is not linked to a worker")
             ));
-            assert!(not_pr.is_err_and(
-                |failure| failure.to_string() == "--release must be a GitHub pull request URL"
-            ));
+            assert!(not_pr.is_err_and(|failure| failure.to_string()
+                == "pr-wake watch release needs a GitHub pull request URL"));
         }
     }
 
@@ -1008,6 +1067,85 @@ mod tests {
             assert_eq!(statuses, ["unreadable", "watching"]);
             assert_eq!(shown["sender"], Value::Null);
             assert!(shown["senderError"].is_string(), "{shown}");
+        }
+
+        #[test]
+        fn text_has_a_line_for_each_pr_and_one_for_the_sender() {
+            let no_sender = "sender: none; run `pr-wake watch sender` in a chat kept for it";
+            for (name, shown, expected) in [
+                (
+                    "watched_prs",
+                    StatusOutput {
+                        sender: None,
+                        sender_error: None,
+                        prs: vec![
+                            read(7, WatchStatus::Watching, None, 2, true),
+                            read(
+                                8,
+                                WatchStatus::Stopped,
+                                Some("worker thread is gone"),
+                                0,
+                                false,
+                            ),
+                        ],
+                    },
+                    vec![
+                        "https://github.com/org/pay/pull/7 watching pending=2 awaiting answer",
+                        "https://github.com/org/pay/pull/8 stopped (worker thread is gone) pending=0",
+                        no_sender,
+                    ],
+                ),
+                (
+                    "unreadable_pr",
+                    StatusOutput {
+                        sender: Some("chat-1".to_owned()),
+                        sender_error: None,
+                        prs: vec![PrStatus::Unreadable {
+                            pr: PR.to_owned(),
+                            worker: "w7".to_owned(),
+                            status: "unreadable",
+                            reason: "bad JSON".to_owned(),
+                        }],
+                    },
+                    vec![
+                        "https://github.com/org/pay/pull/7 unreadable (bad JSON) pending=0",
+                        "sender: chat-1",
+                    ],
+                ),
+                (
+                    "unreadable_sender",
+                    StatusOutput {
+                        sender: None,
+                        sender_error: Some("bad JSON".to_owned()),
+                        prs: Vec::new(),
+                    },
+                    vec!["sender: unreadable (bad JSON)"],
+                ),
+            ] {
+                let text = status_text(&shown);
+
+                assert_eq!(text, expected.join("\n"), "case: {name}");
+            }
+        }
+
+        fn read(
+            number: u64,
+            status: WatchStatus,
+            reason: Option<&str>,
+            pending: usize,
+            awaiting_answer: bool,
+        ) -> PrStatus {
+            PrStatus::Read(ReadStatus {
+                pr: format!("https://github.com/org/pay/pull/{number}"),
+                worker: format!("w{number}"),
+                status,
+                reason: reason.map(str::to_owned),
+                pending,
+                follow_up: 0,
+                awaiting_answer,
+                handing_over: false,
+                checked_at: None,
+            })
         }
     }
 
@@ -1167,7 +1305,7 @@ mod tests {
                 "none",
                 None,
                 None,
-                Err("CODEX_THREAD_ID is not set; run pr-wake-engine from a thread"),
+                Err("CODEX_THREAD_ID is not set; run pr-wake from a thread"),
             ),
             (
                 "space",

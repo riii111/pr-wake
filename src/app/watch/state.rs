@@ -163,6 +163,18 @@ impl WatchStatus {
     pub(crate) const fn holds_chat(self) -> bool {
         !matches!(self, Self::Stopped | Self::Ended)
     }
+
+    // As the records and `status --json` write it.
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Watching => "watching",
+            Self::Draft => "draft",
+            Self::Ended => "ended",
+            Self::Stopped => "stopped",
+            Self::Halted => "halted",
+        }
+    }
 }
 
 impl WatchEvent {

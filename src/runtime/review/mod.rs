@@ -26,12 +26,13 @@ use crate::{
         command::{RunTool, run_tool},
         gh::rest::GhRest,
         git::worktree::{Checkout, prepare_worktree},
+        launchctl::agent_path,
         record::BaseDirectories,
         review_record::{self, ReviewPaths},
         stop::StopRequest,
     },
     runtime::{
-        output,
+        agent, output,
         termination::{self, ProgramWatch},
     },
 };
@@ -255,6 +256,39 @@ pub(crate) fn smoke(
     Ok(())
 }
 
+// The config is checked before the running agent stops, so a bad config leaves it running.
+pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
+    let config = &env.paths.config;
+    if !config.exists() {
+        return Err(format!(
+            "{} not found; copy config.example.json from the pr-wake repository and edit it",
+            config.display()
+        ));
+    }
+    check_from_terminal(config, env)?;
+    agent::remove_legacy(agent::LEGACY_REVIEW, &env.home)?;
+    agent::install(agent::REVIEW, &env.home, env.user.as_deref(), &|name| {
+        env::var_os(name)
+    })
+}
+
+// `pr-wake review status`: the agent, then what its state holds.
+pub(crate) fn show_status(env: &ReviewEnv) -> Result<(), String> {
+    agent::print_loaded(agent::REVIEW);
+    output::write_stdout(&status(&env.paths, &TimeZone::system())?);
+    Ok(())
+}
+
+pub(crate) fn check_from_terminal(config: &Path, env: &ReviewEnv) -> Result<(), String> {
+    let stop = stop_on_termination()?;
+    check(config, env, &run_tool, &stop, &mut print_line)
+}
+
+pub(crate) fn smoke_from_terminal(trial: &Smoke<'_>, env: &ReviewEnv) -> Result<(), String> {
+    let stop = stop_on_termination()?;
+    smoke(trial, env, &run_tool, &stop, &mut print_line)
+}
+
 impl ReviewEnv {
     #[must_use]
     pub(crate) fn from_process() -> Option<Self> {
@@ -263,7 +297,7 @@ impl ReviewEnv {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| home.join(".codex"));
-        let user = env::var("USER").ok().filter(|user| !user.is_empty());
+        let user = agent::user();
         let paths = ReviewPaths::of(&BaseDirectories::from_environment()?);
         Some(Self {
             home,
@@ -282,7 +316,7 @@ fn load_tools<'run>(
     let config = review_record::load_config(config, &env.home, &env.codex_home)?;
     let commands = resolve_commands(
         &config.commands,
-        &search_directories(&env.home, env.user.as_deref()),
+        &agent_path(&env.home, env.user.as_deref()),
     )?;
     Ok(Tools {
         run,
@@ -429,28 +463,6 @@ fn resolve_commands(
     })
 }
 
-// launchd gives an agent no login shell PATH, so commands are looked up in these directories.
-fn search_directories(home: &Path, user: Option<&str>) -> Vec<PathBuf> {
-    let mut directories = vec![home.join(".nix-profile/bin")];
-    if let Some(user) = user {
-        directories.push(Path::new("/etc/profiles/per-user").join(user).join("bin"));
-    }
-    directories.extend(
-        [
-            "/run/current-system/sw/bin",
-            "/nix/var/nix/profiles/default/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        .map(PathBuf::from),
-    );
-    directories
-}
-
 fn find_command(name: &str, directories: &[PathBuf]) -> Result<PathBuf, String> {
     directories
         .iter()
@@ -469,6 +481,18 @@ fn find_command(name: &str, directories: &[PathBuf]) -> Result<PathBuf, String> 
 fn is_executable(path: &Path) -> bool {
     path.metadata()
         .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
+}
+
+// Ctrl-C in the terminal stops what the command waits on, so no notification is left on screen.
+fn stop_on_termination() -> Result<StopRequest, String> {
+    let stop = StopRequest::default();
+    termination::install(stop.clone())
+        .map_err(|error| format!("cannot handle termination signals: {error}"))?;
+    Ok(stop)
+}
+
+fn print_line(line: &str) {
+    output::write_stdout(&format!("{line}\n"));
 }
 
 // launchd sends the agent's standard error to its log.
@@ -559,28 +583,6 @@ mod tests {
 
         let error = commands.expect_err("nothing is installed");
         assert!(error.contains("set commands.gh in the config"), "{error}");
-    }
-
-    #[test]
-    fn search_directories_cover_nix_homebrew_and_the_system() {
-        let directories = search_directories(Path::new("/Users/me"), Some("me"));
-
-        assert_eq!(
-            directories,
-            [
-                "/Users/me/.nix-profile/bin",
-                "/etc/profiles/per-user/me/bin",
-                "/run/current-system/sw/bin",
-                "/nix/var/nix/profiles/default/bin",
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-                "/usr/sbin",
-                "/sbin",
-            ]
-            .map(PathBuf::from)
-        );
     }
 
     #[test]

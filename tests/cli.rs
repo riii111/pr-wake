@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs, iter,
+    os::unix::fs::symlink,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -7,11 +8,11 @@ use std::{
 use rstest::rstest;
 use serde_json::{Value, json};
 
-const ENGINE: &str = env!("CARGO_BIN_EXE_pr-wake-engine");
+const PR_WAKE: &str = env!("CARGO_BIN_EXE_pr-wake");
 
 const PR_9: &str = "https://github.com/org/pay/pull/9";
 
-// A home of its own for each run, with the environment the engine reads and nothing else.
+// A home of its own for each run, with the environment pr-wake reads and nothing else.
 struct Home {
     root: tempfile::TempDir,
 }
@@ -23,99 +24,50 @@ struct Run {
 }
 
 #[test]
-fn help_shows_the_watch_usage_and_succeeds() {
+fn help_shows_both_features_and_succeeds() {
     let output = run(&["--help"]);
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
-    assert!(stdout.contains("Usage: pr-wake-engine"), "{stdout}");
-    assert!(
-        stdout.contains("pr-wake-engine watch [--dry-run"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("Usage: pr-wake <COMMAND>"), "{stdout}");
+    assert!(stdout.contains("review"), "{stdout}");
+    assert!(stdout.contains("watch"), "{stdout}");
     assert!(output.stderr.is_empty());
 }
 
 #[test]
-fn version_names_the_engine() {
+fn version_names_pr_wake() {
     let output = run(&["--version"]);
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 version");
-    assert_eq!(
-        stdout,
-        format!("pr-wake-engine {}\n", env!("CARGO_PKG_VERSION"))
-    );
+    assert_eq!(stdout, format!("pr-wake {}\n", env!("CARGO_PKG_VERSION")));
 }
 
 #[rstest]
 #[case::no_arguments(&[])]
-#[case::another_subcommand(&["review"])]
-#[case::stray_argument(&["watch", "status"])]
-fn command_line_without_a_watch_command_is_a_usage_error(#[case] arguments: &[&str]) {
+#[case::unknown_feature(&["notify"])]
+#[case::engine_flag(&["watch", "--status"])]
+#[case::link_without_a_pr(&["watch", "link"])]
+#[case::dry_run_of_a_bare_pr(&["watch", "dry-run", PR_9])]
+fn wrong_command_line_is_a_usage_error_on_stderr(#[case] arguments: &[&str]) {
     let output = run(arguments);
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 error");
-    assert!(stderr.contains("Usage: pr-wake-engine"), "{stderr}");
-}
-
-#[test]
-fn wrong_watch_flags_are_a_usage_error_naming_what_is_wrong() {
-    for (name, arguments, says) in [
-        (
-            "pr_without_dry_run",
-            &["--pr", "https://github.com/org/pay/pull/1"][..],
-            "--pr is only for --dry-run",
-        ),
-        (
-            "release_with_dry_run",
-            &[
-                "--dry-run",
-                "--release",
-                "https://github.com/org/pay/pull/1",
-            ],
-            "use only one of --dry-run, --release, --status, --sender and --link",
-        ),
-        (
-            "status_with_release",
-            &["--status", "--release", "https://github.com/org/pay/pull/1"],
-            "use only one of --dry-run, --release, --status, --sender and --link",
-        ),
-        (
-            "take_over_without_link",
-            &["--take-over"],
-            "--take-over is only for --link",
-        ),
-        ("unknown_option", &["--nope"], "--nope"),
-    ] {
-        let refused = Home::new().watch(arguments, &[]);
-
-        assert_eq!(refused.code, Some(2), "case: {name}");
-        assert!(refused.stdout.is_empty(), "case: {name}");
-        assert!(
-            refused.stderr.contains(says),
-            "case: {name}: {}",
-            refused.stderr
-        );
-        assert!(
-            refused.stderr.contains("Usage: pr-wake-engine watch"),
-            "case: {name}: {}",
-            refused.stderr
-        );
-    }
+    assert!(stderr.contains("Usage: pr-wake"), "{stderr}");
 }
 
 #[test]
 fn calling_chat_is_recorded_as_the_sender_and_a_chat_none_can_send_to_is_warned() {
     let home = Home::new();
 
-    let unsent = home.watch(&["--link", PR_9], &[]);
-    let registered = home.watch(&["--sender"], &[("CODEX_THREAD_ID", "sender-chat")]);
-    let linked = home.watch(&["--link", PR_9], &[]);
-    let not_pr = home.watch(&["--link", "9"], &[]);
-    let shown = home.watch(&["--status"], &[]);
+    let unsent = home.watch(&["link", PR_9], &[]);
+    let registered = home.watch(&["sender"], &[("CODEX_THREAD_ID", "sender-chat")]);
+    let linked = home.watch(&["link", PR_9], &[]);
+    let not_pr = home.watch(&["link", "9"], &[]);
+    let shown = home.watch(&["status", "--json"], &[]);
 
     assert_eq!(
         unsent.json(),
@@ -134,7 +86,7 @@ fn calling_chat_is_recorded_as_the_sender_and_a_chat_none_can_send_to_is_warned(
     assert!(
         not_pr
             .stderr
-            .contains("pr-wake-engine: 9 is not watched: the PR watch needs the URL"),
+            .contains("pr-wake: 9 is not watched: the PR watch needs the URL"),
         "{}",
         not_pr.stderr
     );
@@ -148,7 +100,7 @@ fn calling_chat_is_recorded_as_the_sender_and_a_chat_none_can_send_to_is_warned(
 fn result_is_one_json_line_on_stdout() {
     let home = Home::new();
 
-    let linked = home.watch(&["--link", PR_9], &[("CODEX_THREAD_ID", "caller")]);
+    let linked = home.watch(&["link", PR_9], &[("CODEX_THREAD_ID", "caller")]);
 
     assert_eq!(linked.code, Some(0));
     assert!(linked.stdout.ends_with("}\n"), "{:?}", linked.stdout);
@@ -161,7 +113,7 @@ fn result_is_one_json_line_on_stdout() {
 #[case::chat_id_with_a_space("a b")]
 #[case::unconfirmed_chat_id("client-new-thread:1")]
 fn link_from_a_chat_without_a_confirmed_id_is_refused(#[case] id: &str) {
-    let refused = Home::new().watch(&["--link", PR_9], &[("CODEX_THREAD_ID", id)]);
+    let refused = Home::new().watch(&["link", PR_9], &[("CODEX_THREAD_ID", id)]);
 
     assert_eq!(refused.code, Some(1));
     assert!(refused.stdout.is_empty());
@@ -178,9 +130,9 @@ fn t3_code_thread_is_linked_as_a_t3_code_worker_which_needs_no_sender() {
     // T3 Code runs Codex with a CODEX_THREAD_ID of Codex's own.
     let t3 = [("T3CODE_THREAD_ID", "mcp:w1")];
 
-    let linked = home.watch(&["--link", PR_9], &t3);
-    let sender = home.watch(&["--sender"], &t3);
-    let shown = home.watch(&["--status"], &t3);
+    let linked = home.watch(&["link", PR_9], &t3);
+    let sender = home.watch(&["sender"], &t3);
+    let shown = home.watch(&["status", "--json"], &t3);
 
     assert_eq!(
         linked.json(),
@@ -200,7 +152,7 @@ fn t3_code_thread_is_linked_as_a_t3_code_worker_which_needs_no_sender() {
 #[case::claude_code_remote(&[("HARNEXUS_EXECUTION_ENV", ""), ("CLAUDE_CODE_REMOTE", "true")])]
 #[case::codex_environment(&[("HARNEXUS_EXECUTION_ENV", ""), ("CODEX_ENVIRONMENT_ID", "env")])]
 fn cloud_session_is_refused(#[case] cloud: &[(&str, &str)]) {
-    let refused = Home::new().watch(&["--status"], cloud);
+    let refused = Home::new().watch(&["status", "--json"], cloud);
 
     assert_eq!(refused.code, Some(1));
     assert!(
@@ -210,15 +162,32 @@ fn cloud_session_is_refused(#[case] cloud: &[(&str, &str)]) {
     );
 }
 
-#[test]
-fn watch_ends_before_it_can_send_when_harnexus_cannot_be_asked() {
+// harnexus-crew runs `pr-wake-engine watch` for a LaunchAgent that still runs harnexus-task watch.
+#[rstest]
+#[case::watch_run(None)]
+#[case::engine_link(Some("pr-wake-engine"))]
+fn watch_ends_before_it_can_send_when_harnexus_cannot_be_asked(#[case] link: Option<&str>) {
     let home = Home::new();
-    home.watch(&["--sender"], &[("CODEX_THREAD_ID", "sender-chat")]);
-    home.watch(&["--link", PR_9], &[]);
+    home.watch(&["sender"], &[("CODEX_THREAD_ID", "sender-chat")]);
+    home.watch(&["link", PR_9], &[]);
     let socket = home.root.path().join("missing.sock");
+    let program = link.map_or_else(
+        || PathBuf::from(PR_WAKE),
+        |name| {
+            let linked = home.root.path().join(name);
+            symlink(PR_WAKE, &linked).expect("link the engine name");
+            linked
+        },
+    );
+    let arguments = if link.is_some() {
+        ["watch"].as_slice()
+    } else {
+        ["watch", "run"].as_slice()
+    };
 
-    let refused = home.watch(
-        &[],
+    let refused = home.run(
+        &program,
+        arguments,
         &[(
             "HARNEXUS_CALL_SOCKET",
             socket.to_str().expect("a UTF-8 path"),
@@ -249,7 +218,7 @@ mod legacy_records {
     fn status_shows_the_sender_queues_awaited_answers_and_a_pending_hand_over() {
         let home = Home::legacy();
 
-        let shown = home.watch(&["--status"], &[]);
+        let shown = home.watch(&["status", "--json"], &[]);
 
         let shown = shown.json();
         assert_eq!(shown["sender"], "sender-chat");
@@ -283,7 +252,7 @@ mod legacy_records {
     fn halted_pr_is_released_and_its_message_taken_as_delivered() {
         let home = Home::legacy();
 
-        let released = home.watch(&["--release", &url(10)], &[]);
+        let released = home.watch(&["release", &url(10)], &[]);
 
         assert_eq!(
             released.json(),
@@ -300,11 +269,11 @@ mod legacy_records {
     fn same_chat_keeps_its_link_time_and_another_chat_must_take_over() {
         let home = Home::legacy();
 
-        let again = home.watch(&["--link", &url(9)], &[("CODEX_THREAD_ID", "w9")]);
-        let refused = home.watch(&["--link", &url(9)], &[("CODEX_THREAD_ID", "other")]);
+        let again = home.watch(&["link", &url(9)], &[("CODEX_THREAD_ID", "w9")]);
+        let refused = home.watch(&["link", &url(9)], &[("CODEX_THREAD_ID", "other")]);
         let kept = home.record("6db070b27f9194fb", "link");
         let taken = home.watch(
-            &["--link", &url(9), "--take-over"],
+            &["link", &url(9), "--take-over"],
             &[("CODEX_THREAD_ID", "other")],
         );
         let moved = home.record("6db070b27f9194fb", "link");
@@ -372,12 +341,18 @@ impl Home {
             .expect("parse the record")
     }
 
+    fn watch(&self, arguments: &[&str], env: &[(&str, &str)]) -> Run {
+        let arguments = iter::once("watch")
+            .chain(arguments.iter().copied())
+            .collect::<Vec<_>>();
+        self.run(Path::new(PR_WAKE), &arguments, env)
+    }
+
     // Pinned to a local run from the chat `caller`, so the ambient environment cannot change the
     // result.
-    fn watch(&self, arguments: &[&str], env: &[(&str, &str)]) -> Run {
-        let mut command = Command::new(ENGINE);
+    fn run(&self, program: &Path, arguments: &[&str], env: &[(&str, &str)]) -> Run {
+        let mut command = Command::new(program);
         command
-            .arg("watch")
             .args(arguments)
             .env_clear()
             .env("HOME", self.root.path())
@@ -386,7 +361,7 @@ impl Home {
             .env("HARNEXUS_EXECUTION_ENV", "local")
             .env("CODEX_THREAD_ID", "caller")
             .envs(env.iter().copied());
-        let output = command.output().expect("run pr-wake-engine");
+        let output = command.output().expect("run pr-wake");
         Run {
             code: output.status.code(),
             stdout: String::from_utf8(output.stdout).expect("UTF-8 output"),
@@ -403,10 +378,10 @@ impl Run {
 }
 
 fn run(arguments: &[&str]) -> Output {
-    Command::new(ENGINE)
+    Command::new(PR_WAKE)
         .args(arguments)
         .output()
-        .expect("run pr-wake-engine")
+        .expect("run pr-wake")
 }
 
 fn copy_with_unknown_fields(from: &Path, to: &Path) {

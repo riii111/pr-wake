@@ -9,7 +9,7 @@ GitHubのPRの変化を知らせるmacOS用ツール。
 
 ## インストール
 
-Go 1.24、Rust（rustup。版は`rust-toolchain.toml`で決まる）、GitHubにログイン済みの`gh`を用意する。
+Rust（rustup。版は`rust-toolchain.toml`で決まる）と、GitHubにログイン済みの`gh`を用意する。
 
 ```bash
 scripts/install.sh
@@ -18,6 +18,9 @@ scripts/install.sh
 実行ファイルは`~/.local/bin`に入る。
 `PREFIX=<dir>`を指定すると`<dir>/bin`に入る。
 常駐の登録は、使いたい機能の導入手順で行う。
+
+実行ファイルを入れ替えると、常駐は新しい版で起動し直す。
+`install`は実行したシェルの`XDG_CONFIG_HOME`・`XDG_STATE_HOME`・`HARNEXUS_CALL_SOCKET`・`HARNEXUS_STATE_PATH`・`HARNEXUS_T3_BIN`・`T3CODE_HOME`を常駐の設定へ書くため、これらを変えたら`install`をもう一度実行する。
 
 ## watch
 
@@ -92,6 +95,7 @@ sequenceDiagram
 1. `brew install vjeantet/tap/alerter`でalerterを入れる
 2. 空のフォルダ`~/review-home`を作り、Codex Appのプロジェクトとして追加する
 3. `config.example.json`を`~/.config/pr-wake/review.json`にコピーし、リポジトリとSkillの選択肢を書く
+   `prompt`には`{{.Requester}}`・`{{.Skill}}`・`{{.SkillPath}}`・`{{.Worktree}}`・`{{.PR.Repo}}`・`{{.PR.Number}}`・`{{.PR.Title}}`・`{{.PR.URL}}`・`{{.PR.HeadSHA}}`・`{{.PR.BaseRef}}`の置き換えだけを書ける
 4. `pr-wake review install`で常駐を始め、初回の通知でmacOSの通知を許可する
 
 `pr-wake review smoke --pr owner/repo#123`で通知からスレッドを開くまでを試せる。
