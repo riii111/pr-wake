@@ -1,0 +1,29 @@
+{
+ "status": "watching",
+ "reason": null,
+ "summary": {
+  "state": "OPEN",
+  "isDraft": false,
+  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "updatedAt": "2026-10-22T00:00:00Z",
+  "mergeable": "MERGEABLE",
+  "rollup": "SUCCESS",
+  "coderabbit": {
+   "state": "SUCCESS",
+   "description": "Review completed",
+   "createdAt": "2026-10-22T00:00:00Z"
+  }
+ },
+ "checkedAt": "2026-10-22T00:00:00.000Z",
+ "changedAt": "2026-10-22T00:00:00.000Z",
+ "seen": [
+  "inline:81",
+  "coderabbit:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ ],
+ "pending": [],
+ "followUp": [],
+ "conflictHead": null,
+ "delivered": null,
+ "worker": "w8",
+ "halted": null
+}
