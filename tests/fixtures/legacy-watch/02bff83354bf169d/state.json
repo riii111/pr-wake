@@ -1,0 +1,50 @@
+{
+ "status": "watching",
+ "reason": null,
+ "summary": {
+  "state": "OPEN",
+  "isDraft": false,
+  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "updatedAt": "2026-10-22T00:00:00Z",
+  "mergeable": "MERGEABLE",
+  "bots": {
+   "coderabbit": {
+    "state": "SUCCESS",
+    "description": "Review completed",
+    "createdAt": "2026-10-22T00:00:00Z"
+   }
+  },
+  "rollup": "SUCCESS"
+ },
+ "checkedAt": "2026-10-22T00:00:00.000Z",
+ "changedAt": "2026-10-22T00:00:00.000Z",
+ "seen": [
+  "inline:71",
+  "coderabbit:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bot:coderabbit"
+ ],
+ "pending": [],
+ "followUp": [],
+ "conflictHead": null,
+ "delivered": {
+  "at": "2026-10-22T10:00:00.000Z",
+  "sender": "sender-chat",
+  "prompt": "$task-worker\nhttps://github.com/org/pay/pull/7#discussion_r71",
+  "findings": [
+   {
+    "id": "inline:71",
+    "kind": "inline",
+    "bot": "coderabbit",
+    "label": "CodeRabbit (Major)",
+    "path": "src/pay.kt",
+    "line": 42,
+    "url": "https://github.com/org/pay/pull/7#discussion_r71",
+    "createdAt": "2026-10-21T00:00:00Z",
+    "approval": null
+   }
+  ],
+  "followUp": false
+ },
+ "worker": "old-chat",
+ "halted": null
+}

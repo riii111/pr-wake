@@ -13,6 +13,7 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::ser::PrettyFormatter;
+use serde_path_to_error::Track;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BaseDirectories {
@@ -45,7 +46,8 @@ pub(crate) struct RecordError {
 #[derive(Debug)]
 pub(crate) enum RecordErrorKind {
     Read(io::Error),
-    Invalid(serde_json::Error),
+    // The error names the damaged field, so whoever reads it knows what to repair.
+    Invalid(serde_path_to_error::Error<serde_json::Error>),
     Write(io::Error),
     Lock(io::Error),
 }
@@ -98,7 +100,7 @@ pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, R
     else {
         return Ok(None);
     };
-    serde_json::from_slice(&content)
+    decode(&content)
         .map(Some)
         .map_err(|error| RecordError::new(path, RecordErrorKind::Invalid(error)))
 }
@@ -130,6 +132,17 @@ fn read_regular_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
         return Err(io::Error::other("not a regular file"));
     }
     fs::read(path).map(Some)
+}
+
+fn decode<T: DeserializeOwned>(
+    content: &[u8],
+) -> Result<T, serde_path_to_error::Error<serde_json::Error>> {
+    let mut deserializer = serde_json::Deserializer::from_slice(content);
+    let value = serde_path_to_error::deserialize(&mut deserializer)?;
+    deserializer
+        .end()
+        .map_err(|error| serde_path_to_error::Error::new(Track::new().path(), error))?;
+    Ok(value)
 }
 
 fn encode(value: &impl Serialize, layout: JsonLayout) -> serde_json::Result<Vec<u8>> {
@@ -430,6 +443,10 @@ mod tests {
                 "wrong_field_type",
                 r#"{"status":1,"seen":[],"pending":[],"summary":null}"#,
             ),
+            (
+                "trailing_content",
+                r#"{"status":"watching","seen":[],"pending":[],"summary":null} {}"#,
+            ),
         ] {
             let directory = tempfile::tempdir().expect("create a directory");
             let path = directory.path().join("state.json");
@@ -448,6 +465,22 @@ mod tests {
                 "case: {name}: {loaded:?}"
             );
         }
+    }
+
+    #[test]
+    fn invalid_record_error_names_the_damaged_field() {
+        let directory = tempfile::tempdir().expect("create a directory");
+        let path = directory.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{"status":"watching","seen":[],"pending":[{"type":1}],"summary":null}"#,
+        )
+        .expect("write the record");
+
+        let loaded = load_json::<Record>(&path);
+
+        let error = loaded.expect_err("the record is refused").to_string();
+        assert!(error.contains("pending[0].type"), "{error}");
     }
 
     #[test]
