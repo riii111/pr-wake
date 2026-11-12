@@ -107,7 +107,7 @@ struct Launched {
 }
 
 // Well under the one second within which a wait must notice a stop request.
-const STOP_CHECK: Duration = Duration::from_millis(200);
+const STOP_CHECK: Duration = Duration::from_millis(500);
 const STATUS_ROWS: usize = 20;
 
 // Runs until a stop request, or until the program is replaced so that launchd starts the new one.
@@ -851,7 +851,7 @@ mod tests {
             [
                 format!("config: {}", home.env.paths.config.display()),
                 "commands: gh=/x/gh git=/x/git alerter=/x/alerter open=/x/open osascript=/x/osascript".to_owned(),
-                "pollIntervalSeconds: 60".to_owned(),
+                "pollIntervalSeconds: 30".to_owned(),
                 format!(
                     "worktreeRoot: {}",
                     home.directory.path().join("worktrees").display()

@@ -72,7 +72,7 @@ const TERMINATION_GRACE: Duration = Duration::from_secs(5);
 // A pipe still open this long after SIGKILL reached the group is held by a process outside it.
 const OUTPUT_GRACE: Duration = Duration::from_secs(1);
 // Well under the one second within which every wait must notice a stop request.
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 impl ExternalCommand {
     #[must_use]

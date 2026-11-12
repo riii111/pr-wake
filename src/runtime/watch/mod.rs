@@ -180,7 +180,7 @@ const EXECUTION_ENV: &str = "HARNEXUS_EXECUTION_ENV";
 const EPOCH: &str = "1970-01-01T00:00:00.000Z";
 
 // Well under the one second within which a wait must notice a stop request.
-const STOP_CHECK: Duration = Duration::from_millis(200);
+const STOP_CHECK: Duration = Duration::from_millis(500);
 
 // A command prints its result as one JSON line; the watch itself prints only its log.
 pub(crate) fn run(mode: Mode, env: Env<'_>) -> Result<Option<String>, Failure> {

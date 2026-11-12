@@ -252,7 +252,7 @@ fn default_review_bots() -> Vec<ConfiguredBot> {
 }
 
 const fn default_poll_interval() -> u64 {
-    60
+    30
 }
 
 const fn default_idle_interval() -> u64 {
@@ -369,7 +369,7 @@ mod tests {
                 )]),
                 review_bots: vec![reviewers::coderabbit()],
                 ignore: Vec::new(),
-                poll_interval_seconds: 60,
+                poll_interval_seconds: 30,
                 idle_interval_seconds: 600,
                 idle_after_hours: 72.0,
                 quiet_hours: Some(QuietHours {

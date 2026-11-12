@@ -3,7 +3,7 @@
     "example-org/example-repo": "~/ghq/github.com/example-org/example-repo"
   },
   "teams": [],
-  "pollIntervalSeconds": 60,
+  "pollIntervalSeconds": 30,
   "notificationTimeoutSeconds": 1800,
   "maxNotifications": 3,
   "choices": [

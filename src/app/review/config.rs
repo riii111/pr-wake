@@ -95,7 +95,7 @@ struct ChoiceFile {
 }
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 1800;
-const DEFAULT_POLL_SECONDS: u64 = 60;
+const DEFAULT_POLL_SECONDS: u64 = 30;
 const MIN_POLL_SECONDS: i64 = 30;
 const DEFAULT_NOTIFICATIONS: usize = 3;
 const MAX_NOTIFICATIONS: i64 = 10;
@@ -356,7 +356,7 @@ mod tests {
         let config = resolve(r#"{"repositories":{"acme/app":"~/src/./app/"},"choices":[CODE]}"#)
             .expect("a valid config");
 
-        assert_eq!(config.poll_interval_seconds, 60);
+        assert_eq!(config.poll_interval_seconds, 30);
         assert_eq!(config.notification_timeout_seconds, 1800);
         assert_eq!(config.max_notifications, 3);
         assert_eq!(

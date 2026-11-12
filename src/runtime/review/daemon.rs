@@ -836,7 +836,7 @@ mod tests {
         );
 
         let paused = paused.into_inner().expect("read the waits");
-        assert!(paused.contains(&Duration::from_mins(1)), "{paused:?}");
+        assert!(paused.contains(&Duration::from_secs(30)), "{paused:?}");
     }
 
     #[test]
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(ended, Ok(()));
         assert_eq!(
             delays.into_inner().expect("read the delays"),
-            [120, 240, 480].map(Duration::from_secs)
+            [60, 120, 240].map(Duration::from_secs)
         );
         assert!(
             fixture
