@@ -693,64 +693,48 @@ mod tests {
     }
 
     #[test]
-    fn linked_chat_that_was_not_sent_to_is_reported_without_a_new_chat() {
-        let fixture = Fixture::new();
-        fixture.answer(CODE_REVIEW);
-        fixture.link_chat("acme/app", 12, "review-chat");
-        fixture.set_delivery(Delivery::NotSent("not_sent: no bridge".to_owned()));
+    fn failed_send_to_the_linked_chat_is_reported_without_a_new_chat_or_a_resend() {
+        for (name, delivery, expected) in [
+            (
+                "not_sent",
+                Delivery::NotSent("not_sent: no bridge".to_owned()),
+                "could not send to chat review-chat: not_sent",
+            ),
+            (
+                "unknown",
+                Delivery::Unknown("unknown: no answer".to_owned()),
+                "chat review-chat could not be confirmed",
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.answer(CODE_REVIEW);
+            fixture.link_chat("acme/app", 12, "review-chat");
+            fixture.set_delivery(delivery);
 
-        fixture.with_daemon(&Setup::default(), |daemon, stop| {
-            daemon.poll_once().expect("baseline poll");
-            notifying(daemon, stop, || {
-                fixture.request("acme/app", 12, &[requested(30, "sato")]);
-                daemon.poll_once().expect("poll");
-                fixture.wait_status("acme/app#12@30", Status::Failed);
-                wait_for(|| fixture.ran("osascript"));
+            let queued = fixture.with_daemon(&Setup::default(), |daemon, stop| {
+                daemon.poll_once().expect("baseline poll");
+                notifying(daemon, stop, || {
+                    fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                    daemon.poll_once().expect("poll");
+                    fixture.wait_status("acme/app#12@30", Status::Failed);
+                    wait_for(|| fixture.ran("osascript"));
+                });
+                daemon.poll_once().expect("poll again");
+                daemon.queued_count()
             });
-        });
 
-        assert_eq!(fixture.sent().len(), 1);
-        assert!(fixture.opened().is_empty());
-        let failed = fixture.state().requests["acme/app#12@30"].clone();
-        assert!(
-            failed
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("could not send to chat review-chat: not_sent")),
-            "{failed:?}"
-        );
-    }
-
-    #[test]
-    fn unconfirmed_send_opens_no_chat_and_is_not_sent_again() {
-        let fixture = Fixture::new();
-        fixture.answer(CODE_REVIEW);
-        fixture.link_chat("acme/app", 12, "review-chat");
-        fixture.set_delivery(Delivery::Unknown("unknown: no answer".to_owned()));
-
-        let queued = fixture.with_daemon(&Setup::default(), |daemon, stop| {
-            daemon.poll_once().expect("baseline poll");
-            notifying(daemon, stop, || {
-                fixture.request("acme/app", 12, &[requested(30, "sato")]);
-                daemon.poll_once().expect("poll");
-                fixture.wait_status("acme/app#12@30", Status::Failed);
-                wait_for(|| fixture.ran("osascript"));
-            });
-            daemon.poll_once().expect("poll again");
-            daemon.queued_count()
-        });
-
-        assert_eq!(queued, 0);
-        assert_eq!(fixture.sent().len(), 1);
-        assert!(fixture.opened().is_empty());
-        let failed = fixture.state().requests["acme/app#12@30"].clone();
-        assert!(
-            failed
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("chat review-chat could not be confirmed")),
-            "{failed:?}"
-        );
+            assert_eq!(queued, 0, "case: {name}");
+            assert_eq!(fixture.sent().len(), 1, "case: {name}");
+            assert!(fixture.opened().is_empty(), "case: {name}");
+            let failed = fixture.state().requests["acme/app#12@30"].clone();
+            assert!(
+                failed
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(expected)),
+                "case: {name}: {failed:?}"
+            );
+        }
     }
 
     #[test]
