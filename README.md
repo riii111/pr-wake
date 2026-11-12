@@ -9,7 +9,7 @@ GitHubのPRの変化を知らせるmacOS用ツール。
 
 ## インストール
 
-Go 1.24、Bun 1.4.4、GitHubにログイン済みの`gh`を用意する。
+Go 1.24、Rust（rustup。版は`rust-toolchain.toml`で決まる）、GitHubにログイン済みの`gh`を用意する。
 
 ```bash
 scripts/install.sh
@@ -55,6 +55,9 @@ sequenceDiagram
 }
 ```
 
+`reviewBots`に独自のbotを書く場合、`severity`の正規表現はRustの`regex`の書式で読む。
+先読み・後読み・後方参照は使えず、`\b`はUnicodeの単語境界になる（ASCIIの単語境界は`(?-u:\b)`）。
+
 ワーカーのチャットで`pr-wake watch link <PRのURL>`を実行すると、そのPRの監視が始まる。
 T3 Codeのスレッドへは`t3` CLIで送るため、送信元の登録は要らない。
 
@@ -62,6 +65,8 @@ T3 Codeのスレッドへは`t3` CLIで送るため、送信元の登録は要�
 - `pr-wake watch dry-run`: 送る内容を確認する
 - `pr-wake watch release <PRのURL>`: 停止した監視を再開する
 - `pr-wake watch link <PRのURL> --take-over`: 別のチャットから監視を引き継ぐ
+
+監視の記録は`$XDG_STATE_HOME/harnexus-crew/watch/`（既定は`~/.local/state/harnexus-crew/watch/`）に置く。
 
 ## review
 
