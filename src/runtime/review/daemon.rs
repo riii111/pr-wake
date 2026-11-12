@@ -333,11 +333,6 @@ impl<'deps> Daemon<'deps> {
                 }
             }
         }));
-        if let Some(unsent) = &launched.unsent {
-            self.log(&format!(
-                "{key}: not sent to the linked chat, so a new one opens: {unsent}"
-            ));
-        }
         match (launched.result, &launched.chat) {
             (Ok(()), Some(chat)) => self.log(&format!(
                 "{key}: sent to chat {chat} for {} at {}",
@@ -698,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_chat_that_was_not_sent_to_gives_way_to_a_new_chat() {
+    fn linked_chat_that_was_not_sent_to_is_reported_without_a_new_chat() {
         let fixture = Fixture::new();
         fixture.answer(CODE_REVIEW);
         fixture.link_chat("acme/app", 12, "review-chat");
@@ -709,12 +704,21 @@ mod tests {
             notifying(daemon, stop, || {
                 fixture.request("acme/app", 12, &[requested(30, "sato")]);
                 daemon.poll_once().expect("poll");
-                fixture.wait_status("acme/app#12@30", Status::Launched);
+                fixture.wait_status("acme/app#12@30", Status::Failed);
+                wait_for(|| fixture.ran("osascript"));
             });
         });
 
         assert_eq!(fixture.sent().len(), 1);
-        assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
+        assert!(fixture.opened().is_empty());
+        let failed = fixture.state().requests["acme/app#12@30"].clone();
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("could not send to chat review-chat: not_sent")),
+            "{failed:?}"
+        );
     }
 
     #[test]

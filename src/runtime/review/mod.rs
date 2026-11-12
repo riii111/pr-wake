@@ -101,10 +101,8 @@ pub(crate) struct Smoke<'smoke> {
 struct Launched {
     pr: Option<PullRequest>,
     worktree: Option<PathBuf>,
-    // The linked chat that was sent the review, or may have been.
+    // The linked chat the review was for, whether or not the send went through.
     chat: Option<String>,
-    // Why the linked chat could not be sent to, so a new chat was opened instead.
-    unsent: Option<String>,
     result: Result<(), String>,
 }
 
@@ -294,9 +292,6 @@ pub(crate) fn smoke(
     if let Some(worktree) = &launched.worktree {
         out(&format!("worktree: {}", worktree.display()));
     }
-    if let Some(unsent) = &launched.unsent {
-        out(&format!("not sent to the linked chat: {unsent}"));
-    }
     launched.result?;
     match &launched.chat {
         Some(chat) => out(&format!("sent: the review went to the linked chat {chat}")),
@@ -477,7 +472,6 @@ fn launch(
                 pr: None,
                 worktree: None,
                 chat: None,
-                unsent: None,
                 result: Err(error),
             };
         }
@@ -489,43 +483,41 @@ fn launch(
                 pr: Some(pr),
                 worktree: None,
                 chat: None,
-                unsent: None,
                 result: Err(error),
             };
         }
     };
     let prompt = choice.render(&pr, requester, &worktree);
-    let ended = |chat, unsent, result| Launched {
+    let ended = |chat, result| Launched {
         pr: Some(pr.clone()),
         worktree: Some(worktree.clone()),
         chat,
-        unsent,
         result,
     };
 
     let linked = match linked_chat(tools, &pr) {
         Ok(linked) => linked,
-        Err(error) => return ended(None, None, Err(error)),
+        Err(error) => return ended(None, Err(error)),
     };
-    let mut unsent = None;
+    // A linked PR stays in its chat, so a failed send is reported rather than split off into a new chat.
     if let Some(chat) = linked {
-        match (tools.send)(&chat.thread, &prompt, stop) {
-            Delivery::Sent => return ended(Some(chat.thread), None, Ok(())),
-            Delivery::Unknown(reason) => {
-                let error = format!(
-                    "the send to chat {} could not be confirmed; check that chat before asking it again: {reason}",
-                    chat.thread
-                );
-                return ended(Some(chat.thread), None, Err(error));
+        let error = match (tools.send)(&chat.thread, &prompt, stop) {
+            Delivery::Sent => return ended(Some(chat.thread), Ok(())),
+            Delivery::NotSent(reason) => {
+                format!("could not send to chat {}: {reason}", chat.thread)
             }
-            Delivery::NotSent(reason) => unsent = Some(format!("chat {}: {reason}", chat.thread)),
-        }
+            Delivery::Unknown(reason) => format!(
+                "the send to chat {} could not be confirmed; check that chat before asking it again: {reason}",
+                chat.thread
+            ),
+        };
+        return ended(Some(chat.thread), Err(error));
     }
 
     let link = new_chat_link(&with_link_step(&prompt, &pr.url), &tools.config.chat_home);
     let result = open_link(tools.run, &tools.commands.open, &link, stop)
         .map_err(|error| format!("open deep link: {error}"));
-    ended(None, unsent, result)
+    ended(None, result)
 }
 
 fn linked_chat(tools: &Tools<'_>, pr: &PullRequest) -> Result<Option<ReviewChat>, String> {
