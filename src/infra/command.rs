@@ -60,13 +60,6 @@ pub(crate) enum Termination {
 }
 
 // One run of a tool that tells its success by exiting with 0, as the review's tools do.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the review commands reach it once pr-wake runs them"
-    )
-)]
 pub(crate) struct ToolCall<'call> {
     pub(crate) program: &'call Path,
     pub(crate) arguments: Vec<OsString>,
@@ -75,13 +68,6 @@ pub(crate) struct ToolCall<'call> {
 }
 
 // The tool's standard output, or why it did not end with 0, as the review records and logs it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the review commands reach it once pr-wake runs them"
-    )
-)]
 pub(crate) type RunTool<'run> = dyn Fn(&ToolCall<'_>) -> Result<Vec<u8>, String> + Sync + 'run;
 
 // alerter removes its notification only on SIGTERM, so SIGKILL waits this long after it.
@@ -186,13 +172,17 @@ impl ExternalCommand {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the review commands reach it once pr-wake runs them"
-    )
-)]
+// As a shell would echo it, so the owner sees what pr-wake ran.
+#[must_use]
+pub(crate) fn command_line(program: &str, arguments: &[OsString]) -> String {
+    let mut line = program.to_owned();
+    for argument in arguments {
+        line.push(' ');
+        line.push_str(&argument.to_string_lossy());
+    }
+    line
+}
+
 pub(crate) fn run_tool(call: &ToolCall<'_>) -> Result<Vec<u8>, String> {
     let output = ExternalCommand::new(call.program, call.timeout)
         .arguments(&call.arguments)

@@ -7,11 +7,6 @@ description = "Tell AI task workers about what happens on their GitHub pull requ
 repository = "https://github.com/riii111/pr-wake"
 publish = false
 
-# The Go pr-wake still owns the CLI, so this crate replaces only the watch engine for now.
-[[bin]]
-name = "pr-wake-engine"
-path = "src/main.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 jiff = "0.2"
