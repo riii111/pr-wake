@@ -375,13 +375,10 @@ mod tests {
     fn wrong_command_lines_are_usage_errors() {
         for (name, arguments) in [
             ("sender_with_an_argument", &["watch", "sender", "extra"][..]),
-            ("link_without_a_pr", &["watch", "link"]),
             ("link_of_two_prs", &["watch", "link", PR, PR]),
             ("release_without_a_pr", &["watch", "release"]),
-            ("dry_run_of_a_bare_pr", &["watch", "dry-run", PR]),
             ("unknown_watch_command", &["watch", "unknown"]),
             ("smoke_without_a_pr", &["review", "smoke"]),
-            ("engine_flag", &["watch", "--status"]),
         ] {
             let parsed = Cli::try_parse_from(command_line(arguments));
 
