@@ -1,0 +1,29 @@
+id: named-rstest-cases
+language: Rust
+severity: error
+message: Name rstest cases with #[case::name(...)].
+files:
+  - src/**/*.rs
+  - tests/**/*.rs
+utils:
+  unnamed-case:
+    kind: attribute_item
+    has:
+      # The identifier directly under the attribute is case, not its named suffix.
+      kind: attribute
+      has:
+        kind: identifier
+        regex: '^case$'
+  attribute-or-comment:
+    any:
+      - kind: attribute_item
+      - kind: line_comment
+      - kind: block_comment
+rule:
+  all:
+    - matches: unnamed-case
+    - precedes:
+        kind: function_item
+        stopBy:
+          not:
+            matches: attribute-or-comment

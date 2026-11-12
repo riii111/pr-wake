@@ -1,0 +1,54 @@
+id: named-rstest-cases
+valid:
+  # Named declarations are allowed, including a bare #[case] on the parameter.
+  # Keep this same-line form to check neighboring attributes on a function.
+  - |-
+    #[rstest] #[case::up_arrow(Key::Up)] fn maps(#[case] key: Key) {}
+  - |-
+    #[rstest]
+    #[case::up_arrow(Key::Up)]
+    #[case::up_vim(Key::Char('k'))]
+    fn maps(#[case] key: Key) {}
+  - |-
+    #[case::named(1)]
+    fn f() {}
+
+  # Other items are outside this rule; an intervening item blocks a later function.
+  - |-
+    #[case(1)] const VALUE: i32 = 1; fn f() {}
+
+invalid:
+  # Function-level cases need a name even when rstest and parameters are present.
+  # Preserve same-line attributes to cover that source form.
+  - |-
+    #[rstest] #[case(1)] fn f(#[case] value: i32) {}
+  - |-
+    #[rstest] #[case] fn f(#[case] value: i32) {}
+  - |-
+    #[case(1)]
+    fn f() {}
+  - |-
+    #[rstest]
+    #[case::named(1)]
+    #[case(2)]
+    fn f(#[case] value: i32) {}
+
+  # A later attribute or comment does not detach the unnamed case from the function.
+  - |-
+    #[case(1)]
+    #[allow(dead_code)]
+    fn f() {}
+  - |-
+    #[case(1)]
+    /// A test.
+    fn f() {}
+  - |-
+    #[case(1)]
+    /* test */
+    fn f() {}
+
+  # The line break inside the case attribute must remain part of this example.
+  - |-
+    #[case
+      (1)]
+    fn f() {}

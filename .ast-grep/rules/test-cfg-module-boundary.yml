@@ -1,0 +1,72 @@
+id: test-cfg-module-boundary
+language: Rust
+severity: error
+message: Test-dependent cfg on this item violates the module-boundary rule.
+note: |-
+  Put test-only code in a module with a direct positive test predicate.
+  A not(test) branch is production code: keep it outside test-only modules and reconsider switching
+  production implementations based on whether tests are being built.
+  Keep cross-crate test-support APIs separately feature-gated.
+files:
+  - src/**/*.rs
+  - tests/**/*.rs
+utils:
+  test-cfg:
+    kind: attribute_item
+    has:
+      kind: attribute
+      all:
+        - has:
+            kind: identifier
+            regex: '^cfg$'
+        - has:
+            kind: token_tree
+            has:
+              kind: identifier
+              regex: '^test$'
+              stopBy: end
+  positive-test-cfg:
+    kind: attribute_item
+    has:
+      kind: attribute
+      has:
+        kind: token_tree
+        field: arguments
+        any:
+          - has:
+              kind: identifier
+              regex: '^test$'
+          - has:
+              kind: identifier
+              regex: '^test$'
+              not:
+                inside:
+                  kind: token_tree
+                  follows:
+                    kind: identifier
+                    regex: '^not$'
+                  stopBy: end
+              inside:
+                kind: token_tree
+                follows:
+                  kind: identifier
+                  regex: '^(all|any)$'
+                stopBy:
+                  kind: token_tree
+              stopBy: end
+  attribute-or-comment:
+    any:
+      - kind: attribute_item
+      - kind: line_comment
+      - kind: block_comment
+rule:
+  all:
+    - matches: test-cfg
+    - not:
+        all:
+          - matches: positive-test-cfg
+          - precedes:
+              kind: mod_item
+              stopBy:
+                not:
+                  matches: attribute-or-comment

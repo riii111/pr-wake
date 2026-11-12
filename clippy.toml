@@ -1,0 +1,3 @@
+msrv = "1.98"
+allow-dbg-in-tests = true
+absolute-paths-allowed-crates = ["std", "core", "alloc", "clap", "jiff", "libc", "serde", "serde_json"]
