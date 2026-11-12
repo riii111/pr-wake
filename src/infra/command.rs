@@ -4,6 +4,7 @@ use std::{
     fmt::{self, Display, Formatter},
     io::{self, Read, Write},
     os::unix::process::{CommandExt, ExitStatusExt},
+    path::Path,
     process::{Child, Command, ExitStatus, Stdio},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -57,6 +58,31 @@ pub(crate) enum Termination {
     Timeout(Duration),
     StopRequest,
 }
+
+// One run of a tool that tells its success by exiting with 0, as the review's tools do.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the review commands reach it once pr-wake runs them"
+    )
+)]
+pub(crate) struct ToolCall<'call> {
+    pub(crate) program: &'call Path,
+    pub(crate) arguments: Vec<OsString>,
+    pub(crate) timeout: Duration,
+    pub(crate) stop: &'call StopRequest,
+}
+
+// The tool's standard output, or why it did not end with 0, as the review records and logs it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the review commands reach it once pr-wake runs them"
+    )
+)]
+pub(crate) type RunTool<'run> = dyn Fn(&ToolCall<'_>) -> Result<Vec<u8>, String> + Sync + 'run;
 
 // alerter removes its notification only on SIGTERM, so SIGKILL waits this long after it.
 const TERMINATION_GRACE: Duration = Duration::from_secs(5);
@@ -158,6 +184,33 @@ impl ExternalCommand {
             kind,
         }
     }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the review commands reach it once pr-wake runs them"
+    )
+)]
+pub(crate) fn run_tool(call: &ToolCall<'_>) -> Result<Vec<u8>, String> {
+    let output = ExternalCommand::new(call.program, call.timeout)
+        .arguments(&call.arguments)
+        .run(call.stop)
+        .map_err(|error| error.to_string())?;
+    if output.code == 0 {
+        return Ok(output.stdout);
+    }
+    let name = call
+        .program
+        .file_name()
+        .unwrap_or(call.program.as_os_str())
+        .to_string_lossy();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(match stderr.trim() {
+        "" => format!("{name}: exit status {}", output.code),
+        stderr => format!("{name}: exit status {}: {stderr}", output.code),
+    })
 }
 
 impl CommandError {
@@ -365,7 +418,7 @@ fn join<T>(handle: JoinHandle<io::Result<T>>) -> io::Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::fs;
 
     use rstest::rstest;
 
@@ -592,6 +645,52 @@ mod tests {
         );
         let limit = timeout + TERMINATION_GRACE + OUTPUT_GRACE + Duration::from_secs(1);
         assert!(waited < limit, "released {waited:?} after the start");
+    }
+
+    #[test]
+    fn tool_gives_its_output_only_when_it_exits_with_zero() {
+        let stop = StopRequest::default();
+        for (name, script, expected) in [
+            ("success", "printf out; printf err >&2", Ok(b"out".to_vec())),
+            (
+                "failure_with_stderr",
+                "printf out; printf ' err\\n' >&2; exit 3",
+                Err("sh: exit status 3: err".to_owned()),
+            ),
+            (
+                "silent_failure",
+                "exit 1",
+                Err("sh: exit status 1".to_owned()),
+            ),
+        ] {
+            let call = ToolCall {
+                program: Path::new(SHELL),
+                arguments: vec!["-c".into(), script.into()],
+                timeout: TEN_SECONDS,
+                stop: &stop,
+            };
+
+            assert_eq!(run_tool(&call), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn tool_that_cannot_start_is_told_with_its_path() {
+        let stop = StopRequest::default();
+        let call = ToolCall {
+            program: Path::new("/nonexistent/pr-wake-tool"),
+            arguments: Vec::new(),
+            timeout: TEN_SECONDS,
+            stop: &stop,
+        };
+
+        let ran = run_tool(&call);
+
+        assert!(
+            ran.as_ref()
+                .is_err_and(|error| error.contains("/nonexistent/pr-wake-tool")),
+            "{ran:?}"
+        );
     }
 
     fn shell(script: &str, timeout: Duration) -> ExternalCommand {
