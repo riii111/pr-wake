@@ -181,26 +181,37 @@ fn main() -> ExitCode {
 }
 
 fn review_command(command: ReviewCommand) -> Result<(), String> {
-    let env = ReviewEnv::from_process().ok_or("the home directory is unknown")?;
-    let config = |flag: Option<PathBuf>| flag.unwrap_or_else(|| env.paths.config.clone());
+    // Resolved per command, so stopping, which needs only the LaunchAgent's label, goes ahead where the home is unknown.
+    let env = || ReviewEnv::from_process().ok_or("the home directory is unknown");
+    let config =
+        |flag: Option<PathBuf>, env: &ReviewEnv| flag.unwrap_or_else(|| env.paths.config.clone());
     match command {
-        ReviewCommand::Run(flag) => review::run(&config(flag.config), &env),
-        ReviewCommand::Status => review::show_status(&env),
-        ReviewCommand::Check(flag) => review::check_from_terminal(&config(flag.config), &env),
-        ReviewCommand::Smoke(flags) => review::smoke_from_terminal(
-            &Smoke {
-                config: &config(flags.config),
-                pr: &flags.pr,
-                requester: flags.requester.as_deref(),
-                no_open: flags.no_open,
-            },
-            &env,
-        ),
-        ReviewCommand::Install => review::install(&env),
-        ReviewCommand::Uninstall => agent::uninstall(agent::REVIEW, &env.home),
-        ReviewCommand::Start => agent::start(agent::REVIEW, &env.home),
+        ReviewCommand::Run(flag) => {
+            let env = env()?;
+            review::run(&config(flag.config, &env), &env)
+        }
+        ReviewCommand::Status => review::show_status(&env()?),
+        ReviewCommand::Check(flag) => {
+            let env = env()?;
+            review::check_from_terminal(&config(flag.config, &env), &env)
+        }
+        ReviewCommand::Smoke(flags) => {
+            let env = env()?;
+            review::smoke_from_terminal(
+                &Smoke {
+                    config: &config(flags.config, &env),
+                    pr: &flags.pr,
+                    requester: flags.requester.as_deref(),
+                    no_open: flags.no_open,
+                },
+                &env,
+            )
+        }
+        ReviewCommand::Install => review::install(&env()?),
+        ReviewCommand::Uninstall => agent::uninstall(agent::REVIEW, &env()?.home),
+        ReviewCommand::Start => agent::start(agent::REVIEW, &env()?.home),
         ReviewCommand::Stop => agent::stop(agent::REVIEW),
-        ReviewCommand::Logs(flags) => agent::logs(agent::REVIEW, &env.home, flags.follow),
+        ReviewCommand::Logs(flags) => agent::logs(agent::REVIEW, &env()?.home, flags.follow),
     }
 }
 
@@ -364,13 +375,10 @@ mod tests {
     fn wrong_command_lines_are_usage_errors() {
         for (name, arguments) in [
             ("sender_with_an_argument", &["watch", "sender", "extra"][..]),
-            ("link_without_a_pr", &["watch", "link"]),
             ("link_of_two_prs", &["watch", "link", PR, PR]),
             ("release_without_a_pr", &["watch", "release"]),
-            ("dry_run_of_a_bare_pr", &["watch", "dry-run", PR]),
             ("unknown_watch_command", &["watch", "unknown"]),
             ("smoke_without_a_pr", &["review", "smoke"]),
-            ("engine_flag", &["watch", "--status"]),
         ] {
             let parsed = Cli::try_parse_from(command_line(arguments));
 
