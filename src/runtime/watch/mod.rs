@@ -48,7 +48,6 @@ use crate::{
     },
 };
 
-// What `pr-wake watch` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Mode {
     Run,
@@ -60,8 +59,7 @@ pub(crate) enum Mode {
     Link { pr: String, take_over: bool },
 }
 
-// A failure's message is shown to whoever ran the command and may carry a path or what a command
-// printed, so the log records the tag alone.
+// A failure's message may carry a path or what a command printed, so the log records the tag alone.
 #[derive(Debug)]
 pub(crate) enum Failure {
     Config(RecordError),
@@ -74,7 +72,6 @@ pub(crate) enum Failure {
 // A bridge call as one thread, answered with the bridge's outcome.
 type BridgeCall<'call> = dyn Fn(&str, &str, &Map<String, Value>) -> Map<String, Value> + 'call;
 
-// The workers of both apps, each linked worker reached through the app its link names.
 pub(crate) struct AppWorkers<Codex, T3> {
     pub(crate) codex: Codex,
     pub(crate) t3: T3,
@@ -113,7 +110,7 @@ struct StatusOutput {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum PrStatus {
-    // Shown as such, as the watch logs and skips it.
+    // The watch logs and skips an unreadable record, so the status shows it as unreadable.
     Unreadable {
         pr: String,
         worker: String,
@@ -179,8 +176,7 @@ const T3_THREAD_ENV: &str = "T3CODE_THREAD_ID";
 const CODEX_THREAD_ENV: &str = "CODEX_THREAD_ID";
 const EXECUTION_ENV: &str = "HARNEXUS_EXECUTION_ENV";
 
-// A PR no watch has linked has no state, so it is shown as read for the first time and its link
-// time is never used.
+// A PR no watch has linked has no state, so it is shown as a first read and this link time is never used.
 const EPOCH: &str = "1970-01-01T00:00:00.000Z";
 
 // Well under the one second within which a wait must notice a stop request.
@@ -208,8 +204,7 @@ pub(crate) fn run(mode: Mode, env: Env<'_>) -> Result<Option<String>, Failure> {
     }
 }
 
-// The config is checked with a dry run before the running agent stops, so a failed check leaves
-// it running.
+// A bad config must keep the running agent alive, so a dry run checks it before the agent stops.
 pub(crate) fn install(env: Env<'_>) -> Result<(), String> {
     let config = watch_paths().map_err(|failure| failure.to_string())?.config;
     if !config.exists() {
@@ -220,6 +215,7 @@ pub(crate) fn install(env: Env<'_>) -> Result<(), String> {
     }
     output::write_stdout("$ pr-wake watch dry-run\n");
     run(Mode::DryRun(Vec::new()), env).map_err(|failure| failure.to_string())?;
+
     let home = home_of(env).ok_or("the home directory is unknown")?;
     agent::remove_legacy(agent::LEGACY_WATCH, &home)?;
     agent::install(agent::WATCH, &home, agent::user().as_deref(), env)
@@ -244,6 +240,7 @@ fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
     if program.is_none() {
         log.write(Entry::new("replace_check_off"));
     }
+
     // Said once at start, since without a registered chat no Codex worker is ever sent to.
     match watch_record::load_sender(&paths.state) {
         Ok(Some(_)) => {}
@@ -252,9 +249,9 @@ fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
             log.write(Entry::new("no_sender_registered").with("error", error.to_string()));
         }
     }
+
     let bridge = Bridge::new(socket_of(env), CallTimeouts::STANDARD, stop.clone());
-    // Checked before the watch can send, so a harnexus without the expected protocol is never
-    // written to.
+    // A harnexus without protocol 1 is never written to, so it is checked before the watch can send.
     bridge.check_v1().map_err(Failure::Refused)?;
 
     let unsupported = RefCell::new(None);
@@ -274,6 +271,7 @@ fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
     let replaced = program
         .as_ref()
         .map(|program| move || program.is_replaced());
+
     cycle::watch_forever(Watch {
         cycle: CycleDeps {
             paths,
@@ -291,8 +289,7 @@ fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
     })
 }
 
-// A bridge replaced by an older one while the watch runs ends it between cycles, as at start; a
-// closed app only waits.
+// A bridge replaced by an older one ends the watch between cycles, as at start; a closed app only waits.
 fn watched_call<'call>(
     call: &'call BridgeCall<'call>,
     unsupported: &'call RefCell<Option<String>>,
@@ -323,8 +320,7 @@ fn ended_by(unsupported: &RefCell<Option<String>>) -> Option<String> {
         .map(|message| format!("cannot use the harnexus call socket: {message}"))
 }
 
-// The watch needs the Codex App on the same Mac, so a Cloud session is refused with the reason
-// rather than a missing-socket hint.
+// The watch needs the Codex App on this Mac, so a Cloud session gets that reason, not a missing-socket hint.
 fn refuse_in_cloud(env: Env<'_>) -> Result<(), Failure> {
     if let Some(explicit) = present(env(EXECUTION_ENV)) {
         return match explicit.to_str() {
@@ -336,6 +332,7 @@ fn refuse_in_cloud(env: Env<'_>) -> Result<(), Failure> {
             ))),
         };
     }
+
     let cloud = present(env("CODEX_ENVIRONMENT_ID")).is_some()
         || env("CLAUDE_CODE_REMOTE").is_some_and(|remote| remote == "true");
     if cloud {
@@ -345,8 +342,7 @@ fn refuse_in_cloud(env: Env<'_>) -> Result<(), Failure> {
     }
 }
 
-// T3 Code sets its thread for every agent and job it starts, and runs Codex there with a
-// CODEX_THREAD_ID of Codex's own, so its variable decides first.
+// T3 Code runs Codex with a CODEX_THREAD_ID of Codex's own, so the T3 thread variable decides first.
 fn caller_id(env: Env<'_>) -> Result<String, Failure> {
     let (variable, value) = present(env(T3_THREAD_ENV)).map_or_else(
         || (CODEX_THREAD_ENV, present(env(CODEX_THREAD_ENV))),
@@ -357,8 +353,8 @@ fn caller_id(env: Env<'_>) -> Result<String, Failure> {
             "{CODEX_THREAD_ENV} is not set; run pr-wake from a thread"
         )));
     };
-    // A chat ID is pasted into socket requests and t3 arguments, so it may carry no whitespace or
-    // control characters.
+
+    // A chat ID is pasted into socket requests and t3 arguments, so it may carry no whitespace or control characters.
     let confirmed = value.to_str().filter(|value| {
         !value.starts_with("client-new-thread:")
             && !value
@@ -370,6 +366,7 @@ fn caller_id(env: Env<'_>) -> Result<String, Failure> {
             "{variable} must be a confirmed chat ID without whitespace"
         )));
     };
+
     Ok(if variable == T3_THREAD_ENV {
         format!("{T3_WORKER}{value}")
     } else {
@@ -377,7 +374,6 @@ fn caller_id(env: Env<'_>) -> Result<String, Failure> {
     })
 }
 
-// The calling chat becomes the one the watch sends every Codex message from.
 fn register_sender(env: Env<'_>, root: &Path, now: Timestamp) -> Result<SenderOutput, Failure> {
     let thread = caller_id(env)?;
     if workers::is_t3_worker(&thread) {
@@ -390,7 +386,7 @@ fn register_sender(env: Env<'_>, root: &Path, now: Timestamp) -> Result<SenderOu
     Ok(SenderOutput { sender: thread })
 }
 
-// Links the calling chat to a PR; only a take-over moves a PR another chat is watched for.
+// Only a take-over moves a PR that is watched for another chat.
 fn link(
     env: Env<'_>,
     root: &Path,
@@ -404,6 +400,7 @@ fn link(
             "{value} is not watched: {NOT_LINKABLE}"
         )));
     };
+
     let current = watch_record::load_link(root, &named.pr).map_err(Failure::State)?;
     // Only the link is read on a take-over, so an unreadable state never stops a chat from taking its PR over.
     if !take_over && let Some(current) = &current {
@@ -415,6 +412,7 @@ fn link(
             )));
         }
     }
+
     // Linking the same PR again keeps its start, so comments made since are still reported.
     let linked_at = match current {
         Some(current) if current.worker == worker => current.linked_at,
@@ -430,6 +428,7 @@ fn link(
         },
     )
     .map_err(Failure::State)?;
+
     let sender = if workers::is_t3_worker(&worker) {
         Ok(T3_SENDER.to_owned())
     } else {
@@ -463,7 +462,7 @@ fn release(root: &Path, url: &str) -> Result<ReleaseOutput, Failure> {
     })
 }
 
-// What each linked PR's watch is doing, read from the records alone whether or not a watch runs.
+// Read from the records alone, so it works whether or not a watch runs.
 fn status(root: &Path) -> Result<StatusOutput, Failure> {
     let prs = watch_record::list_links(root, &HashSet::new())
         .map_err(Failure::State)?
@@ -493,6 +492,7 @@ fn status(root: &Path) -> Result<StatusOutput, Failure> {
             },
         )
         .collect();
+
     // An unreadable sender record is shown as such, like an unreadable PR record.
     Ok(match watch_record::load_sender(root) {
         Ok(sender) => StatusOutput {
@@ -508,7 +508,6 @@ fn status(root: &Path) -> Result<StatusOutput, Failure> {
     })
 }
 
-// One line for each PR and one for the sender, as a person reads them.
 fn status_text(status: &StatusOutput) -> String {
     let mut lines = status
         .prs
@@ -536,6 +535,7 @@ fn status_text(status: &StatusOutput) -> String {
             }
         })
         .collect::<Vec<_>>();
+
     lines.push(match (&status.sender_error, &status.sender) {
         (Some(error), _) => format!("sender: unreadable ({error})"),
         (None, Some(sender)) => format!("sender: {sender}"),
@@ -581,7 +581,6 @@ fn dry_run(
     })
 }
 
-// Without --pr, the open PRs each account wrote in the configured repositories.
 fn dry_run_targets(
     github: &mut dyn GitHub,
     config: &WatchConfig,
@@ -597,6 +596,7 @@ fn dry_run_targets(
             })
             .collect();
     }
+
     let mut targets = Vec::new();
     for (repo, repository) in &config.repositories {
         targets.extend(
@@ -622,6 +622,7 @@ fn report_of(
         &config.review_bots,
     );
     let found = events::next_events(detail, state, linked_at, account, config);
+
     let mut notified = Vec::new();
     let mut ignored = Vec::new();
     for (verdict, comment) in verdicts.into_iter().zip(&detail.comments) {
@@ -636,6 +637,7 @@ fn report_of(
             }),
         }
     }
+
     let prompt = (!detail.summary.is_draft && !found.events.is_empty())
         .then(|| message::message_of(&detail.url, &found.events, config.instructions.as_deref()));
     Report {
@@ -696,6 +698,7 @@ fn run_t3(
             message: "HARNEXUS_T3_BIN must be an absolute path".to_owned(),
         };
     };
+
     match ExternalCommand::new(binary, timeout)
         .arguments(arguments.iter().copied())
         .input(input)
@@ -830,7 +833,6 @@ mod tests {
     const PR: &str = "https://github.com/org/pay/pull/7";
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    // GitHub as the dry run reads it, noting each request.
     struct FakeGitHub<'asked> {
         asked: &'asked RefCell<Vec<String>>,
         detail: PrDetail,
@@ -1157,8 +1159,7 @@ mod tests {
             let refusals = Cell::new(0);
             let unsupported = RefCell::new(None);
             let log = Recorded::default();
-            // The bridge reads threads, then stops offering protocol 1, so the client writes no
-            // send to it and answers each with its own unsupported outcome.
+            // After the thread reads the bridge drops protocol 1, so each send gets the client's own unsupported outcome.
             let bridge = |_: &str, tool: &str, arguments: &Map<String, Value>| {
                 if tool == "read_thread" {
                     return idle_thread(arguments);
@@ -1597,7 +1598,7 @@ mod tests {
         }
     }
 
-    // Each PR shows only the comment its record already holds, read later than every record.
+    // Each PR reads as updated later than every record and holds no comments.
     fn legacy_github(asked: &RefCell<Vec<String>>) -> FakeGitHub<'_> {
         let summary = PrSummary {
             updated_at: "2026-10-23T01:00:00Z".to_owned(),

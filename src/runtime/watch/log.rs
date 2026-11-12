@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use crate::{app::time, runtime::output};
 
-// One line of the watch log, read by people and by searches over the event names.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Entry {
     pub(crate) event: &'static str,
@@ -32,8 +31,7 @@ impl Entry {
         self
     }
 
-    // The time and the event come first, as the TypeScript watch wrote them, and the fields keep
-    // the order they were given in.
+    // As the TypeScript watch wrote them, the time and the event lead and the fields keep their given order.
     #[must_use]
     pub(crate) fn line(&self, at: Timestamp) -> String {
         let fields = [

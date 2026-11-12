@@ -348,8 +348,7 @@ impl Home {
         self.run(Path::new(PR_WAKE), &arguments, env)
     }
 
-    // Pinned to a local run from the chat `caller`, so the ambient environment cannot change the
-    // result.
+    // Pinned to a local run from the chat `caller`, so the ambient environment cannot change the result.
     fn run(&self, program: &Path, arguments: &[&str], env: &[(&str, &str)]) -> Run {
         let mut command = Command::new(program);
         command

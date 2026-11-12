@@ -9,7 +9,6 @@ use crate::app::review::{
     state::ReviewState,
 };
 
-// Where the review keeps its config and its state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewPaths {
     pub(crate) config: PathBuf,
@@ -37,8 +36,6 @@ impl ReviewPaths {
     }
 }
 
-// Each choice's skill must exist, so a missing one fails at load rather than after the owner
-// picked it.
 pub(crate) fn load_config(
     path: &Path,
     home: &Path,
@@ -49,6 +46,8 @@ pub(crate) fn load_config(
         .map_err(|error| error.to_string())?
         .resolve(home, codex_home)
         .map_err(in_file)?;
+
+    // A missing skill would otherwise fail only after the owner picked it, so each one is checked at load.
     for (index, choice) in config.choices.iter().enumerate() {
         fs::metadata(&choice.skill_path).map_err(|error| {
             in_file(format!(
@@ -70,8 +69,8 @@ pub(crate) fn save_state(paths: &ReviewPaths, state: &ReviewState) -> Result<(),
     record::save_json(&paths.state_file(), state, JsonLayout::TwoSpacesAndNewline)
 }
 
-// Held for the life of the review, so a second one cannot notify or launch the same request;
-// `None` while another holds it.
+// Held for the life of the review, so a second one cannot notify or launch the same request.
+// `None` while another review holds it.
 pub(crate) fn hold_lock(paths: &ReviewPaths) -> Result<Option<ProcessLock>, RecordError> {
     record::hold_lock(&paths.state.join(LOCK))
 }

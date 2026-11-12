@@ -38,8 +38,7 @@ static GITHUB_REMOTE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("the remote pattern is valid")
 });
 
-// A clean worktree at the PR head under `base`, reused when one is already there; one with
-// changes is never reused.
+// A clean worktree at the PR head under `base` is reused, but one with changes never is.
 pub(crate) fn prepare_worktree(
     checkout: &Checkout<'_>,
     base: &Path,
@@ -61,6 +60,7 @@ pub(crate) fn prepare_worktree(
     if reused {
         return Ok(path);
     }
+
     if !checkout.has_commit(&pr.head_sha) {
         fetch_head(checkout, pr)?;
     }
@@ -120,8 +120,8 @@ impl Checkout<'_> {
     }
 }
 
-// The pull ref also serves heads from forks; the SHA itself covers a PR that moved on since it
-// was read.
+// The pull ref also serves heads from forks.
+// The SHA itself covers a PR that moved on since it was read.
 fn fetch_head(checkout: &Checkout<'_>, pr: &PullRequest) -> Result<(), String> {
     for reference in [format!("refs/pull/{}/head", pr.number), pr.head_sha.clone()] {
         let fetched = checkout.git_at(
@@ -185,8 +185,8 @@ mod tests {
     use super::*;
     use crate::infra::command::ExternalCommand;
 
-    // A checkout of acme/app whose origin is served from a local bare repository, with the PR
-    // head reachable only through refs/pull/12/head as on GitHub.
+    // A checkout of acme/app whose origin is served from a local bare repository.
+    // As on GitHub, the PR head is reachable only through refs/pull/12/head.
     struct GitRepo {
         directory: tempfile::TempDir,
         checkout: PathBuf,
@@ -298,6 +298,7 @@ mod tests {
                 },
                 directory,
             };
+
             let text = |path: &Path| path.to_str().expect("text").to_owned();
             repo.git(&root, &["init", "-q", "--bare", "-b", "main", &text(&bare)]);
             repo.git(&root, &["init", "-q", "-b", "main", &text(&seed)]);
@@ -312,6 +313,7 @@ mod tests {
                 &["push", "-q", &text(&bare), "HEAD:refs/pull/12/head"],
             );
             repo.pr.head_sha = repo.git(&seed, &["rev-parse", "HEAD"]);
+
             repo.git(&root, &["clone", "-q", &text(&bare), &text(&checkout)]);
             repo.git(
                 &checkout,
@@ -342,6 +344,7 @@ mod tests {
                     Err(String::from_utf8_lossy(&output.stderr).into_owned())
                 }
             };
+
             let stop = StopRequest::default();
             let checkout = Checkout {
                 run: &run,

@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// The per-user LaunchAgent that keeps one pr-wake feature running.
 pub(crate) struct AgentPlist<'plist> {
     pub(crate) label: &'plist str,
     pub(crate) program: &'plist [String],
@@ -25,9 +24,8 @@ pub(crate) enum ProcessType {
 
 // Restarted after a crash or a config error at most once a minute, but not after a clean stop.
 const THROTTLE_SECONDS: u32 = 60;
-// launchd's own wait here is 5 seconds (`launchctl print` shows `exit timeout = 5` for an agent
-// that sets none), shorter than the 6 seconds a stop may take while a child gets its SIGTERM
-// grace, so the wait is set with room to write the records.
+// launchd waits 5 seconds by default, as `launchctl print` shows for an agent that sets no exit timeout.
+// A stop may take 6 seconds while a child gets its SIGTERM grace, so this leaves room to write the records.
 const EXIT_TIMEOUT_SECONDS: u32 = 15;
 
 impl AgentPlist<'_> {
@@ -38,6 +36,7 @@ impl AgentPlist<'_> {
             .map(|directory| directory.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(":");
+
         let mut plist = String::from(concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
@@ -51,6 +50,7 @@ impl AgentPlist<'_> {
             string(&mut plist, "\t\t", argument);
         }
         plist.push_str("\t</array>\n");
+
         key(&mut plist, "\t", "EnvironmentVariables");
         plist.push_str("\t<dict>\n");
         let home = self.home.to_string_lossy();
@@ -68,6 +68,7 @@ impl AgentPlist<'_> {
             string(&mut plist, "\t\t", value);
         }
         plist.push_str("\t</dict>\n");
+
         key(&mut plist, "\t", "RunAtLoad");
         plist.push_str("\t<true/>\n");
         key(&mut plist, "\t", "KeepAlive");
@@ -76,12 +77,13 @@ impl AgentPlist<'_> {
         integer(&mut plist, THROTTLE_SECONDS);
         key(&mut plist, "\t", "ExitTimeOut");
         integer(&mut plist, EXIT_TIMEOUT_SECONDS);
-        // Notifications, the app's call socket and the gh keychain belong to the logged-in GUI
-        // session.
+
+        // Notifications, the app's call socket and the gh keychain belong to the logged-in GUI session.
         key(&mut plist, "\t", "LimitLoadToSessionType");
         string(&mut plist, "\t", "Aqua");
         key(&mut plist, "\t", "ProcessType");
         string(&mut plist, "\t", self.process_type.name());
+
         let log = self.log.to_string_lossy();
         key(&mut plist, "\t", "StandardOutPath");
         string(&mut plist, "\t", &log);
@@ -101,8 +103,7 @@ impl ProcessType {
     }
 }
 
-// launchd gives an agent no login shell PATH, so the agent's PATH and the review's command lookup
-// both use these directories.
+// launchd gives an agent no login shell PATH, so the agent and the review's command lookup search these directories.
 #[must_use]
 pub(crate) fn agent_path(home: &Path, user: Option<&str>) -> Vec<PathBuf> {
     let mut directories = vec![home.join(".nix-profile/bin")];

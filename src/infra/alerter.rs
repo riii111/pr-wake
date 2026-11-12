@@ -40,8 +40,7 @@ pub(crate) fn notify(
     parse_selection(&output, &notice.actions)
 }
 
-// A plain notification for a failure after the owner chose a review; it offers nothing and does
-// not wait.
+// A failure after the owner chose a review offers nothing, so it is a plain notification that does not wait.
 pub(crate) fn notify_failure(
     run: &RunTool<'_>,
     osascript: &Path,
@@ -96,8 +95,8 @@ fn arguments(notice: &Notice, timeout_seconds: u64) -> Vec<OsString> {
     arguments.into_iter().map(OsString::from).collect()
 }
 
-// Anything but a click on one of the offered actions starts nothing, and an action that is not
-// offered never starts some other review.
+// Anything but a click on an offered action starts nothing.
+// An action that is not offered is refused, so it never starts some other review.
 fn parse_selection(output: &[u8], actions: &[String]) -> Result<Selection, String> {
     let answer = serde_json::from_slice::<Answer>(output).map_err(|error| {
         format!(
@@ -105,12 +104,14 @@ fn parse_selection(output: &[u8], actions: &[String]) -> Result<Selection, Strin
             String::from_utf8_lossy(output)
         )
     })?;
+
     match answer.kind.as_str() {
         "closed" => return Ok(Selection::Declined),
         "timeout" => return Ok(Selection::TimedOut),
         "actionClicked" => {}
         _ => return Ok(Selection::Dismissed),
     }
+
     let value = answer.value.unwrap_or_default();
     if let Some(index) = answer.index {
         return index

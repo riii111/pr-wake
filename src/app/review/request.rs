@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use super::state::{CachedPr, Found};
 
-// One open PR a search answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SearchHit {
     pub(crate) repo: String,
@@ -12,7 +11,6 @@ pub(crate) struct SearchHit {
     pub(crate) updated_at: String,
 }
 
-// A review_requested event of a PR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewRequest {
     pub(crate) id: u64,
@@ -21,15 +19,14 @@ pub(crate) struct ReviewRequest {
     pub(crate) team_slug: Option<String>,
 }
 
-// The requests the searches answered, one per PR, and the cache for the next poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Pending {
     pub(crate) found: Vec<Found>,
     pub(crate) prs: BTreeMap<String, CachedPr>,
 }
 
-// Scoped by owner, since a search across all of GitHub answers incomplete results (`user:`
-// matches organizations too).
+// A search across all of GitHub answers incomplete results, so each search is scoped to one owner.
+// `user:` matches an organization too.
 #[must_use]
 pub(crate) fn request_queries(owners: &[String], teams: &[String]) -> Vec<String> {
     owners
@@ -43,8 +40,6 @@ pub(crate) fn request_queries(owners: &[String], teams: &[String]) -> Vec<String
         .collect()
 }
 
-// The hits come in search order, a later search answering for the same PR again. Only a PR
-// updated since its cached read has its events read again.
 pub(crate) fn pending_requests<E>(
     hits: Vec<SearchHit>,
     cache: &BTreeMap<String, CachedPr>,
@@ -52,10 +47,12 @@ pub(crate) fn pending_requests<E>(
     teams: &[String],
     mut requests_of: impl FnMut(&SearchHit) -> Result<Vec<ReviewRequest>, E>,
 ) -> Result<Pending, E> {
+    // A later search may answer for the same PR again, so the hits are keyed by PR and the later one is kept.
     let hits = hits
         .into_iter()
         .map(|hit| (pr_key(&hit.repo, hit.number), hit))
         .collect::<BTreeMap<_, _>>();
+
     let mut pending = Pending {
         found: Vec::with_capacity(hits.len()),
         prs: BTreeMap::new(),
@@ -70,8 +67,7 @@ pub(crate) fn pending_requests<E>(
         } else {
             let requests = requests_of(&hit)?;
             latest_request(&requests, &hit, login, teams).unwrap_or_else(|| Found {
-                // Still pending per search, but no event names it: kept under a PR-level key and
-                // an unknown requester.
+                // No event names a request the search still lists, so it is kept under a PR-level key.
                 key: format!("{key}@unknown"),
                 repo: hit.repo.clone(),
                 number: hit.number,
@@ -80,6 +76,7 @@ pub(crate) fn pending_requests<E>(
                 team: None,
             })
         };
+
         pending.found.push(Found {
             title: hit.title.clone(),
             ..found.clone()
@@ -95,8 +92,7 @@ pub(crate) fn pending_requests<E>(
     Ok(pending)
 }
 
-// The latest request to the login or a configured team; its requester, never the PR author, is
-// the one shown.
+// Names the event's requester, never the PR author.
 #[must_use]
 pub(crate) fn latest_request(
     requests: &[ReviewRequest],
@@ -122,6 +118,7 @@ pub(crate) fn latest_request(
             Some((request, Some(team)))
         })
         .max_by_key(|(request, _)| request.id)?;
+
     Some(Found {
         key: format!("{}#{}@{}", hit.repo, hit.number, latest.id),
         repo: hit.repo.clone(),
@@ -257,8 +254,7 @@ mod tests {
         );
     }
 
-    // A re-request bumps the PR's updated_at, so the cache must not hide it; unchanged PRs cost
-    // no event reads.
+    // A re-request bumps the PR's updated_at, so the cache must not hide it.
     #[test]
     fn events_are_read_again_only_for_updated_prs() {
         let events = RefCell::new(vec![direct(7, "tanaka", "me")]);
@@ -267,6 +263,7 @@ mod tests {
             *reads.borrow_mut() += 1;
             Ok(events.borrow().clone())
         };
+
         let first = pending_requests(
             vec![hit("acme/app", 3, "10:00")],
             &BTreeMap::new(),

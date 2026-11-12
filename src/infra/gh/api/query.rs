@@ -35,8 +35,6 @@ pub(super) const OPEN_QUERY: &str = "query($search: String!) {
   search(query: $search, type: ISSUE, first: 50) { nodes { ... on PullRequest { number } } }
 }";
 
-// One aliased query for every PR of an account, which GitHub counts as a single point however
-// many PRs it reads.
 pub(super) fn summary_query(prs: &[PrRef], bots: &[ReviewBot]) -> (String, Map<String, Value>) {
     let fields = summary_fields(bots);
     let mut variables = Map::new();
@@ -148,8 +146,7 @@ impl Display for Node {
 }
 
 fn summary_fields(bots: &[ReviewBot]) -> String {
-    // Each bot's progress is read under an alias by its place in the list; JSON's string escapes
-    // are valid GraphQL.
+    // Each bot's progress is read under an alias by its place in the list.
     let contexts = bots
         .iter()
         .enumerate()
@@ -161,8 +158,8 @@ fn summary_fields(bots: &[ReviewBot]) -> String {
             _ => None,
         })
         .collect::<Vec<_>>();
-    // A check run is looked up in every check suite of the head, since the suite of the workflow
-    // that runs it has no stable id.
+
+    // A workflow's check suite has no stable id, so a check run is looked up in every suite of the head.
     let runs = bots
         .iter()
         .enumerate()
@@ -174,6 +171,7 @@ fn summary_fields(bots: &[ReviewBot]) -> String {
             _ => None,
         })
         .collect::<Vec<_>>();
+
     let status = if contexts.is_empty() {
         String::new()
     } else {
@@ -199,6 +197,7 @@ fn review_node() -> String {
     format!("{PLAIN_NODE} state")
 }
 
+// JSON's string escapes are valid GraphQL, so a name is quoted as a JSON string.
 fn quoted(text: &str) -> String {
     Value::from(text).to_string()
 }

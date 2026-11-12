@@ -21,7 +21,6 @@ use crate::{
     },
 };
 
-// What one cycle reads from and writes to.
 pub(crate) struct CycleDeps<'deps> {
     pub(crate) paths: &'deps WatchPaths,
     pub(crate) github: &'deps mut dyn GitHub,
@@ -30,7 +29,6 @@ pub(crate) struct CycleDeps<'deps> {
     pub(crate) log: &'deps dyn Log,
 }
 
-// The loop around the cycles, and what may end it.
 pub(crate) struct Watch<'deps> {
     pub(crate) cycle: CycleDeps<'deps>,
     pub(crate) stop: &'deps StopRequest,
@@ -79,8 +77,7 @@ pub(crate) fn watch_forever(watch: Watch<'_>) -> Result<(), Failure> {
                 .write(Entry::new("ended_watch").with("reason", reason.as_str()));
             return Err(Failure::Refused(reason));
         }
-        // Checked before each cycle, so no cycle runs on a program replaced while the watch
-        // slept; ending between cycles, never mid-send, lets launchd start the new program.
+        // A replaced program must neither run a cycle nor end mid-send, so it is checked before each cycle.
         if replaced.is_some_and(|replaced| replaced()) {
             cycle.log.write(Entry::new("replaced"));
             return Err(Failure::Replaced);
@@ -99,8 +96,6 @@ pub(crate) fn watch_forever(watch: Watch<'_>) -> Result<(), Failure> {
     }
 }
 
-// One pass: poll the PRs that are due, queue what changed, then deliver to every worker that can
-// take a message now.
 pub(crate) fn run_cycle(
     deps: &mut CycleDeps<'_>,
     over: &mut HashSet<String>,
@@ -158,6 +153,7 @@ fn open_entry(
     if state.status.is_over() {
         over.insert(watch_record::pr_key(&link.pr));
     }
+
     let before = state.clone();
     let opened = watch::open(&mut state, &link.worker, &link.pr.repo, config);
     if let Some(handed) = opened.handed_over {
@@ -227,6 +223,7 @@ fn poll_account(
             return;
         }
     };
+
     for (position, &index) in due.iter().enumerate() {
         let summary = summaries.get(position).cloned().flatten();
         apply_summary(deps, config, &mut tracked[index], summary, now);
@@ -284,6 +281,7 @@ fn apply_summary(
             return;
         }
     };
+
     let queued = watch::take_in(
         &mut entry.state,
         &summary,
@@ -363,8 +361,7 @@ fn send(
     let pr = entry.link.url.as_str();
     let worker = entry.link.worker.as_str();
     let sending = watch::prepare_send(&entry.state, pr, now, config);
-    // Recorded as halted before the call, so a watch stopped mid-send never sends the message
-    // again.
+    // A watch stopped mid-send must never send the message again, so the halted mark is saved before the call.
     if save(deps.paths, &entry.link.pr, &sending.marked).is_err() {
         deps.log.write(
             Entry::new("state_unwritable")
@@ -386,6 +383,7 @@ fn send(
         sent_at,
         now,
     );
+
     let logged = match result {
         SendResult::Delivered {
             follow_up,
@@ -508,12 +506,14 @@ mod tests {
 
             fixture.cycle();
             let waited = fixture.calls.borrow().t3.len();
+
             fixture.update(|world| {
                 world.t3_thread = t3_thread(json!({ "latestRunId": "r0" }));
             });
             fixture.later(1);
             fixture.cycle();
             let (arguments, input) = fixture.calls.borrow().t3[0].clone();
+
             fixture.update(|world| {
                 world.t3_messages = vec![
                     json!({ "role": "user", "runId": "r1", "text": input }),
@@ -609,6 +609,7 @@ mod tests {
                 world.comments = vec![comment(), by_tanaka(5, &at)];
             });
             fixture.cycle();
+
             assert_eq!(fixture.sent().len(), 1);
 
             let first = fixture.prompt(0);
@@ -656,6 +657,7 @@ mod tests {
             fixture.later(1);
             fixture.cycle();
             let follow_up = fixture.prompt(1);
+
             fixture.update(|world| {
                 let answered = delegated_turn(world.now, &follow_up, "判定できません", "reviewer");
                 world.turns.insert(0, answered);
@@ -709,6 +711,7 @@ mod tests {
             fixture.update(|world| world.comments = vec![comment()]);
             fixture.cycle();
             let sent = fixture.prompt(0);
+
             fixture.later(1);
             fixture.update(|world| {
                 let now = time::format_timestamp(world.now);
@@ -725,6 +728,7 @@ mod tests {
                 ];
             });
             fixture.cycle();
+
             assert_eq!(fixture.sent().len(), 1);
 
             fixture.update(|world| {
@@ -797,6 +801,7 @@ mod tests {
             });
             fixture.cycle();
             let reason = fixture.state().reason;
+
             fixture.update(|world| world.sender = Some("worker".to_owned()));
             fixture.later(1);
             fixture.cycle();
@@ -855,6 +860,7 @@ mod tests {
                 ];
             });
             fixture.cycle();
+
             let first = fixture.state();
             assert!(fixture.sent().is_empty());
             assert!(first.pending.is_empty());
@@ -888,6 +894,7 @@ mod tests {
                 world.comments = vec![comment()];
             });
             fixture.cycle();
+
             assert!(fixture.sent().is_empty());
 
             fixture.update(|world| {
@@ -917,6 +924,7 @@ mod tests {
                 world.comments = vec![comment()];
             });
             fixture.cycle();
+
             assert_eq!(fixture.calls.borrow().details, 1);
             assert!(fixture.sent().is_empty());
             assert_eq!(fixture.state().status, WatchStatus::Draft);
@@ -942,6 +950,7 @@ mod tests {
                 world.detail_fails = true;
             });
             fixture.cycle();
+
             assert_eq!(fixture.state().summary, None);
 
             fixture.update(|world| world.detail_fails = false);
@@ -986,6 +995,7 @@ mod tests {
                 world.comments = vec![comment()];
             });
             fixture.cycle();
+
             assert_eq!(fixture.calls.borrow().details, 0);
             assert_eq!(fixture.state().status, WatchStatus::Draft);
 
@@ -1448,6 +1458,7 @@ mod tests {
             let fixture = Fixture::new(json!({}), Read::Again, "worker");
             fixture.update(|world| world.comments = vec![comment()]);
             fixture.cycle();
+
             assert_eq!(
                 fixture.state().delivered.map(|delivered| delivered.sender),
                 Some("reviewer".to_owned())
@@ -1525,8 +1536,7 @@ mod tests {
         }
     }
 
-    // The records harnexus-task watch left on a Mac, with the comments they had already seen
-    // still on GitHub.
+    // The records harnexus-task watch left on a Mac, with the comments they had already seen still on GitHub.
     mod legacy_records {
         use super::*;
 
@@ -1742,6 +1752,7 @@ mod tests {
             fs::create_dir_all(paths.config.parent().expect("a parent"))
                 .expect("create the config directory");
             fs::write(&paths.config, written.to_string()).expect("write the config");
+
             let fixture = Self {
                 _root: root,
                 paths,
@@ -1763,6 +1774,7 @@ mod tests {
                 calls: RefCell::new(Calls::default()),
                 logs: Recorded::default(),
             };
+
             fixture.link_to(worker);
             if read == Read::Again {
                 let read = WatchState {
@@ -1884,6 +1896,7 @@ mod tests {
                     "result": { "content": [{ "type": "text", "text": read.to_string() }] },
                 }));
             }
+
             self.calls.borrow_mut().sent.push(SentCall {
                 caller: caller.to_owned(),
                 thread: arguments["threadId"]

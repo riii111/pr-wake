@@ -1,7 +1,6 @@
 use jiff::{Timestamp, fmt::temporal::DateTimePrinter};
 
-// The records hold `Date.toISOString()` times with exactly three fraction digits, while jiff's
-// own display drops trailing zeros.
+// The records hold `Date.toISOString()` times with exactly three fraction digits, while jiff drops trailing zeros.
 const RECORD_TIME: DateTimePrinter = DateTimePrinter::new().precision(Some(3));
 
 #[must_use]
@@ -80,8 +79,7 @@ mod tests {
         }
     }
 
-    // GitHub writes whole seconds in UTC, the TypeScript watch milliseconds in UTC, and the Go
-    // review nanoseconds with the local offset.
+    // The forms GitHub, the TypeScript watch and the Go review write, in that order.
     #[test]
     fn stored_and_github_times_parse_to_the_same_instant() {
         let parsed = [

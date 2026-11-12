@@ -2,13 +2,11 @@ use jiff::Timestamp;
 
 use super::{SendOutcome, WorkerView, state::Delivered};
 
-// What the watch needs from whoever works on a PR; each app a worker runs in supplies its own.
 pub(crate) trait Workers {
     // The chat to send from, or why nothing can send to the worker yet.
     fn sender_of(&mut self, worker: &str) -> Result<String, String>;
 
-    // `None` while the worker cannot be asked, as while its app is closed; the next cycle asks
-    // again.
+    // `None` while the worker cannot be asked, as while its app is closed.
     fn look(
         &mut self,
         sender: &str,
@@ -30,8 +28,7 @@ pub(crate) struct Sent {
 // A worker in T3 Code is linked with this before its thread, so a link tells which app reaches it.
 pub(crate) const T3_WORKER: &str = "t3:";
 
-// The t3 CLI sends as the person using T3 Code, so every message to a T3 Code worker is recorded
-// as from it.
+// The t3 CLI sends as the person using T3 Code, so every message to a T3 Code worker is recorded as from it.
 pub(crate) const T3_SENDER: &str = "t3";
 
 const NO_SENDER: &str =
@@ -42,8 +39,7 @@ pub(crate) fn is_t3_worker(worker: &str) -> bool {
     worker.starts_with(T3_WORKER)
 }
 
-// Every message to a Codex worker comes from the one chat registered as the sender, so the watch
-// depends on no other command's records.
+// One registered chat sends every Codex message, so the watch depends on no other command's records.
 pub(crate) fn sender_for(
     registered: Result<Option<String>, String>,
     worker: &str,

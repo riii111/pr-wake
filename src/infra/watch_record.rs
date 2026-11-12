@@ -15,8 +15,7 @@ use crate::app::watch::{
     state::WatchState,
 };
 
-// Where the watch keeps its config and its records; the record directory is shared with
-// harnexus-crew, which reads none of the PR states.
+// The record directory is shared with harnexus-crew, which reads none of the PR states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WatchPaths {
     pub(crate) config: PathBuf,
@@ -57,7 +56,6 @@ impl WatchPaths {
     }
 }
 
-// The config is read again each cycle, so an edit takes effect without a restart.
 pub(crate) fn load_config(path: &Path) -> Result<WatchConfig, RecordError> {
     record::load_required_json(path)
 }
@@ -69,8 +67,7 @@ pub(crate) fn list_links(root: &Path, skip: &HashSet<String>) -> Result<Vec<PrLi
         .iter()
         .filter_map(|name| name.to_str())
         .filter(|key| !skip.contains(*key) && root.join(key).is_dir())
-        // An unreadable link is skipped, so one broken record cannot stop the watch of every
-        // other PR.
+        // An unreadable link is skipped, so one broken record cannot stop the watch of every other PR.
         .filter_map(|key| read_link(&root.join(key).join(LINK)).ok().flatten())
         .collect())
 }
@@ -80,8 +77,7 @@ pub(crate) fn load_link(root: &Path, pr: &PrRef) -> Result<Option<PrLink>, Recor
     read_link(&pr_directory(root, pr).join(LINK))
 }
 
-// Only the link is written here; the running watch is the one writer of a PR's state, and it
-// notices the new chat itself.
+// The running watch alone writes a PR's state and notices the new chat itself, so only the link is written.
 pub(crate) fn record_link(root: &Path, link: &PrLink) -> Result<(), RecordError> {
     let stored = StoredLink {
         repo: link.pr.repo.clone(),
@@ -97,7 +93,6 @@ pub(crate) fn record_link(root: &Path, link: &PrLink) -> Result<(), RecordError>
     )
 }
 
-// The one chat the watch sends every Codex message from.
 pub(crate) fn record_sender(root: &Path, thread: &str, at: &str) -> Result<(), RecordError> {
     record::save_json(
         &root.join(SENDER),
@@ -116,8 +111,8 @@ pub(crate) fn hold_watch_lock(root: &Path) -> Result<Option<ProcessLock>, Record
     record::hold_lock(&root.join(LOCK))
 }
 
-// A PR the watch has not read yet starts from a fresh state; a damaged record is refused rather
-// than read as empty, so the tracking in it is never reset by the next save.
+// A PR the watch has not read yet starts from a fresh state.
+// A damaged record is refused rather than read as empty, so the next save never resets its tracking.
 pub(crate) fn load_watch_state(root: &Path, pr: &PrRef) -> Result<WatchState, RecordError> {
     record::load_json(&state_path(root, pr)).map(Option::unwrap_or_default)
 }
@@ -416,8 +411,7 @@ mod tests {
         assert!(damaged.is_err(), "{damaged:?}");
     }
 
-    // Records a later TypeScript watch or harnexus-crew wrote may carry fields this version does
-    // not know.
+    // A later TypeScript watch or harnexus-crew may write fields this version does not know.
     #[test]
     fn records_harnexus_task_left_with_unknown_fields_still_load() {
         let root = tempfile::tempdir().expect("create a directory");
@@ -509,8 +503,7 @@ mod tests {
         }
     }
 
-    // A state that has been tracking the PR, so a refused record is one that would cost
-    // something to reset.
+    // A state that has been tracking the PR, so a refused record is one whose reset would lose something.
     fn tracked() -> Value {
         json!({
             "status": "watching",

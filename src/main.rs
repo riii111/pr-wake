@@ -133,8 +133,7 @@ struct LogFlags {
     follow: bool,
 }
 
-// harnexus-crew starts `pr-wake-engine watch` beside pr-wake for a LaunchAgent that still runs
-// harnexus-task watch, so that name runs the watch alone.
+// harnexus-crew runs `pr-wake-engine watch` for an old harnexus-task watch agent, so that name runs only the watch.
 #[derive(Debug, Parser)]
 #[command(
     name = ENGINE,
@@ -156,8 +155,8 @@ enum EngineCommand {
 const NAME: &str = "pr-wake";
 const ENGINE: &str = "pr-wake-engine";
 
-// Exit 0 is a success, with a watch command's JSON as one line on stdout; 1 is a failure with its
-// reason on stderr, and 2 a usage error.
+// Exit 0 is a success, with a watch command's JSON as one line on stdout.
+// Exit 1 is a failure with its reason on stderr, and 2 a usage error.
 fn main() -> ExitCode {
     if invoked_as_engine() {
         return match EngineCli::try_parse() {
@@ -167,6 +166,7 @@ fn main() -> ExitCode {
             Err(error) => usage_error(&error),
         };
     }
+
     match Cli::try_parse() {
         Ok(Cli { feature }) => finish(
             NAME,
@@ -181,10 +181,11 @@ fn main() -> ExitCode {
 }
 
 fn review_command(command: ReviewCommand) -> Result<(), String> {
-    // Resolved per command, so stopping, which needs only the LaunchAgent's label, goes ahead where the home is unknown.
+    // Resolved per command, so stopping, which needs only the label, still works when the home is unknown.
     let env = || ReviewEnv::from_process().ok_or("the home directory is unknown");
     let config =
         |flag: Option<PathBuf>, env: &ReviewEnv| flag.unwrap_or_else(|| env.paths.config.clone());
+
     match command {
         ReviewCommand::Run(flag) => {
             let env = env()?;

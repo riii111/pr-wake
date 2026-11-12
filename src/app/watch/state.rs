@@ -22,11 +22,9 @@ pub(crate) struct WatchState {
     pub(crate) follow_up: Vec<Finding>,
     pub(crate) conflict_head: Option<String>,
     pub(crate) delivered: Option<Delivered>,
-    // The chat the delivery fields belong to; a different chat in the link means the PR was
-    // handed over.
+    // The chat the delivery fields belong to; a link naming another chat means the PR was handed over.
     pub(crate) worker: Option<String>,
-    // The message whose delivery could not be confirmed; nothing more is sent for the PR until it
-    // is released.
+    // The message whose delivery is unconfirmed; nothing more is sent for the PR until it is released.
     pub(crate) halted: Option<Map<String, Value>>,
 }
 
@@ -55,8 +53,7 @@ pub(crate) struct PrSummary {
     pub(crate) rollup: Option<String>,
 }
 
-// A check run is read into a commit status's terms: PENDING until it completes, then its
-// conclusion, with an empty description.
+// A check run reads as a commit status: PENDING until it completes, then its conclusion, with no description.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BotStatus {
@@ -72,8 +69,7 @@ pub(crate) struct FailedCheck {
     pub(crate) url: Option<String>,
 }
 
-// Only a comment's kind, author and place are kept, so a body can never steer what the worker is
-// told.
+// A comment body must never steer what the worker is told, so only its kind, author and place are kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", from = "StoredFinding")]
 pub(crate) struct Finding {
@@ -143,22 +139,20 @@ pub(crate) fn bot_key(id: &str) -> String {
 }
 
 impl WatchStatus {
-    // No command brings an ended PR back, so a watch may stop reading it for as long as it runs;
-    // a stopped one stays readable, since naming it from another worker resumes it.
+    // No command brings an ended PR back, so a watch may stop reading it for as long as it runs.
+    // Naming a stopped one from another worker resumes it, so it stays readable.
     #[must_use]
     pub(crate) const fn is_over(self) -> bool {
         matches!(self, Self::Ended)
     }
 
-    // Nothing is read or sent for these; a release or another chat's link resumes a halted or
-    // stopped one.
+    // Nothing is read or sent for these; a release or another chat's link resumes a halted or stopped one.
     #[must_use]
     pub(crate) const fn is_finished(self) -> bool {
         matches!(self, Self::Ended | Self::Stopped | Self::Halted)
     }
 
-    // Only a watch stopped for a gone chat has let its chat go; a halted one may have just reached
-    // it.
+    // Only a watch stopped for a gone chat has let its chat go; a halted one may have just reached it.
     #[must_use]
     pub(crate) const fn holds_chat(self) -> bool {
         !matches!(self, Self::Stopped | Self::Ended)
@@ -190,8 +184,8 @@ impl WatchEvent {
     }
 }
 
-// Unknown keys in a stored record are skipped, since the TypeScript watch kept them readable;
-// a missing or mistyped field makes the record unreadable rather than empty.
+// The TypeScript watch kept records with unknown keys readable, so those keys are skipped.
+// A missing or mistyped field makes the record unreadable rather than empty.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredWatchState {
@@ -211,16 +205,14 @@ struct StoredWatchState {
     conflict_head: Option<String>,
     #[serde(deserialize_with = "field::nullable")]
     delivered: Option<Delivered>,
-    // A state written before a PR followed its chat has none, which the watch takes as the linked
-    // one.
+    // A state written before a PR followed its chat has none, which the watch takes as the linked one.
     #[serde(default)]
     worker: Option<String>,
     #[serde(deserialize_with = "field::nullable")]
     halted: Option<Map<String, Value>>,
 }
 
-// Records written before review bots were configurable name CodeRabbit in their own fields, and
-// are read as the coderabbit preset.
+// Records from before bots were configurable hold CodeRabbit in its own fields, read as the coderabbit preset.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSummary {
@@ -292,11 +284,11 @@ enum StoredEvent {
 impl From<StoredWatchState> for WatchState {
     fn from(stored: StoredWatchState) -> Self {
         let mut seen = stored.seen;
-        // Its CodeRabbit key is taken as the bot already known, so the watch does not read
-        // CodeRabbit as newly added.
+        // A legacy state already took CodeRabbit in, so its bot key is added to keep it from reading as new.
         if stored.summary.is_some() && !seen.iter().any(|key| key.starts_with(BOT_KEY)) {
             seen.push(bot_key("coderabbit"));
         }
+
         Self {
             status: stored.status,
             reason: stored.reason,

@@ -41,7 +41,6 @@ pub(crate) enum Observed {
     ReadDetail { paused: bool, resumed: bool },
 }
 
-// While the app cannot be asked, the caller delivers nothing and the next cycle asks again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkerView {
     Gone,
@@ -59,8 +58,7 @@ pub(crate) struct Answer {
     pub(crate) text: String,
 }
 
-// A turn that ended any other way than completed was stopped by the owner, who then has the
-// conversation.
+// A turn that ended other than completed was stopped by the owner, who then has the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AnswerStatus {
     InProgress,
@@ -75,7 +73,6 @@ pub(crate) enum Delivery {
     Send(Option<AnswerNote>),
 }
 
-// What the answer to the last message showed, for the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AnswerNote {
     NotSeen,
@@ -91,8 +88,7 @@ pub(crate) struct Sending {
     pub(crate) marked: WatchState,
 }
 
-// `Unknown` means the message may have reached the worker; it carries the worker's own report,
-// which the halted record keeps.
+// `Unknown` means the message may have reached the worker; its report is kept in the halted record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SendOutcome {
     Done,
@@ -107,12 +103,10 @@ pub(crate) enum SendResult {
     Halted,
 }
 
-// Timers drift by a few hundred milliseconds, so a PR due at this cycle is not left to the next
-// one.
+// Timers drift by a few hundred milliseconds, so a PR due at this cycle is not left to the next one.
 const DUE_MARGIN: SignedDuration = SignedDuration::from_secs(5);
 
-// An answer never seen in this long is given up on, so one lost turn cannot stop every later
-// message to the worker.
+// One lost turn must not stop every later message, so an answer unseen this long is given up on.
 const ANSWER_WAIT: SignedDuration = SignedDuration::from_hours(24);
 
 const OPEN: &str = "OPEN";
@@ -140,7 +134,6 @@ pub(crate) fn open<'config>(
     }
 }
 
-// Moves a PR's watch to the chat it was linked to last.
 fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
     if state.worker.as_deref() == Some(worker) {
         return None;
@@ -149,8 +142,7 @@ fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
     // A state that has never named its chat takes the linked one as its own.
     let previous = previous.filter(|_| state.status != WatchStatus::Ended)?;
 
-    // What only the last chat was told goes to the new one again, which never answers what the
-    // watch awaited from the last one.
+    // The new chat never answers what the last one was asked, so what only that chat was told is sent again.
     let told = state
         .delivered
         .take()
@@ -163,6 +155,7 @@ fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
         .collect::<Vec<_>>();
     state.pending.splice(0..0, told);
     state.halted = None;
+
     // A watch stopped or halted for the last chat runs again.
     if matches!(state.status, WatchStatus::Stopped | WatchStatus::Halted) {
         state.status = WatchStatus::Watching;
@@ -210,8 +203,7 @@ pub(crate) fn observe(
     if summary.is_draft {
         let paused = state.status != WatchStatus::Draft;
         state.status = WatchStatus::Draft;
-        // A draft is still read the first time, so what it had before the watch started is never
-        // sent once it is ready.
+        // A draft is still read the first time, so what it had before the watch is never sent once ready.
         if state.summary.is_some() {
             state.summary = Some(summary.clone());
             return Observed::Kept { paused };
@@ -233,8 +225,7 @@ pub(crate) fn observe(
     }
 }
 
-// Called only for a full read that succeeded, so after a failed one the summary stays as it was
-// and the next cycle reads the detail again.
+// Called only after a full read succeeds, so a failed read leaves the summary for the next cycle to read again.
 pub(crate) fn take_in<'state>(
     state: &'state mut WatchState,
     summary: &PrSummary,
@@ -347,6 +338,7 @@ pub(crate) fn prepare_send(
                 .collect(),
         )
     };
+
     let marked = WatchState {
         status: WatchStatus::Halted,
         halted: Some(halted(now, &prompt, Value::Null)),
@@ -360,8 +352,7 @@ pub(crate) fn prepare_send(
     }
 }
 
-// `sent_at` is taken just before the call, so a turn started while the cycle read GitHub is never
-// taken for the answer.
+// `sent_at` is taken just before the call, so a turn begun while the cycle read GitHub never counts as the answer.
 pub(crate) fn finish_send(
     state: &mut WatchState,
     sending: Sending,
@@ -400,7 +391,7 @@ pub(crate) fn finish_send(
     }
 }
 
-// The owner checked the app, so the halted message counts as delivered and is never sent again;
+// The owner checked the app, so the halted message counts as delivered and is never sent again.
 // `None` for a PR that is not halted.
 #[must_use]
 pub(crate) fn release(state: &WatchState) -> Option<WatchState> {
@@ -451,8 +442,8 @@ enum Awaited {
     Taken(Option<AnswerNote>),
 }
 
-// A time never recorded is infinitely long ago, and one that does not parse compares as neither
-// longer nor shorter, as the TypeScript watch's `NaN` did.
+// A time never recorded is infinitely long ago.
+// One that does not parse is neither longer nor shorter, as the TypeScript watch's `NaN` was.
 enum Elapsed {
     Never,
     Unreadable,
@@ -513,7 +504,6 @@ mod tests {
                 ..WatchState::default()
             };
             let before = state.clone();
-
             let config = config();
 
             let opened = open(&mut state, "w1", "org/pay", &config);
@@ -528,7 +518,6 @@ mod tests {
                 delivered: Some(delivered(vec![finding(1)])),
                 ..WatchState::default()
             };
-
             let config = config();
 
             let opened = open(&mut state, "w1", "org/pay", &config);
@@ -553,7 +542,6 @@ mod tests {
                 halted: Some(Map::new()),
                 ..WatchState::default()
             };
-
             let config = config();
 
             let opened = open(&mut state, "new", "org/pay", &config);
@@ -596,7 +584,6 @@ mod tests {
                 worker: Some("old".to_owned()),
                 ..WatchState::default()
             };
-
             let config = config();
 
             let opened = open(&mut state, "new", "org/pay", &config);
@@ -613,7 +600,6 @@ mod tests {
                 delivered: Some(delivered(vec![finding(1)])),
                 ..WatchState::default()
             };
-
             let config = config();
 
             let opened = open(&mut state, "new", "org/pay", &config);
@@ -644,7 +630,6 @@ mod tests {
                 worker: Some("w1".to_owned()),
                 ..WatchState::default()
             };
-
             let config = config();
 
             let opened = open(&mut state, "w1", "org/pay", &config);
@@ -656,7 +641,6 @@ mod tests {
         #[test]
         fn repository_outside_the_config_is_left_unread_with_the_reason() {
             let mut state = WatchState::default();
-
             let config = config();
 
             let opened = open(&mut state, "w1", "org/other", &config);
@@ -676,7 +660,6 @@ mod tests {
                 status,
                 ..WatchState::default()
             };
-
             let config = config();
 
             let opened = open(&mut state, "w1", "Org/Pay", &config);

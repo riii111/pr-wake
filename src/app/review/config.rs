@@ -47,8 +47,7 @@ pub(crate) struct Choice {
     prompt: Prompt,
 }
 
-// The config as written; unknown keys are refused, so a setting this version does not support is
-// never silently ignored.
+// A setting this version does not support is refused rather than silently ignored.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ConfigFile {
@@ -106,8 +105,7 @@ static CHOICE_ID: LazyLock<Regex> = LazyLock::new(|| pattern(CHOICE_ID_PATTERN))
 static SKILL_NAME: LazyLock<Regex> = LazyLock::new(|| pattern("^[A-Za-z0-9][A-Za-z0-9_-]*$"));
 
 impl ConfigFile {
-    // Paths are resolved against the home directory; whether each skill exists is for the caller
-    // to check, since it is read from the disk.
+    // Checking that each skill exists reads the disk, so it is left to the caller.
     pub(crate) fn resolve(self, home: &Path, codex_home: &Path) -> Result<ReviewConfig, String> {
         Ok(ReviewConfig {
             notification_timeout_seconds: notification_timeout(self.notification_timeout_seconds)?,
@@ -262,6 +260,7 @@ fn checked_choices(choices: Vec<ChoiceFile>, codex_home: &Path) -> Result<Vec<Ch
     if choices.is_empty() {
         return Err("choices must have at least one entry".to_owned());
     }
+
     let mut ids = HashSet::new();
     let mut labels = HashSet::new();
     choices
@@ -277,6 +276,7 @@ fn checked_choices(choices: Vec<ChoiceFile>, codex_home: &Path) -> Result<Vec<Ch
             if !ids.insert(choice.id.clone()) {
                 return Err(format!("choices: duplicate id {:?}", choice.id));
             }
+
             let label = choice.label.trim();
             // alerter splits its actions on commas.
             if label.is_empty() || label.contains([',', '\n']) {
@@ -288,19 +288,21 @@ fn checked_choices(choices: Vec<ChoiceFile>, codex_home: &Path) -> Result<Vec<Ch
             if !labels.insert(label.to_owned()) {
                 return Err(format!("choices: duplicate label {label:?}"));
             }
+
             if !SKILL_NAME.is_match(&choice.skill) {
                 return Err(format!(
                     "choices[{index}].skill is not a skill name: {:?}",
                     choice.skill
                 ));
             }
+
             if choice.prompt.trim().is_empty() {
                 return Err(format!("choices[{index}].prompt is empty"));
             }
-            // Parsed now, so a field it cannot name fails at load rather than after the user
-            // picked the choice.
+            // An unknown field must fail before the owner picks the choice, so the prompt is parsed at load.
             let prompt = Prompt::parse(&choice.prompt)
                 .map_err(|error| format!("choices[{index}].prompt: {error}"))?;
+
             Ok(Choice {
                 id: choice.id,
                 label: label.to_owned(),
