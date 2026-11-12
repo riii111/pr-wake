@@ -57,6 +57,14 @@ pub(crate) fn worktree_path(root: &Path, pr: &PullRequest) -> PathBuf {
         .join(format!("pr-{}-{head}", pr.number))
 }
 
+// codex://new tells nothing of the chat it opens, so the chat links itself for the PR's re-requests.
+#[must_use]
+pub(crate) fn with_link_step(prompt: &str, url: &str) -> String {
+    format!(
+        "{prompt}\n\nこのPRの再レビュー依頼をこのチャットで受けるため、最初に`pr-wake review link {url}`をサンドボックス外で実行してください。"
+    )
+}
+
 #[must_use]
 pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")

@@ -343,7 +343,7 @@ fn refuse_in_cloud(env: Env<'_>) -> Result<(), Failure> {
 }
 
 // T3 Code runs Codex with a CODEX_THREAD_ID of Codex's own, so the T3 thread variable decides first.
-fn caller_id(env: Env<'_>) -> Result<String, Failure> {
+pub(crate) fn caller_id(env: Env<'_>) -> Result<String, Failure> {
     let (variable, value) = present(env(T3_THREAD_ENV)).map_or_else(
         || (CODEX_THREAD_ENV, present(env(CODEX_THREAD_ENV))),
         |t3| (T3_THREAD_ENV, Some(t3)),

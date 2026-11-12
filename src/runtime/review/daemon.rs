@@ -333,13 +333,23 @@ impl<'deps> Daemon<'deps> {
                 }
             }
         }));
-        match launched.result {
-            Ok(()) => self.log(&format!(
+        if let Some(unsent) = &launched.unsent {
+            self.log(&format!(
+                "{key}: not sent to the linked chat, so a new one opens: {unsent}"
+            ));
+        }
+        match (launched.result, &launched.chat) {
+            (Ok(()), Some(chat)) => self.log(&format!(
+                "{key}: sent to chat {chat} for {} at {}",
+                worktree.unwrap_or_default(),
+                head.unwrap_or_default()
+            )),
+            (Ok(()), None) => self.log(&format!(
                 "{key}: opened {} at {}",
                 worktree.unwrap_or_default(),
                 head.unwrap_or_default()
             )),
-            Err(error) => {
+            (Err(error), _) => {
                 self.log(&format!("{key}: launch failed: {error}"));
                 self.report_failure(request, &error);
             }
@@ -512,12 +522,14 @@ mod tests {
         app::review::{
             config::{ConfigFile, ReviewConfig},
             state::Found,
+            with_link_step,
         },
         infra::{
             codex_app::new_chat_link,
             command::{RunTool, ToolCall},
+            review_record::ReviewChat,
         },
-        runtime::review::{Commands, pause},
+        runtime::review::{Commands, Delivery, SendToChat, pause},
     };
 
     const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -539,6 +551,10 @@ mod tests {
         overrides: Mutex<Vec<(&'static str, Answer)>>,
         calls: Mutex<Vec<String>>,
         opened: Mutex<Vec<String>>,
+        head: Mutex<String>,
+        delivery: Mutex<Delivery>,
+        // Each prompt sent to a linked chat, after the chat.
+        sent: Mutex<Vec<(String, String)>>,
     }
 
     #[derive(Default)]
@@ -594,10 +610,11 @@ mod tests {
         assert_eq!(
             fixture.opened(),
             [new_chat_link(
-                &prompt,
+                &with_link_step(&prompt, "https://github.com/acme/app/pull/12"),
                 &fixture.home.path().join("review-home")
             )]
         );
+        assert!(fixture.sent().is_empty());
         let launched = fixture.state().requests["acme/app#12@30"].clone();
         assert_eq!(launched.choice.as_deref(), Some("code"));
         assert_eq!(launched.head_sha.as_deref(), Some(HEAD));
@@ -637,6 +654,99 @@ mod tests {
             "a launched request must not come back"
         );
         assert_eq!(fixture.opened().len(), 2);
+    }
+
+    #[test]
+    fn re_request_of_a_linked_pr_goes_to_its_chat_at_the_head_when_chosen() {
+        const LATER: &str = "fedcba9876543210fedcba9876543210fedcba98";
+        let fixture = Fixture::new();
+        fixture.answer(CODE_REVIEW);
+        let first = [requested(30, "sato")];
+        let second = [requested(30, "sato"), requested(31, "sato")];
+        let third = [
+            requested(30, "sato"),
+            requested(31, "sato"),
+            requested(32, "sato"),
+        ];
+
+        fixture.with_daemon(&Setup::default(), |daemon, stop| {
+            daemon.poll_once().expect("baseline poll");
+            notifying(daemon, stop, || {
+                fixture.request("acme/app", 12, &first);
+                daemon.poll_once().expect("poll the request");
+                fixture.wait_status("acme/app#12@30", Status::Launched);
+                fixture.link_chat("acme/app", 12, "review-chat");
+
+                fixture.set_head(LATER);
+                fixture.request("acme/app", 12, &second);
+                daemon.poll_once().expect("poll the re-request");
+                fixture.wait_status("acme/app#12@31", Status::Launched);
+
+                fixture.request("acme/app", 12, &third);
+                daemon
+                    .poll_once()
+                    .expect("poll the re-request of the same head");
+                fixture.wait_status("acme/app#12@32", Status::Launched);
+            });
+        });
+
+        assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
+        let to_chat = ("review-chat".to_owned(), fixture.prompt_at(LATER));
+        assert_eq!(fixture.sent(), [to_chat.clone(), to_chat]);
+        let sent = fixture.state().requests["acme/app#12@31"].clone();
+        assert_eq!(sent.head_sha.as_deref(), Some(LATER));
+    }
+
+    #[test]
+    fn linked_chat_that_was_not_sent_to_gives_way_to_a_new_chat() {
+        let fixture = Fixture::new();
+        fixture.answer(CODE_REVIEW);
+        fixture.link_chat("acme/app", 12, "review-chat");
+        fixture.set_delivery(Delivery::NotSent("not_sent: no bridge".to_owned()));
+
+        fixture.with_daemon(&Setup::default(), |daemon, stop| {
+            daemon.poll_once().expect("baseline poll");
+            notifying(daemon, stop, || {
+                fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                daemon.poll_once().expect("poll");
+                fixture.wait_status("acme/app#12@30", Status::Launched);
+            });
+        });
+
+        assert_eq!(fixture.sent().len(), 1);
+        assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
+    }
+
+    #[test]
+    fn unconfirmed_send_opens_no_chat_and_is_not_sent_again() {
+        let fixture = Fixture::new();
+        fixture.answer(CODE_REVIEW);
+        fixture.link_chat("acme/app", 12, "review-chat");
+        fixture.set_delivery(Delivery::Unknown("unknown: no answer".to_owned()));
+
+        let queued = fixture.with_daemon(&Setup::default(), |daemon, stop| {
+            daemon.poll_once().expect("baseline poll");
+            notifying(daemon, stop, || {
+                fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                daemon.poll_once().expect("poll");
+                fixture.wait_status("acme/app#12@30", Status::Failed);
+                wait_for(|| fixture.ran("osascript"));
+            });
+            daemon.poll_once().expect("poll again");
+            daemon.queued_count()
+        });
+
+        assert_eq!(queued, 0);
+        assert_eq!(fixture.sent().len(), 1);
+        assert!(fixture.opened().is_empty());
+        let failed = fixture.state().requests["acme/app#12@30"].clone();
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("chat review-chat could not be confirmed")),
+            "{failed:?}"
+        );
     }
 
     #[test]
@@ -893,7 +1003,8 @@ mod tests {
     fn replaced_program_ends_the_daemon_before_the_next_poll() {
         let fixture = Fixture::new();
         let run = |call: &ToolCall<'_>| fixture.run(call);
-        let tools = fixture.tools(&run);
+        let send = |thread: &str, prompt: &str, _: &StopRequest| fixture.deliver(thread, prompt);
+        let tools = fixture.tools(&run, &send);
         let stop = StopRequest::default();
         let daemon = Daemon::new(
             DaemonDeps {
@@ -943,6 +1054,9 @@ mod tests {
                 overrides: Mutex::new(Vec::new()),
                 calls: Mutex::new(Vec::new()),
                 opened: Mutex::new(Vec::new()),
+                head: Mutex::new(HEAD.to_owned()),
+                delivery: Mutex::new(Delivery::Sent),
+                sent: Mutex::new(Vec::new()),
             }
         }
 
@@ -959,7 +1073,8 @@ mod tests {
                 }
                 _ => self.run(call),
             };
-            let tools = self.tools(&run);
+            let send = |thread: &str, prompt: &str, _: &StopRequest| self.deliver(thread, prompt);
+            let tools = self.tools(&run, &send);
             let stop = StopRequest::default();
             let real = |wait| pause(&stop, wait);
             let state = review_record::load_state(&self.paths)
@@ -984,9 +1099,15 @@ mod tests {
             body(&daemon, &stop)
         }
 
-        fn tools<'run>(&self, run: &'run RunTool<'run>) -> Tools<'run> {
+        fn tools<'run>(
+            &self,
+            run: &'run RunTool<'run>,
+            send: &'run SendToChat<'run>,
+        ) -> Tools<'run> {
             Tools {
                 run,
+                send,
+                paths: self.paths.clone(),
                 commands: Commands {
                     gh: PathBuf::from("gh"),
                     git: PathBuf::from("git"),
@@ -1023,7 +1144,10 @@ mod tests {
             }
             if let Some(path) = line.strip_prefix("gh api repos/") {
                 let parts = path.split('/').collect::<Vec<_>>();
-                return Ok(pull_json(&format!("{}/{}", parts[0], parts[1]), parts[3]).into_bytes());
+                let head = self.head.lock().expect("read the head").clone();
+                return Ok(
+                    pull_json(&format!("{}/{}", parts[0], parts[1]), parts[3], &head).into_bytes(),
+                );
             }
             if line.starts_with("alerter ") {
                 return Ok(self
@@ -1175,6 +1299,60 @@ mod tests {
         fn opened(&self) -> Vec<String> {
             self.opened.lock().expect("read the links").clone()
         }
+
+        fn deliver(&self, thread: &str, prompt: &str) -> Delivery {
+            self.sent
+                .lock()
+                .expect("note the send")
+                .push((thread.to_owned(), prompt.to_owned()));
+            self.delivery.lock().expect("read the delivery").clone()
+        }
+
+        fn sent(&self) -> Vec<(String, String)> {
+            self.sent.lock().expect("read the sends").clone()
+        }
+
+        fn link_chat(&self, repo: &str, number: u64, thread: &str) {
+            review_record::record_chat(
+                &self.paths,
+                &ReviewChat {
+                    repo: repo.to_owned(),
+                    number,
+                    thread: thread.to_owned(),
+                    linked_at: "2026-11-13T00:00:00.000Z".to_owned(),
+                },
+            )
+            .expect("link the chat");
+        }
+
+        fn set_head(&self, head: &str) {
+            head.clone_into(&mut self.head.lock().expect("set the head"));
+        }
+
+        fn set_delivery(&self, delivery: Delivery) {
+            *self.delivery.lock().expect("set the delivery") = delivery;
+        }
+
+        // The prompt of the code choice for PR 12 at `head`.
+        fn prompt_at(&self, head: &str) -> String {
+            let skill = self.home.path().join(".codex/skills/code-review/SKILL.md");
+            let worktree = self.home.path().join(format!(
+                ".local/share/pr-wake/worktrees/acme/app/pr-12-{}",
+                head.get(..12).unwrap_or_default()
+            ));
+            format!(
+                "[$code-review]({}) https://github.com/acme/app/pull/12 {head} {}",
+                skill.display(),
+                worktree.display()
+            )
+        }
+
+        fn new_chat_at(&self, head: &str) -> String {
+            new_chat_link(
+                &with_link_step(&self.prompt_at(head), "https://github.com/acme/app/pull/12"),
+                &self.home.path().join("review-home"),
+            )
+        }
     }
 
     // Runs the notify loop beside `body`, and stops it however `body` ends.
@@ -1226,12 +1404,12 @@ mod tests {
         group.strip_prefix("pr-wake:").unwrap_or(group).to_owned()
     }
 
-    fn pull_json(repo: &str, number: &str) -> String {
+    fn pull_json(repo: &str, number: &str, head: &str) -> String {
         json!({
             "number": number.parse::<u64>().expect("a number"),
             "title": "T",
             "html_url": format!("https://github.com/{repo}/pull/{number}"),
-            "head": {"sha": HEAD},
+            "head": {"sha": head},
             "base": {"ref": "main", "repo": {"full_name": repo}},
         })
         .to_string()

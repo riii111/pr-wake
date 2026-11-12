@@ -1,6 +1,7 @@
 mod daemon;
 
 use std::{
+    cell::RefCell,
     env,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
@@ -9,16 +10,25 @@ use std::{
 };
 
 use jiff::{Timestamp, Zoned, tz::TimeZone};
+use serde_json::Value;
 
 use self::daemon::{Daemon, DaemonDeps};
 use crate::{
-    app::review::{
-        self, PullRequest,
-        config::{Choice, ConfiguredCommands, ReviewConfig},
-        notice::{Notice, Selection},
-        one_line,
-        request::request_queries,
-        state::{Found, ReviewState, Status},
+    app::{
+        review::{
+            self, PullRequest,
+            config::{Choice, ConfiguredCommands, ReviewConfig},
+            notice::{Notice, Selection},
+            one_line,
+            request::request_queries,
+            state::{Found, ReviewState, Status},
+            with_link_step,
+        },
+        time,
+        watch::{
+            SendOutcome,
+            worker::{self, Workers as _},
+        },
     },
     infra::{
         alerter,
@@ -26,14 +36,17 @@ use crate::{
         command::{RunTool, run_tool},
         gh::rest::GhRest,
         git::worktree::{Checkout, prepare_worktree},
+        harnexus::{Bridge, CallTimeouts, CodexWorkers, call_socket_path},
         launchctl::agent_path,
         record::BaseDirectories,
-        review_record::{self, ReviewPaths},
+        review_record::{self, ReviewChat, ReviewPaths},
         stop::StopRequest,
+        watch_record::{self, WatchPaths},
     },
     runtime::{
         agent, output,
         termination::{self, ProgramWatch},
+        watch,
     },
 };
 
@@ -44,6 +57,8 @@ pub(crate) struct ReviewEnv {
     // Names the per-user profile of nix-darwin, which holds commands launchd's PATH lacks.
     pub(crate) user: Option<String>,
     pub(crate) paths: ReviewPaths,
+    // The watch's records, whose registered sender also sends to the review chats.
+    pub(crate) watch_state: PathBuf,
 }
 
 // The commands the review runs, each an absolute path once resolved.
@@ -58,8 +73,20 @@ struct Commands {
 
 struct Tools<'run> {
     run: &'run RunTool<'run>,
+    send: &'run SendToChat<'run>,
+    paths: ReviewPaths,
     commands: Commands,
     config: ReviewConfig,
+}
+
+type SendToChat<'send> = dyn Fn(&str, &str, &StopRequest) -> Delivery + Sync + 'send;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Delivery {
+    Sent,
+    NotSent(String),
+    // The chat may have it, so it is neither sent again nor replaced with a new chat.
+    Unknown(String),
 }
 
 // `pr-wake review smoke`: one PR through the notification and the launch, as a request would go.
@@ -74,6 +101,10 @@ pub(crate) struct Smoke<'smoke> {
 struct Launched {
     pr: Option<PullRequest>,
     worktree: Option<PathBuf>,
+    // The linked chat that was sent the review, or may have been.
+    chat: Option<String>,
+    // Why the linked chat could not be sent to, so a new chat was opened instead.
+    unsent: Option<String>,
     result: Result<(), String>,
 }
 
@@ -87,7 +118,8 @@ pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
     termination::install(stop.clone())
         .map_err(|error| format!("cannot handle termination signals: {error}"))?;
 
-    let tools = load_tools(config, env, &run_tool)?;
+    let send = harnexus_sender(env);
+    let tools = load_tools(config, env, &run_tool, &send)?;
     let _lock = match review_record::hold_lock(&env.paths) {
         Ok(Some(lock)) => lock,
         Ok(None) => {
@@ -152,7 +184,8 @@ pub(crate) fn check(
     stop: &StopRequest,
     out: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
-    let tools = load_tools(config, env, run)?;
+    let send = harnexus_sender(env);
+    let tools = load_tools(config, env, run, &send)?;
     let commands = &tools.commands;
     out(&format!("config: {}", config.display()));
     out(&format!(
@@ -207,7 +240,8 @@ pub(crate) fn smoke(
     out: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let (repo, number) = review::parse_pr_ref(smoke.pr)?;
-    let tools = load_tools(smoke.config, env, run)?;
+    let send = harnexus_sender(env);
+    let tools = load_tools(smoke.config, env, run, &send)?;
     let pr = github(&tools, stop).pull_request(&repo, number)?;
     out(&format!(
         "pr: {}#{} {} head={}",
@@ -244,18 +278,30 @@ pub(crate) fn smoke(
         let worktree = prepare(&tools, &pr, stop)?;
         let prompt = choice.render(&pr, smoke.requester, &worktree);
         out(&format!("worktree: {}", worktree.display()));
-        out(&format!(
-            "link: {}",
-            new_chat_link(&prompt, &tools.config.chat_home)
-        ));
+        match linked_chat(&tools, &pr)? {
+            Some(chat) => {
+                out(&format!("chat: {}", chat.thread));
+                out(&format!("prompt: {prompt}"));
+            }
+            None => out(&format!(
+                "link: {}",
+                new_chat_link(&with_link_step(&prompt, &pr.url), &tools.config.chat_home)
+            )),
+        }
         return Ok(());
     }
     let launched = launch(&tools, choice, &pr.repo, pr.number, smoke.requester, stop);
     if let Some(worktree) = &launched.worktree {
         out(&format!("worktree: {}", worktree.display()));
     }
+    if let Some(unsent) = &launched.unsent {
+        out(&format!("not sent to the linked chat: {unsent}"));
+    }
     launched.result?;
-    out("opened: send the prompt in the new Codex chat to start the review");
+    match &launched.chat {
+        Some(chat) => out(&format!("sent: the review went to the linked chat {chat}")),
+        None => out("opened: send the prompt in the new Codex chat to start the review"),
+    }
     Ok(())
 }
 
@@ -273,6 +319,42 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
     agent::install(agent::REVIEW, &env.home, env.user.as_deref(), &|name| {
         env::var_os(name)
     })
+}
+
+// Run in the review chat, which `CODEX_THREAD_ID` names.
+pub(crate) fn link(
+    env: &ReviewEnv,
+    pr: &str,
+    caller: Result<String, String>,
+    now: Timestamp,
+) -> Result<String, String> {
+    let (repo, number) = review::parse_pr_ref(pr)?;
+    let thread = caller?;
+    if worker::is_t3_worker(&thread) {
+        return Err(
+            "pr-wake review link is for the Codex App chat the review opened, not a T3 Code thread"
+                .to_owned(),
+        );
+    }
+    review_record::record_chat(
+        &env.paths,
+        &ReviewChat {
+            repo: repo.clone(),
+            number,
+            thread: thread.clone(),
+            linked_at: time::format_timestamp(now),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "linked {repo}#{number} to chat {thread}; its re-requests are sent here"
+    ))
+}
+
+pub(crate) fn link_from_chat(env: &ReviewEnv, pr: &str) -> Result<(), String> {
+    let caller = watch::caller_id(&|name| env::var_os(name)).map_err(|failure| failure.to_string());
+    print_line(&link(env, pr, caller, Timestamp::now())?);
+    Ok(())
 }
 
 pub(crate) fn show_status(env: &ReviewEnv) -> Result<(), String> {
@@ -300,12 +382,13 @@ impl ReviewEnv {
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| home.join(".codex"));
         let user = agent::user();
-        let paths = ReviewPaths::of(&BaseDirectories::from_environment()?);
+        let directories = BaseDirectories::from_environment()?;
         Some(Self {
             home,
             codex_home,
             user,
-            paths,
+            paths: ReviewPaths::of(&directories),
+            watch_state: WatchPaths::of(&directories).state,
         })
     }
 }
@@ -314,6 +397,7 @@ fn load_tools<'run>(
     config: &Path,
     env: &ReviewEnv,
     run: &'run RunTool<'run>,
+    send: &'run SendToChat<'run>,
 ) -> Result<Tools<'run>, String> {
     let config = review_record::load_config(config, &env.home, &env.codex_home)?;
     let commands = resolve_commands(
@@ -322,9 +406,59 @@ fn load_tools<'run>(
     )?;
     Ok(Tools {
         run,
+        send,
+        paths: env.paths.clone(),
         commands,
         config,
     })
+}
+
+fn harnexus_sender(env: &ReviewEnv) -> impl Fn(&str, &str, &StopRequest) -> Delivery + Sync {
+    |thread, prompt, stop| {
+        let socket = call_socket_path(
+            env::var_os("HARNEXUS_CALL_SOCKET").as_deref(),
+            env::var_os("HARNEXUS_STATE_PATH").as_deref(),
+            Some(&env.home),
+        );
+        send_to_chat(&env.watch_state, socket, thread, prompt, stop)
+    }
+}
+
+// Sent from the chat registered for the watch, as a chat cannot message itself.
+fn send_to_chat(
+    watch_state: &Path,
+    socket: Result<PathBuf, String>,
+    thread: &str,
+    prompt: &str,
+    stop: &StopRequest,
+) -> Delivery {
+    let registered = watch_record::load_sender(watch_state).map_err(|error| error.to_string());
+    let sender = match worker::sender_for(registered, thread) {
+        Ok(sender) => sender,
+        Err(reason) => return Delivery::NotSent(reason),
+    };
+
+    let bridge = Bridge::new(socket, CallTimeouts::STANDARD, stop.clone());
+    let message = RefCell::new(String::new());
+    let mut codex = CodexWorkers::new(
+        Box::new(|caller, tool, arguments| {
+            let answer = bridge.call(caller, tool, &arguments);
+            answer
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .clone_into(&mut message.borrow_mut());
+            answer
+        }),
+        Box::new(|| Ok(None)),
+    );
+    let sent = codex.send(&sender, thread, prompt);
+    let reason = format!("{}: {}", sent.reported, message.borrow());
+    match sent.outcome {
+        SendOutcome::Done => Delivery::Sent,
+        SendOutcome::NotSent => Delivery::NotSent(reason),
+        SendOutcome::Unknown(_) => Delivery::Unknown(reason),
+    }
 }
 
 // Reads the PR again, so the worktree is pinned to the head at the time the owner chose.
@@ -342,6 +476,8 @@ fn launch(
             return Launched {
                 pr: None,
                 worktree: None,
+                chat: None,
+                unsent: None,
                 result: Err(error),
             };
         }
@@ -352,21 +488,49 @@ fn launch(
             return Launched {
                 pr: Some(pr),
                 worktree: None,
+                chat: None,
+                unsent: None,
                 result: Err(error),
             };
         }
     };
-    let link = new_chat_link(
-        &choice.render(&pr, requester, &worktree),
-        &tools.config.chat_home,
-    );
+    let prompt = choice.render(&pr, requester, &worktree);
+    let ended = |chat, unsent, result| Launched {
+        pr: Some(pr.clone()),
+        worktree: Some(worktree.clone()),
+        chat,
+        unsent,
+        result,
+    };
+
+    let linked = match linked_chat(tools, &pr) {
+        Ok(linked) => linked,
+        Err(error) => return ended(None, None, Err(error)),
+    };
+    let mut unsent = None;
+    if let Some(chat) = linked {
+        match (tools.send)(&chat.thread, &prompt, stop) {
+            Delivery::Sent => return ended(Some(chat.thread), None, Ok(())),
+            Delivery::Unknown(reason) => {
+                let error = format!(
+                    "the send to chat {} could not be confirmed; check that chat before asking it again: {reason}",
+                    chat.thread
+                );
+                return ended(Some(chat.thread), None, Err(error));
+            }
+            Delivery::NotSent(reason) => unsent = Some(format!("chat {}: {reason}", chat.thread)),
+        }
+    }
+
+    let link = new_chat_link(&with_link_step(&prompt, &pr.url), &tools.config.chat_home);
     let result = open_link(tools.run, &tools.commands.open, &link, stop)
         .map_err(|error| format!("open deep link: {error}"));
-    Launched {
-        pr: Some(pr),
-        worktree: Some(worktree),
-        result,
-    }
+    ended(None, unsent, result)
+}
+
+fn linked_chat(tools: &Tools<'_>, pr: &PullRequest) -> Result<Option<ReviewChat>, String> {
+    review_record::load_chat(&tools.paths, &pr.repo, pr.number)
+        .map_err(|error| format!("read the linked review chat: {error}"))
 }
 
 fn prepare(tools: &Tools<'_>, pr: &PullRequest, stop: &StopRequest) -> Result<PathBuf, String> {
@@ -529,7 +693,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::infra::command::ToolCall;
+    use crate::{
+        app::watch::pr::{PrLink, PrRef},
+        infra::command::ToolCall,
+    };
 
     const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -764,11 +931,121 @@ mod tests {
                 format!("worktree: {}", worktree.display()),
                 format!(
                     "link: {}",
-                    new_chat_link(&prompt, &home.directory.path().join("review-home"))
+                    new_chat_link(
+                        &with_link_step(&prompt, "https://github.com/acme/app/pull/3"),
+                        &home.directory.path().join("review-home")
+                    )
                 ),
             ]
         );
         assert!(!home.ran("/x/open"), "--no-open must not open the link");
+    }
+
+    #[test]
+    fn link_records_the_calling_chat_apart_from_the_watch_of_the_pr() {
+        let home = ReviewHome::new();
+        let now = "2026-11-13T00:00:00Z".parse().expect("parse the time");
+        let pr = PrRef {
+            repo: "acme/app".to_owned(),
+            number: 3,
+        };
+        let watched = PrLink {
+            pr: pr.clone(),
+            url: "https://github.com/acme/app/pull/3".to_owned(),
+            worker: "worker-chat".to_owned(),
+            linked_at: "2026-11-12T00:00:00.000Z".to_owned(),
+        };
+        watch_record::record_link(&home.env.watch_state, &watched).expect("link the worker");
+
+        let linked = link(
+            &home.env,
+            "https://github.com/acme/app/pull/3",
+            Ok("review-chat".to_owned()),
+            now,
+        );
+
+        assert_eq!(
+            linked,
+            Ok("linked acme/app#3 to chat review-chat; its re-requests are sent here".to_owned())
+        );
+        assert_eq!(
+            review_record::load_chat(&home.env.paths, "acme/app", 3)
+                .expect("read the chat")
+                .map(|chat| chat.thread),
+            Some("review-chat".to_owned())
+        );
+        assert_eq!(
+            watch_record::load_link(&home.env.watch_state, &pr).expect("read the watch link"),
+            Some(watched)
+        );
+    }
+
+    #[test]
+    fn link_needs_a_codex_chat_and_a_pr() {
+        for (name, pr, caller, expected) in [
+            (
+                "t3_thread",
+                "acme/app#3",
+                Ok("t3:thread".to_owned()),
+                "not a T3 Code thread",
+            ),
+            (
+                "no_chat",
+                "acme/app#3",
+                Err("CODEX_THREAD_ID is not set".to_owned()),
+                "CODEX_THREAD_ID is not set",
+            ),
+            (
+                "not_a_pr",
+                "acme/app",
+                Ok("review-chat".to_owned()),
+                "expected owner/repo#number",
+            ),
+        ] {
+            let home = ReviewHome::new();
+
+            let linked = link(&home.env, pr, caller, Timestamp::UNIX_EPOCH);
+
+            let error = linked.expect_err(name);
+            assert!(error.contains(expected), "case: {name}: {error}");
+            assert_eq!(
+                review_record::load_chat(&home.env.paths, "acme/app", 3).expect("read no chat"),
+                None,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn send_without_a_sender_or_a_bridge_is_not_sent() {
+        for (name, sender, expected) in [
+            ("no_sender", None, "no chat is registered to send from"),
+            (
+                "sender_is_the_chat",
+                Some("review-chat"),
+                "the registered sender is this chat itself",
+            ),
+            ("no_bridge", Some("sender-chat"), "not_sent: no socket"),
+        ] {
+            let directory = tempfile::tempdir().expect("create a directory");
+            if let Some(sender) = sender {
+                watch_record::record_sender(directory.path(), sender, "2026-11-13T00:00:00.000Z")
+                    .expect("register the sender");
+            }
+
+            let delivery = send_to_chat(
+                directory.path(),
+                Err("no socket".to_owned()),
+                "review-chat",
+                "review again",
+                &StopRequest::default(),
+            );
+
+            let Delivery::NotSent(reason) = delivery else {
+                panic!("case: {name}: {delivery:?}");
+            };
+            assert!(reason.contains(expected), "case: {name}: {reason}");
+        }
     }
 
     #[test]
@@ -841,6 +1118,7 @@ mod tests {
                     config,
                     state: root.join("state/pr-wake/review"),
                 },
+                watch_state: root.join("state/harnexus-crew/watch"),
             };
             Self {
                 directory,

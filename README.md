@@ -87,4 +87,13 @@ sequenceDiagram
 `pr-wake review smoke --pr owner/repo#123`で通知からスレッドを開くまでを試せる。
 レビュー用のworktreeは自動で消えないため、不要になったら`git worktree remove`で削除する。
 
+### 再レビュー
+
+新しく開くスレッドのプロンプトには、そのスレッドをPRへ紐づける`pr-wake review link <PRのURL>`の実行手順が入る。
+紐づけたPRに再依頼が届いて通知でSkillを選ぶと、新しいスレッドを開かず、選んだ時点のheadのレビュー依頼をそのスレッドへ送る。
+
+送信にはharnexusのcall socketと、`pr-wake watch sender`で登録した送信元のチャットを使う。
+どちらかがなく送れなかったときは、新しいスレッドを開く。
+送れたか分からないときは、二重に依頼しないよう失敗として通知し、新しいスレッドも開かない。
+
 コマンドの一覧は`pr-wake watch --help`と`pr-wake review --help`で確認できる。

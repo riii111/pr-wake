@@ -45,6 +45,11 @@ enum ReviewCommand {
     Check(ConfigFlag),
     #[command(about = "Take one PR through the notification and the launch")]
     Smoke(SmokeFlags),
+    #[command(about = "Link the calling review chat to a PR, which then gets the PR's re-requests")]
+    Link {
+        #[arg(value_name = "OWNER/REPO#N|URL")]
+        pr: String,
+    },
     #[command(about = "Check the config, then start the LaunchAgent")]
     Install,
     #[command(about = "Stop and remove the LaunchAgent")]
@@ -208,6 +213,7 @@ fn review_command(command: ReviewCommand) -> Result<(), String> {
                 &env,
             )
         }
+        ReviewCommand::Link { pr } => review::link_from_chat(&env()?, &pr),
         ReviewCommand::Install => review::install(&env()?),
         ReviewCommand::Uninstall => agent::uninstall(agent::REVIEW, &env()?.home),
         ReviewCommand::Start => agent::start(agent::REVIEW, &env()?.home),
@@ -353,6 +359,11 @@ mod tests {
                 ReviewCommand::Check(ConfigFlag {
                     config: Some(PathBuf::from("/tmp/review.json")),
                 }),
+            ),
+            (
+                "link",
+                &["review", "link", PR],
+                ReviewCommand::Link { pr: PR.to_owned() },
             ),
             (
                 "logs_followed",

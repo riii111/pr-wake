@@ -3,10 +3,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::record::{self, BaseDirectories, JsonLayout, ProcessLock, RecordError};
-use crate::app::review::{
-    config::{ConfigFile, ReviewConfig},
-    state::ReviewState,
+use serde::{Deserialize, Serialize};
+
+use super::{
+    record::{self, BaseDirectories, JsonLayout, ProcessLock, RecordError},
+    watch_record::pr_key,
+};
+use crate::app::{
+    review::{
+        config::{ConfigFile, ReviewConfig},
+        state::ReviewState,
+    },
+    watch::pr::PrRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,8 +23,19 @@ pub(crate) struct ReviewPaths {
     pub(crate) state: PathBuf,
 }
 
+// The review chat a PR's re-requests go to, kept apart from the watch's link to the PR's worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewChat {
+    pub(crate) repo: String,
+    pub(crate) number: u64,
+    pub(crate) thread: String,
+    pub(crate) linked_at: String,
+}
+
 const STATE: &str = "state.json";
 const LOCK: &str = "lock";
+const CHATS: &str = "chats";
 
 impl ReviewPaths {
     #[must_use]
@@ -67,6 +86,34 @@ pub(crate) fn load_state(paths: &ReviewPaths) -> Result<Option<ReviewState>, Rec
 
 pub(crate) fn save_state(paths: &ReviewPaths, state: &ReviewState) -> Result<(), RecordError> {
     record::save_json(&paths.state_file(), state, JsonLayout::TwoSpacesAndNewline)
+}
+
+// A chat links its PR while the review runs, so each link has its own file rather than a place in the state.
+pub(crate) fn record_chat(paths: &ReviewPaths, chat: &ReviewChat) -> Result<(), RecordError> {
+    record::save_json(
+        &chat_path(paths, &chat.repo, chat.number),
+        chat,
+        JsonLayout::TwoSpacesAndNewline,
+    )
+}
+
+pub(crate) fn load_chat(
+    paths: &ReviewPaths,
+    repo: &str,
+    number: u64,
+) -> Result<Option<ReviewChat>, RecordError> {
+    record::load_json(&chat_path(paths, repo, number))
+}
+
+fn chat_path(paths: &ReviewPaths, repo: &str, number: u64) -> PathBuf {
+    let pr = PrRef {
+        repo: repo.to_owned(),
+        number,
+    };
+    paths
+        .state
+        .join(CHATS)
+        .join(format!("{}.json", pr_key(&pr)))
 }
 
 // Held for the life of the review, so a second one cannot notify or launch the same request.
@@ -137,6 +184,33 @@ mod tests {
         assert_eq!(
             load_state(&paths).expect("read the state"),
             Some(ReviewState::default())
+        );
+    }
+
+    #[test]
+    fn chat_is_found_under_any_case_of_the_repository_and_replaced_by_a_later_link() {
+        let directory = tempfile::tempdir().expect("create a directory");
+        let paths = ReviewPaths {
+            config: directory.path().join("review.json"),
+            state: directory.path().join("review"),
+        };
+        let chat = |thread: &str| ReviewChat {
+            repo: "Acme/App".to_owned(),
+            number: 12,
+            thread: thread.to_owned(),
+            linked_at: "2026-11-13T00:00:00.000Z".to_owned(),
+        };
+
+        record_chat(&paths, &chat("first")).expect("link the first chat");
+        record_chat(&paths, &chat("second")).expect("link the second chat");
+
+        assert_eq!(
+            load_chat(&paths, "acme/app", 12).expect("read the chat"),
+            Some(chat("second"))
+        );
+        assert_eq!(
+            load_chat(&paths, "acme/app", 13).expect("read no chat"),
+            None
         );
     }
 
