@@ -21,7 +21,6 @@ use crate::{
     infra::command::{CommandError, CommandOutput},
 };
 
-// One run of gh: its arguments, the token to run it as, and its standard input.
 pub(crate) struct GhCall<'call> {
     pub(crate) arguments: &'call [&'call str],
     pub(crate) token: Option<&'call str>,
@@ -34,7 +33,7 @@ pub(crate) type RunGh<'run> =
 
 pub(crate) type Clock<'clock> = Box<dyn Fn() -> Instant + 'clock>;
 
-// GitHub read through `gh api graphql`, as the account each repository is configured with.
+// Each query runs with the token of the account it is given, not as gh's active account.
 pub(crate) struct GhApi<'run> {
     run: RunGh<'run>,
     now: Clock<'run>,
@@ -46,8 +45,8 @@ struct KeptToken {
     at: Instant,
 }
 
-// Reading the token starts gh, which on macOS starts the keychain tool too, so it is not read for
-// every request; a token the owner rotates is still picked up within this long.
+// Reading a token starts gh and, on macOS, the keychain tool, so a token is kept rather than read per request.
+// A token the owner rotates is still picked up within this long.
 const TOKEN_TTL: Duration = Duration::from_mins(10);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -74,6 +73,7 @@ impl<'run> GhApi<'run> {
         {
             return Ok(kept.value.clone());
         }
+
         let ran = (self.run)(&GhCall {
             arguments: &[
                 "auth",
@@ -98,6 +98,7 @@ impl<'run> GhApi<'run> {
                 message: format!("gh has no token for account {account}"),
             });
         }
+
         // Kept in memory only, so it never reaches the state or the log.
         self.tokens.insert(
             account.to_owned(),
@@ -128,15 +129,13 @@ impl<'run> GhApi<'run> {
             timeout: QUERY_TIMEOUT,
         });
         let data = data_of(ran);
-        // Any failure drops the token, so a rejected one is read again without telling a 401 by
-        // what gh prints, at the cost of one more start of gh after a failure.
+        // Any failure drops the token, so a rejected one is read again without parsing gh's output for a 401.
         if data.is_err() {
             self.tokens.remove(account);
         }
         data
     }
 
-    // Each later page is read through the node that owns the list.
     fn all_nodes(
         &mut self,
         account: &str,
@@ -201,6 +200,7 @@ impl<'run> GhApi<'run> {
                 })
             })
             .collect::<Result<Vec<_>, ReadError>>()?;
+
         let rollup = pull::last_commit(pull.get("checks"))
             .and_then(|commit| commit.get("statusCheckRollup")?.as_object());
         let contexts = match rollup {
@@ -213,6 +213,7 @@ impl<'run> GhApi<'run> {
             )?,
             None => Vec::new(),
         };
+
         let reviews = self.all_nodes(account, pr, Page::Reviews, id, pull.get("reviews"))?;
         let comments = self.all_nodes(account, pr, Page::Comments, id, pull.get("comments"))?;
         Ok(Lists {
@@ -282,13 +283,13 @@ impl GitHub for GhApi<'_> {
     }
 }
 
-// gh exits 1 for an answer with errors and prints the answer still, so an answer without JSON is
-// one GitHub never gave.
+// gh exits 1 but still prints an answer with errors, so only output without JSON means GitHub never answered.
 fn data_of(ran: Result<CommandOutput, CommandError>) -> Result<Object, ReadError> {
     let output = ran.map_err(|error| ReadError {
         kind: ReadErrorKind::Unreachable,
         message: format!("gh api graphql: {error}"),
     })?;
+
     let Ok(Value::Object(body)) = serde_json::from_slice::<Value>(&output.stdout) else {
         return Err(if output.code == 0 {
             rejected("GitHub answered without JSON".to_owned())
@@ -303,6 +304,7 @@ fn data_of(ran: Result<CommandOutput, CommandError>) -> Result<Object, ReadError
             }
         });
     };
+
     if let Some(errors) = body
         .get("errors")
         .and_then(Value::as_array)
@@ -310,6 +312,7 @@ fn data_of(ran: Result<CommandOutput, CommandError>) -> Result<Object, ReadError
     {
         return Err(rejected(format!("GitHub answered: {}", errors_of(errors))));
     }
+
     if output.code != 0 {
         let said = body
             .get("message")
@@ -317,6 +320,7 @@ fn data_of(ran: Result<CommandOutput, CommandError>) -> Result<Object, ReadError
             .map_or_else(|| brief(&output.stderr), str::to_owned);
         return Err(rejected(format!("GitHub refused the query: {said}")));
     }
+
     match body.get("data") {
         Some(Value::Object(data)) => Ok(data.clone()),
         _ => Err(rejected("GitHub answered without data".to_owned())),
@@ -343,7 +347,6 @@ const fn rejected(message: String) -> ReadError {
     }
 }
 
-// Cut at a character boundary, since the message needs only the start of what gh said.
 fn brief(output: &[u8]) -> String {
     String::from_utf8_lossy(output)
         .trim()
@@ -373,7 +376,6 @@ mod tests {
     const PR: &str = "https://github.com/org/pay/pull/7";
     const TOKEN: &str = "secret-token";
 
-    // What the fake gh was asked: every command line, and every query with the token it ran as.
     struct Recorder {
         commands: RefCell<Vec<Vec<String>>>,
         posts: RefCell<Vec<Post>>,
@@ -917,7 +919,6 @@ mod tests {
             }
         }
 
-        // gh as the test says: a token for every account, and each query answered by `answer`.
         fn api<'test>(
             &'test self,
             mut answer: impl FnMut(&Value) -> CommandOutput + 'test,

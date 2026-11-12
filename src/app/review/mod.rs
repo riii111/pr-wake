@@ -11,7 +11,6 @@ use std::{
 
 use regex::Regex;
 
-// A PR as it is read when its review starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PullRequest {
     pub(crate) repo: String,
@@ -58,13 +57,11 @@ pub(crate) fn worktree_path(root: &Path, pr: &PullRequest) -> PathBuf {
         .join(format!("pr-{}-{head}", pr.number))
 }
 
-// A title shown on one line, as a notification or a status row has room for.
 #[must_use]
 pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-// The path of an https URL on github.com, without its query or fragment.
 fn github_path(text: &str) -> Option<&str> {
     let scheme = text.get(..8)?;
     if !scheme.eq_ignore_ascii_case("https://") {

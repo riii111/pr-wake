@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer};
 
-// serde reads a missing `Option` field as `None`; through `deserialize_with` the field must be
-// present, as the stored schemas require, while it may still be null.
+// serde would read a missing `Option` field as `None`, but the stored schemas require the field to be present.
+// Through `deserialize_with` a missing field fails, while a null one is still `None`.
 pub(crate) fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -10,7 +10,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-// For a field that may be left out, with `#[serde(default)]`, but is never null.
+// Paired with `#[serde(default)]`, the field may be left out but is never null.
 pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,

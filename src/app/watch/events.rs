@@ -25,13 +25,11 @@ pub(crate) fn next_events(
     detail: &PrDetail,
     state: &WatchState,
     linked_at: &str,
-    // The owner's own account is fixed per repository, so its comments are known without another
-    // request.
+    // The owner's account is fixed per repository, so its comments are known without another request.
     owner: &str,
     config: &WatchConfig,
 ) -> Found {
-    // The first read of a PR takes what is already on it as seen, so starting the watch never
-    // sends what the owner has handled.
+    // Starting the watch must not send what the owner already handled, so the first read takes it all as seen.
     if state.summary.is_none() {
         return baseline(detail, &config.review_bots);
     }
@@ -62,8 +60,7 @@ fn baseline(detail: &PrDetail, bots: &[ReviewBot]) -> Found {
     let head = &detail.summary.head;
     Found {
         events: Vec::new(),
-        // Every comment is taken, findings or not, so one whose verdict changes later is still
-        // not new.
+        // A comment whose verdict changes later must still not be new, so every comment is taken.
         seen: detail
             .comments
             .iter()
@@ -99,6 +96,7 @@ fn new_findings(
         })
         .map(|(id, _)| id.as_str())
         .collect::<HashSet<_>>();
+
     classify::classify(&detail.comments, owner, &config.ignore, &config.review_bots)
         .into_iter()
         .filter_map(|verdict| match verdict {
@@ -124,8 +122,7 @@ fn review_done(
     linked_at: &str,
     findings: &[WatchEvent],
 ) -> Option<WatchEvent> {
-    // A bot added after the PR's first read starts from its reviews as they stand, as the first
-    // read does.
+    // A bot added after the first read starts from its reviews as they stand, as the first read does.
     if !seen.contains(&bot_key(&bot.id)) {
         for key in bot_baseline(detail, bot) {
             seen.insert(&key);
@@ -141,8 +138,7 @@ fn review_done(
         return None;
     }
 
-    // Whether the review found anything is decided by its new inline findings; the summary
-    // comment only confirms it.
+    // The new inline findings decide whether the review found anything; the summary comment only confirms it.
     let inline = findings
         .iter()
         .filter(|event| {
@@ -151,6 +147,7 @@ fn review_done(
                     && finding.kind == ItemKind::Inline)
         })
         .count();
+
     // A bot without a summary to check against always agrees.
     let summary_agrees =
         bot.no_actionable.is_none() || (inline == 0) == detail.no_actionable.contains(&bot.id);
@@ -185,8 +182,7 @@ fn bot_baseline(detail: &PrDetail, bot: &ReviewBot) -> Vec<String> {
     keys
 }
 
-// The id leads, so the keys CodeRabbit's reviews were recorded under before bots were
-// configurable still match.
+// The id leads, so keys recorded for CodeRabbit before bots were configurable still match.
 fn review_key(bot: &ReviewBot, head: &str) -> String {
     format!("{}:{head}", bot.id)
 }
@@ -202,6 +198,7 @@ fn conflict_of(detail: &PrDetail, notified: Option<&str>) -> (Option<WatchEvent>
             Some(summary.head.clone()),
         );
     }
+
     let head = if summary.mergeable == MERGEABLE {
         None
     } else {
@@ -249,7 +246,6 @@ impl Seen {
         self.known.contains(key)
     }
 
-    // True when the key is new.
     fn insert(&mut self, key: &str) -> bool {
         if !self.known.insert(key.to_owned()) {
             return false;

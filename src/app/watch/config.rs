@@ -34,8 +34,7 @@ pub(crate) struct WatchConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Repository {
-    // Fixed per repository, so switching the active gh account never points a poll at a
-    // repository the other account cannot see.
+    // Fixed per repository, so switching the active gh account never points a poll at a repository it cannot see.
     #[serde(deserialize_with = "login")]
     pub(crate) account: String,
 }
@@ -163,6 +162,7 @@ impl TryFrom<ConfigFile> for WatchConfig {
                 }
             })
             .collect::<Result<_, _>>()?;
+
         let review_bots = file
             .review_bots
             .into_iter()
@@ -175,6 +175,7 @@ impl TryFrom<ConfigFile> for WatchConfig {
         if repeats(review_bots.iter().map(|bot| bot.login.to_lowercase())) {
             return Err("reviewBots repeats a login".to_owned());
         }
+
         if file.poll_interval_seconds < MIN_POLL_INTERVAL {
             return Err(format!(
                 "pollIntervalSeconds must be at least {MIN_POLL_INTERVAL}"
@@ -188,12 +189,14 @@ impl TryFrom<ConfigFile> for WatchConfig {
         if file.idle_after_hours <= 0.0 {
             return Err("idleAfterHours must be positive".to_owned());
         }
+
         let instructions = file
             .instructions
             .map(|instructions| instructions.trim().to_owned());
         if instructions.as_ref().is_some_and(String::is_empty) {
             return Err("instructions must not be blank".to_owned());
         }
+
         Ok(Self {
             repositories,
             review_bots,

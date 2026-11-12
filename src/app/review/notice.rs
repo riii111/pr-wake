@@ -1,6 +1,5 @@
 use super::{config::Choice, one_line, state::Found};
 
-// What one notification shows and offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Notice {
     pub(crate) key: String,
@@ -14,7 +13,6 @@ pub(crate) struct Notice {
     pub(crate) dropdown: Option<&'static str>,
 }
 
-// How the owner answered a notification; only a chosen action starts anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Selection {
     // The index of the choice in the config.

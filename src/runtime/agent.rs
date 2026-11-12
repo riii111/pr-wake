@@ -40,8 +40,7 @@ pub(crate) const WATCH: Agent = Agent {
 pub(crate) const LEGACY_REVIEW: &str = "io.github.riii111.review-notifier";
 pub(crate) const LEGACY_WATCH: &str = "io.github.riii111.pr-watch";
 
-// launchd gives an agent none of the installing shell's environment, so these are written into the
-// plist as install found them, sorted by name.
+// launchd gives an agent none of the installing shell's environment, so install copies these into the plist, sorted by name.
 const PASSED_ON: [(&str, Passed); 6] = [
     ("HARNEXUS_CALL_SOCKET", Passed::AsSet),
     ("HARNEXUS_STATE_PATH", Passed::AsSet),
@@ -51,8 +50,7 @@ const PASSED_ON: [(&str, Passed); 6] = [
     ("XDG_STATE_HOME", Passed::WhenAbsolute),
 ];
 
-// pr-wake ignores a relative home directory, and the commands an agent runs would read it against
-// another working directory, so a home is passed only when absolute.
+// pr-wake ignores a relative home, and an agent's commands would read it from another directory, so only an absolute one is passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Passed {
     AsSet,
@@ -68,6 +66,7 @@ pub(crate) fn install(
 ) -> Result<(), String> {
     let plist = plist_of(agent, home, user, &program()?, env)?;
     stop_service(agent.label)?;
+
     let path = plist_path(agent.label, home);
     for directory in [path.parent(), agent.log(home).parent()]
         .into_iter()
@@ -86,7 +85,6 @@ pub(crate) fn uninstall(agent: Agent, home: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// Only an agent whose plist is still installed is stopped and removed.
 pub(crate) fn remove_legacy(label: &str, home: &Path) -> Result<(), String> {
     if plist_path(label, home).exists() {
         remove(label, home)
@@ -168,6 +166,7 @@ fn plist_of(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+
     Ok(AgentPlist {
         label: agent.label,
         program: &[
@@ -184,8 +183,7 @@ fn plist_of(
     .render())
 }
 
-// The path this run was started at, without resolving links, so a reinstall at that path is what
-// the agent runs next.
+// Links stay unresolved, so the agent runs whatever a reinstall later puts at this path.
 fn program() -> Result<String, String> {
     let program = env::current_exe()
         .and_then(path::absolute)

@@ -14,8 +14,7 @@ use crate::app::watch::{
     worker::{Sent, T3_SENDER, T3_WORKER, Workers},
 };
 
-// How a run of the t3 CLI ended; `started` tells a command that may have acted from one that
-// never ran.
+// `started` tells a command that may have acted from one that never ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum T3Ran {
     Ran {
@@ -32,7 +31,6 @@ pub(crate) enum T3Ran {
 // Runs t3 with these arguments and this standard input within the timeout.
 pub(crate) type RunT3<'run> = Box<dyn FnMut(&[&str], &str, Duration) -> T3Ran + 'run>;
 
-// The PR watch's workers in T3 Code, reached through T3 Code's t3 CLI.
 pub(crate) struct T3Workers<'run> {
     run: RunT3<'run>,
 }
@@ -63,8 +61,8 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(60);
 // What the t3 CLI answers for a thread that was deleted or never existed.
 const GONE: &str = "is no longer available";
 
-// Failures the t3 CLI reports before it reaches the server; any other may come after the message
-// was queued.
+// Failures the t3 CLI reports before it reaches the server.
+// Any other failure may come after the message was queued, so its delivery is unknown.
 const BEFORE_SENDING: [&str; 4] = [
     "No running T3 Code server",
     "is not a thread id",
@@ -105,6 +103,7 @@ impl Workers for T3Workers<'_> {
             "",
             SHOW_TIMEOUT,
         );
+
         let T3Ran::Ran {
             code,
             stdout,
@@ -129,6 +128,7 @@ impl Workers for T3Workers<'_> {
             prompt,
             SEND_TIMEOUT,
         );
+
         let (outcome, detail) = match sent {
             T3Ran::NotRan { started, message } => (
                 if started {
@@ -159,6 +159,7 @@ impl Workers for T3Workers<'_> {
                 )
             }
         };
+
         // The CLI's own word for the outcome when it gives one, as the log has kept.
         let reported = detail
             .get("outcome")
@@ -191,8 +192,8 @@ impl Outcome {
     }
 }
 
-// The t3 CLI the watch runs: HARNEXUS_T3_BIN when set, then t3 on PATH, then the launcher the
-// desktop app writes. `None` for a HARNEXUS_T3_BIN that is not an absolute path.
+// Looks for HARNEXUS_T3_BIN, then t3 on PATH, then the launcher the desktop app writes.
+// `None` for a HARNEXUS_T3_BIN that is not an absolute path.
 pub(crate) fn t3_binary(
     t3_bin: Option<&OsStr>,
     t3_home: Option<&OsStr>,
@@ -209,7 +210,6 @@ pub(crate) fn t3_binary(
     Some(which("t3").unwrap_or_else(|| t3_home.join("bin/t3")))
 }
 
-// The first executable file of that name in the directories of a PATH value.
 pub(crate) fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
     std::env::split_paths(path?)
         .map(|directory| directory.join(name))
@@ -231,8 +231,7 @@ fn is_busy(thread: &Thread) -> bool {
         || thread.pending_request_count > 0.0
 }
 
-// The run our message started and its last reply; the t3 CLI shows no times, so the latest
-// message with our text is ours.
+// The t3 CLI shows no times, so the latest message with our text is taken as ours.
 fn answer_to(view: &View, prompt: &str) -> Option<Answer> {
     let asked = view.messages.iter().rposition(|message| {
         message.role == "user" && message.text.trim_end() == prompt.trim_end()
@@ -307,7 +306,6 @@ fn error_detail(error: String) -> Map<String, Value> {
     Map::from_iter([("error".to_owned(), Value::String(error))])
 }
 
-// Cut at a character boundary, since the log needs only the start of what t3 said.
 fn brief(text: &str) -> String {
     text.trim().chars().take(BRIEF_CHARS).collect()
 }

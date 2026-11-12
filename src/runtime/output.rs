@@ -1,7 +1,6 @@
 use std::io::{self, Write};
 
-// Every result, usage message and log line goes out through these two handles, so a closed
-// stream is the one failure to decide about: nothing is left to tell it to, so it is dropped.
+// A failed write to a closed stream leaves nowhere to report it, so the error is dropped.
 pub(crate) fn write_stdout(text: &str) {
     let mut stdout = io::stdout().lock();
     let _ = stdout

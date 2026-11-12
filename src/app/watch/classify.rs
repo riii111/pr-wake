@@ -7,14 +7,13 @@ use super::{
     state::{Approval, Finding},
 };
 
-// One per comment, in the order of the comments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict<'bot> {
     Notified(Finding),
     Ignored(Ignored<'bot>),
 }
 
-// Each carries the name of the review bot it is about, as the dry run shows it.
+// The bot variants carry the bot's name, as the dry run shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ignored<'bot> {
     Owner,
@@ -56,8 +55,8 @@ fn ignored_reason<'bot>(
     if rules.iter().any(|rule| matches(rule, comment)) {
         return Some(Ignored::IgnoreRule);
     }
-    // Findings are left on the code or in a review; the conversation carries requests and replies
-    // such as "will look".
+    // Findings go on the code or in a review.
+    // The conversation carries requests and replies such as "will look".
     if comment.kind == ItemKind::IssueComment {
         return Some(Ignored::IssueComment);
     }
@@ -75,8 +74,8 @@ fn ignored_reason<'bot>(
         {
             return Some(Ignored::BotReviewWithoutFindings(&bot.name));
         }
-        // A bot's finding resolved before the watch read it was already handled; a person's reply
-        // there still reopens the talk.
+        // A bot's finding resolved before the watch read it was already handled.
+        // A person's reply there still reopens the talk.
         if comment.kind == ItemKind::Inline && comment.resolved {
             return Some(Ignored::ResolvedBotThread(&bot.name));
         }

@@ -40,8 +40,7 @@ pub(crate) struct Request {
     pub(crate) error: Option<String>,
 }
 
-// A pending review request, keyed by its review_requested event so only a re-request is
-// notified again.
+// The key names the review_requested event, so only a re-request is notified again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Found {
     pub(crate) key: String,
@@ -86,15 +85,13 @@ pub(crate) enum Status {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Version;
 
-// Finished requests are kept this long after they stop being pending, so a late search result
-// cannot notify them again.
+// A late search result must not notify a finished request again, so it outlives the search by this long.
 const RETENTION: SignedDuration = SignedDuration::from_hours(90 * 24);
 
 const INTERRUPTED_LAUNCH: &str =
     "interrupted while launching; check the Codex App before starting it again";
 
 impl ReviewState {
-    // The first poll of a new state only records what is already pending.
     #[must_use]
     pub(crate) fn is_new(&self) -> bool {
         self.last_poll.is_none() && self.requests.is_empty()
@@ -115,12 +112,12 @@ impl ReviewState {
             .iter()
             .map(|found| pr_key(&found.repo, found.number))
             .collect::<HashSet<_>>();
+
         let mut added = Vec::new();
         for found in found {
             if let Some(request) = self.requests.get_mut(&found.key) {
                 request.found.title = found.title;
-                // Search can briefly miss a PR; a request it lists again is still owed its
-                // notification.
+                // Search can briefly miss a PR, so a request it lists again is still owed its notification.
                 if request.status == Status::Withdrawn {
                     request.status = Status::Queued;
                     request.updated_at = now;
@@ -148,6 +145,7 @@ impl ReviewState {
                 },
             );
         }
+
         self.requests.retain(|key, request| {
             if active.contains(key) {
                 return true;
@@ -160,6 +158,7 @@ impl ReviewState {
             active_prs.contains(&pr_key(&request.found.repo, request.found.number))
                 || now.duration_since(request.updated_at) <= RETENTION
         });
+
         added.sort();
         added
     }
@@ -450,8 +449,7 @@ mod tests {
     mod record {
         use super::*;
 
-        // As the Go review wrote it: nanoseconds with the local offset, an empty requester and
-        // no team.
+        // As the Go review wrote it: nanoseconds with the local offset, an empty requester and no team.
         const GO_STATE: &str = r#"{
   "version": 1,
   "login": "me",

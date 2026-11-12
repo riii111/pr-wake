@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-// GitHub's REST API through `gh api`, as the account gh has active.
+// Runs as whichever account gh has active.
 pub(crate) struct GhRest<'rest> {
     pub(crate) run: &'rest RunTool<'rest>,
     pub(crate) gh: &'rest Path,
@@ -123,6 +123,7 @@ impl GhRest<'_> {
         ])?;
         let pages = decode_pages::<SearchPage>(&output)
             .map_err(|error| format!("search {query:?}: {error}"))?;
+
         let mut hits = Vec::new();
         for page in pages {
             // A partial answer would make the missing requests look withdrawn.
@@ -179,6 +180,7 @@ impl GhRest<'_> {
         let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
         let pull = serde_json::from_slice::<Pull>(&output)
             .map_err(|error| format!("pull request {repo}#{number}: {error}"))?;
+
         if pull.number != number || !pull.base.repo.full_name.eq_ignore_ascii_case(repo) {
             return Err(format!(
                 "pull request {repo}#{number}: answer names {}#{}",
@@ -191,6 +193,7 @@ impl GhRest<'_> {
                 pull.head.sha
             ));
         }
+
         Ok(PullRequest {
             repo: pull.base.repo.full_name,
             number,
@@ -232,7 +235,6 @@ mod tests {
 
     const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
-    // Answers every gh run with one output and notes the arguments.
     struct FakeGh {
         output: Result<String, String>,
         asked: Mutex<Vec<Vec<String>>>,

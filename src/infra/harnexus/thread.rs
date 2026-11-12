@@ -17,7 +17,6 @@ pub(crate) type CallApp<'call> =
 // The chat registered as the sender, read each time so a new registration takes effect.
 pub(crate) type Registered<'read> = Box<dyn FnMut() -> Result<Option<String>, String> + 'read>;
 
-// The PR watch's workers in the Codex App, chats reached through harnexus's call socket.
 pub(crate) struct CodexWorkers<'app> {
     call: CallApp<'app>,
     registered: Registered<'app>,
@@ -46,8 +45,7 @@ struct Turn {
     started_at: Option<f64>,
     completed_at: Option<f64>,
     origin: Origin,
-    // The thread and message of a delegated turn, which tell our message apart from any other
-    // thread's.
+    // A delegated turn's source thread and message, which tell our message apart from another thread's.
     delegation: Option<Delegation>,
     answer: String,
 }
@@ -65,8 +63,8 @@ struct Delegation {
     input: String,
 }
 
-// The outcomes the call socket reports for a request that never reached the app; unsupported is
-// the client's own, for a bridge it never wrote to.
+// Outcomes the call socket reports for a request that never reached the app.
+// `unsupported` is the client's own outcome for a bridge it never wrote to.
 const NOT_SENT: [&str; 4] = ["not_sent", "rejected", "invalid", "unsupported"];
 
 // A runaway cursor stops here; the answer wait then gives up as for a lost turn.
@@ -77,8 +75,7 @@ const OUTPUT_CHARS: u64 = 2000;
 // What the app answers for a thread that was deleted or never existed.
 const NO_THREAD: &str = "No Codex thread found";
 
-// A worker the owner just talked to may still be in that conversation, so a message waits this
-// long after the owner's turn.
+// The owner may still be talking to a worker, so a message waits this long after the owner's last turn.
 const OWNER_GRACE_SECONDS: f64 = 5.0 * 60.0;
 
 // The app stamps turns in whole seconds.
@@ -102,7 +99,7 @@ impl<'app> CodexWorkers<'app> {
         Self { call, registered }
     }
 
-    // `None` when the app could not be asked, as while it is closed or the Mac sleeps.
+    // `Unknown` when the app could not be asked, as while it is closed or the Mac sleeps.
     fn read_thread(
         &mut self,
         caller: &str,
@@ -117,8 +114,8 @@ impl<'app> CodexWorkers<'app> {
         let mut turns = first.turns;
         let after = sent_at.map(turns_after);
         let mut cursor = first.next_cursor;
-        // While an answer is awaited, older pages are read until they reach when the message was
-        // sent, so later talk in the chat cannot hide the answer.
+
+        // Later talk could push the answer off the first page, so older pages are read back to the send time.
         for _ in 1..MAX_PAGES {
             let oldest = turns.last().and_then(|turn| turn.started_at);
             let (Some(after), Some(next), Some(oldest)) = (after, cursor.take(), oldest) else {
@@ -136,6 +133,7 @@ impl<'app> CodexWorkers<'app> {
                 Lookup::Unknown => return Lookup::Unknown,
             }
         }
+
         Lookup::Found(ThreadView {
             active: first.active,
             turns,
@@ -143,8 +141,7 @@ impl<'app> CodexWorkers<'app> {
     }
 
     fn read_page(&mut self, caller: &str, thread: &str, cursor: Option<&str>) -> Lookup<Page> {
-        // A Codex thread shows a delegation only in the call's output, so outputs are read but cut
-        // short.
+        // A Codex thread shows a delegation only in the call's output, so outputs are read but cut short.
         let mut arguments = Map::from_iter([
             ("threadId".to_owned(), Value::from(thread)),
             ("turnLimit".to_owned(), Value::from(5)),
@@ -299,8 +296,8 @@ fn turn_of(turn: &Map<String, Value>) -> Turn {
     }
 }
 
-// A Claude thread shows a message from another thread as a user message carrying the delegation,
-// and a Codex thread as the output of the call that sent it.
+// A Claude thread shows another thread's message as a user message carrying the delegation.
+// A Codex thread shows it as the output of the call that sent it.
 fn delegation_of(first: &Value) -> Option<Delegation> {
     let first = first.as_object()?;
     if let Some(carried) = first.get("codexDelegation").and_then(Value::as_object)
@@ -402,7 +399,7 @@ fn is_busy(view: &ThreadView, now: Timestamp) -> bool {
 // The turn our message started: sent from our thread with our text, no earlier than we sent it.
 fn answer_to<'turns>(turns: &'turns [Turn], sent: &Delivered) -> Option<&'turns Turn> {
     let after = turns_after(&sent.at);
-    // The read lists turns newest first.
+    // Turns are listed newest first, so `rfind` takes the earliest turn that matches.
     turns.iter().rfind(|turn| {
         turn.delegation.as_ref().is_some_and(|delegation| {
             delegation.source == sent.sender && is_prompt_of(&delegation.input, &sent.prompt)
@@ -558,7 +555,6 @@ mod tests {
         for (name, answer, expected) in [
             (
                 "deleted_thread",
-                // Protocol 1 answers a failed tool by its kind, with the app's text as the message.
                 json!({
                     "version": 1,
                     "outcome": "rejected",
@@ -624,7 +620,6 @@ mod tests {
     #[case::not_sent("not_sent", SendOutcome::NotSent)]
     #[case::rejected("rejected", SendOutcome::NotSent)]
     #[case::invalid("invalid", SendOutcome::NotSent)]
-    // The client asked the bridge first and wrote nothing to it.
     #[case::unsupported("unsupported", SendOutcome::NotSent)]
     #[case::unknown(
         "unknown",

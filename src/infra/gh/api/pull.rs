@@ -80,6 +80,7 @@ pub(super) fn detail_of(pull: &Object, lists: &Lists, bots: &[ReviewBot]) -> PrD
         .iter()
         .map(|node| plain_of(node, ItemKind::IssueComment, "issue"))
         .collect::<Vec<_>>();
+
     let no_actionable = bots
         .iter()
         .filter(|bot| {
@@ -92,6 +93,7 @@ pub(super) fn detail_of(pull: &Object, lists: &Lists, bots: &[ReviewBot]) -> PrD
         })
         .map(|bot| bot.id.clone())
         .collect();
+
     PrDetail {
         summary: summary_of(pull, bots),
         url: text(pull.get("url")),
@@ -129,8 +131,8 @@ pub(super) fn text(value: Option<&Value>) -> String {
     value.and_then(Value::as_str).unwrap_or_default().to_owned()
 }
 
-// A run started again is a later run of the same name, so the latest one counts; ids grow with
-// creation, while a queued run has no start time yet.
+// A rerun is a later run of the same name, so only the latest run counts.
+// Runs are ordered by id, since ids grow with creation while a queued run has no start time yet.
 fn check_run_status_of(suites: Option<&Value>) -> Option<BotStatus> {
     let runs = nodes_of(suites)
         .iter()
@@ -142,6 +144,7 @@ fn check_run_status_of(suites: Option<&Value>) -> Option<BotStatus> {
             Some(latest) if id_of(next) <= id_of(latest) => Some(latest),
             _ => Some(next),
         })?;
+
     let completed = run
         .get("status")
         .is_some_and(|status| status == "COMPLETED");
@@ -236,6 +239,7 @@ fn failed_required(contexts: &[Object], bots: &[ReviewBot]) -> Vec<FailedCheck> 
             _ => None,
         })
         .collect::<HashSet<_>>();
+
     contexts
         .iter()
         .filter(|context| context.get("isRequired") == Some(&Value::Bool(true)))

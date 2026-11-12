@@ -21,8 +21,7 @@ pub(crate) struct BaseDirectories {
     state_home: PathBuf,
 }
 
-// Each feature keeps the layout its records already have, so old and new files compare line by
-// line.
+// Each feature keeps the layout its records already have, so old and new files compare line by line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JsonLayout {
     // `JSON.stringify(value, null, 1)`, as the watch records are written.
@@ -80,8 +79,7 @@ impl BaseDirectories {
         config_home: Option<OsString>,
         state_home: Option<OsString>,
     ) -> Option<Self> {
-        // A relative directory is ignored, as the XDG spec has it, so the working directory never
-        // picks the config or the state.
+        // The XDG spec ignores a relative directory, so the working directory never picks the config or the state.
         let absolute =
             |value: Option<OsString>| value.map(PathBuf::from).filter(|path| path.is_absolute());
         let under_home = |relative: &str| home.map(|home| home.join(relative));
@@ -92,8 +90,7 @@ impl BaseDirectories {
     }
 }
 
-// A missing file is `None`; a file that exists but does not hold a `T` is an error, never an empty
-// record.
+// A missing file is `None`; a file that exists but does not hold a `T` is an error, never an empty record.
 pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, RecordError> {
     let Some(content) = read_regular_file(path)
         .map_err(|error| RecordError::new(path, RecordErrorKind::Read(error)))?
@@ -105,7 +102,6 @@ pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, R
         .map_err(|error| RecordError::new(path, RecordErrorKind::Invalid(error)))
 }
 
-// For a file the program cannot go on without, so a missing one is an error too.
 pub(crate) fn load_required_json<T: DeserializeOwned>(path: &Path) -> Result<T, RecordError> {
     load_json(path)?.ok_or_else(|| {
         RecordError::new(
@@ -129,6 +125,7 @@ pub(crate) fn list_directory(path: &Path) -> Result<Option<Vec<OsString>>, Recor
         }
         Err(error) => return Err(RecordError::new(path, RecordErrorKind::Read(error))),
     };
+
     let mut names = entries
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<io::Result<Vec<_>>>()
@@ -196,8 +193,8 @@ fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
     let directory = parent(path)?;
     prepare_directory(directory)?;
     let (temporary, mut file) = create_temporary(path)?;
-    // The rename happens only after the content is on disk, so readers see either the previous
-    // or the new content.
+
+    // Renaming only after the content is on disk lets readers see either the previous or the new content.
     let replaced = file
         .write_all(content)
         .and_then(|()| file.sync_all())
@@ -209,6 +206,7 @@ fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
+
     // The rename itself survives a crash only once the directory is synced.
     sync_directory(directory)
 }
@@ -219,8 +217,8 @@ fn create_temporary(path: &Path) -> io::Result<(PathBuf, File)> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::other("the record path has no file name"))?;
-    // The process ID keeps two processes apart and the sequence two writes in one process; a
-    // file left by an earlier process with the same ID only moves on to the next number.
+    // The process ID keeps two processes apart, and the sequence two writes in one process.
+    // A file left by an earlier process with the same ID only moves the loop on to the next number.
     loop {
         let mut temporary = OsString::from(".");
         temporary.push(name);
@@ -257,8 +255,8 @@ fn acquire_lock(path: &Path) -> io::Result<Option<ProcessLock>> {
         Err(TryLockError::WouldBlock) => return Ok(None),
         Err(TryLockError::Error(error)) => return Err(error),
     }
-    // The file is emptied only once the lock is held, so a waiting process never clears the
-    // holder's PID.
+
+    // The file is emptied only once the lock is held, so a waiting process never clears the holder's PID.
     file.set_len(0)?;
     writeln!(file, "{}", process::id())?;
     Ok(Some(ProcessLock { _file: file }))

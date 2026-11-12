@@ -7,16 +7,14 @@ use std::{
 
 use crate::infra::stop::StopRequest;
 
-// Tells a newer program installed over the running one, so the agent can end and let launchd
-// start the new one.
+// Tells when a newer program is installed over the running one, so the agent can end and let launchd start it.
 #[derive(Debug)]
 pub(crate) struct ProgramWatch {
     path: PathBuf,
     started: FileIdentity,
 }
 
-// The device and inode tell a file swapped in at the path, as an install does, from one changed
-// in place.
+// The device and inode tell a file swapped in at the path from one changed in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     device: u64,
@@ -28,16 +26,14 @@ struct FileIdentity {
 static STOP: OnceLock<StopRequest> = OnceLock::new();
 
 impl ProgramWatch {
-    // `None` when the program cannot be inspected, so the caller can say so once rather than run
-    // stale code without a word.
+    // `None` when the program cannot be inspected, so the caller warns once rather than run stale code silently.
     #[must_use]
     pub(crate) fn new(path: PathBuf) -> Option<Self> {
         let started = identity(&path)?;
         Some(Self { path, started })
     }
 
-    // A program missing for now is being reinstalled, and there is nothing to start until it is
-    // back.
+    // A missing program is being reinstalled, so there is nothing to start until it is back.
     #[must_use]
     pub(crate) fn is_replaced(&self) -> bool {
         identity(&self.path).is_some_and(|now| now != self.started)
@@ -54,8 +50,8 @@ fn identity(path: &Path) -> Option<FileIdentity> {
     })
 }
 
-// launchd stops an agent with SIGTERM and a terminal with SIGINT. The handler only records the
-// request; every wait observes it and shuts down through the same path as a timeout.
+// launchd stops an agent with SIGTERM and a terminal with SIGINT.
+// The handler only records the request, and each wait sees it and shuts down as on a timeout.
 pub(crate) fn install(stop: StopRequest) -> io::Result<()> {
     STOP.set(stop)
         .map_err(|_| io::Error::other("termination handling is already installed"))?;
@@ -67,8 +63,7 @@ pub(crate) fn install(stop: StopRequest) -> io::Result<()> {
 
 fn install_recorder(signal: libc::c_int) -> io::Result<()> {
     extern "C" fn record(_signal: libc::c_int) {
-        // `OnceLock::get` is an atomic load and the request an atomic store, so neither can
-        // deadlock or allocate inside the handler.
+        // `OnceLock::get` is an atomic load and the request an atomic store, so the handler never locks or allocates.
         if let Some(stop) = STOP.get() {
             stop.request();
         }
@@ -80,10 +75,11 @@ fn install_recorder(signal: libc::c_int) -> io::Result<()> {
     if unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut previous) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    // A signal ignored by the parent (for example under nohup) stays ignored.
+    // A signal the parent ignored, as nohup does, stays ignored.
     if previous.sa_sigaction == libc::SIG_IGN {
         return Ok(());
     }
+
     // SAFETY: a zeroed sigaction has no flags; the mask is cleared below before use.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = record as *const () as libc::sighandler_t;

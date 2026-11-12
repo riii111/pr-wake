@@ -34,8 +34,7 @@ pub(super) struct DaemonDeps<'deps> {
     pub(super) replaced: Option<&'deps (dyn Fn() -> bool + Sync)>,
 }
 
-// Polling and notifying run on their own threads, so a notification waiting for the owner never
-// delays the next poll.
+// Polling and notifying run on separate threads, so a notification awaiting the owner never delays a poll.
 pub(super) struct Daemon<'deps> {
     deps: DaemonDeps<'deps>,
     // The one copy of the state; every change is saved before the lock is released.
@@ -87,6 +86,7 @@ impl<'deps> Daemon<'deps> {
         let saved = self.save(&state);
         drop(state);
         saved?;
+
         thread::scope(|scope| {
             scope.spawn(|| self.notify_loop(scope));
             self.poll_loop()
@@ -103,6 +103,7 @@ impl<'deps> Daemon<'deps> {
                 self.deps.stop.request();
                 return Err(REPLACED.to_owned());
             }
+
             let delay = match self.poll_once() {
                 Ok(()) => {
                     failures = 0;
@@ -136,6 +137,7 @@ impl<'deps> Daemon<'deps> {
             stop: self.deps.stop,
         };
         let config = &self.deps.tools.config;
+
         let login = match login {
             Some(login) => login,
             None => github
@@ -167,6 +169,7 @@ impl<'deps> Daemon<'deps> {
         let saved = self.save(&state);
         drop(state);
         saved?;
+
         if baseline {
             self.log(&format!(
                 "recorded {pending_count} pending requests as the baseline; only later requests are notified"
@@ -189,6 +192,7 @@ impl<'deps> Daemon<'deps> {
                 }
                 return;
             }
+
             let mut shown = self.lock_shown();
             let full = shown.notices.len() >= self.deps.tools.config.max_notifications;
             // One notification is closed per waiting request; a closing one already makes room.
@@ -201,6 +205,7 @@ impl<'deps> Daemon<'deps> {
                 self.close_oldest(&mut shown);
             }
             drop(shown);
+
             if !full && let Some(request) = self.claim() {
                 let close = StopRequest::default();
                 {
@@ -246,7 +251,8 @@ impl<'deps> Daemon<'deps> {
             tools.config.notification_timeout_seconds,
             close,
         );
-        // Stopping: the request stays notifying and is shown again after the restart.
+
+        // A stop leaves the request notifying, so it is shown again after the restart.
         if self.deps.stop.is_requested() {
             return None;
         }
@@ -295,6 +301,7 @@ impl<'deps> Daemon<'deps> {
             self.report_failure(request, &error);
             return;
         }
+
         self.log(&format!("{key}: chose {}", choice.id));
         let launched = {
             let _one_at_a_time = self
@@ -310,6 +317,7 @@ impl<'deps> Daemon<'deps> {
                 self.deps.stop,
             )
         };
+
         let head = launched.pr.map(|pr| pr.head_sha);
         let worktree = launched
             .worktree
@@ -533,7 +541,6 @@ mod tests {
         opened: Mutex<Vec<String>>,
     }
 
-    // How a test daemon waits and how its alerter answers.
     #[derive(Default)]
     struct Setup<'setup> {
         // Answered by the test itself, which may wait for the notification to close.
@@ -781,8 +788,7 @@ mod tests {
     fn oldest_notification_is_closed_for_a_new_request() {
         for (name, late, slow_close) in [
             ("new_request_while_three_are_shown", true, false),
-            // alerter takes a while to close, and wake-ups arrive meanwhile; they must not close
-            // another one.
+            // alerter takes a while to close, and wake-ups meanwhile must not close another one.
             ("four_queued_and_wake_ups_while_closing", false, true),
         ] {
             let fixture = Fixture::new();
@@ -829,8 +835,7 @@ mod tests {
                             }
                             released.store(true, Ordering::SeqCst);
                         }
-                        // The fourth is shown only after the closed one has exited, so any extra
-                        // close happened before this.
+                        // The fourth is shown only after the closed one exits, so any extra close happened before this.
                         fixture.wait_status("acme/app#4@40", Status::Declined);
                         closed.lock().expect("read the closes").clone()
                     })

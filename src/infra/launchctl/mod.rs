@@ -8,7 +8,6 @@ use super::{
     stop::StopRequest,
 };
 
-// One launchctl run on an agent of the logged-in user's GUI session.
 pub(crate) struct Launchctl {
     arguments: Vec<OsString>,
 }

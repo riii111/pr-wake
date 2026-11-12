@@ -48,7 +48,6 @@ const FIELDS: [(&str, Field); 10] = [
 ];
 
 impl Prompt {
-    // Spaces inside the braces are allowed, since prompts written for Go templates use both forms.
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
         let mut parts = Vec::new();
         let mut rest = text;
@@ -60,6 +59,7 @@ impl Prompt {
             let Some(close) = action.find("}}") else {
                 return Err(format!("{{{{ at {:?} has no closing }}}}", &rest[open..]));
             };
+            // Prompts written for Go templates put spaces inside the braces or not, so both are allowed.
             let name = action[..close].trim_matches(' ');
             let Some((_, field)) = FIELDS.iter().find(|(known, _)| *known == name) else {
                 return Err(format!(

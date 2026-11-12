@@ -20,8 +20,7 @@ pub(crate) struct ExternalCommand {
     timeout: Duration,
 }
 
-// A command that ran to its end is a success whatever its exit code, so the caller decides what
-// the code means.
+// A command that ran to its end succeeds whatever its exit code, so the caller decides what the code means.
 #[derive(Debug)]
 pub(crate) struct CommandOutput {
     pub(crate) code: i32,
@@ -44,8 +43,7 @@ pub(crate) enum CommandErrorKind {
         cause: Termination,
         status: ExitStatus,
     },
-    // A process that left the child's group still holds the output, so its readers were left
-    // running instead of blocking the caller.
+    // A process outside the group still holds the output, so its readers keep running rather than block the caller.
     OutputHeld {
         cause: Termination,
     },
@@ -59,7 +57,6 @@ pub(crate) enum Termination {
     StopRequest,
 }
 
-// One run of a tool that tells its success by exiting with 0, as the review's tools do.
 pub(crate) struct ToolCall<'call> {
     pub(crate) program: &'call Path,
     pub(crate) arguments: Vec<OsString>,
@@ -67,7 +64,7 @@ pub(crate) struct ToolCall<'call> {
     pub(crate) stop: &'call StopRequest,
 }
 
-// The tool's standard output, or why it did not end with 0, as the review records and logs it.
+// The tool's standard output, or why it did not exit with 0.
 pub(crate) type RunTool<'run> = dyn Fn(&ToolCall<'_>) -> Result<Vec<u8>, String> + Sync + 'run;
 
 // alerter removes its notification only on SIGTERM, so SIGKILL waits this long after it.
@@ -122,6 +119,7 @@ impl ExternalCommand {
         let streams = Streams::start(&mut child, self.input.clone());
         let ending = wait_for_end(&mut child, &streams, deadline, self.timeout, stop)
             .map_err(|error| self.error(CommandErrorKind::Io(error)))?;
+
         let kind = match ending {
             Ending::Finished(status) => {
                 let (stdout, stderr) = streams
@@ -158,8 +156,7 @@ impl ExternalCommand {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // A process the child starts inherits its pipes and would keep the output open after
-            // the child ends; its own group lets one signal reach them all.
+            // Processes the child starts can hold its pipes open, so its own group lets one signal reach them all.
             .process_group(0);
         command.spawn()
     }
@@ -191,6 +188,7 @@ pub(crate) fn run_tool(call: &ToolCall<'_>) -> Result<Vec<u8>, String> {
     if output.code == 0 {
         return Ok(output.stdout);
     }
+
     let name = call
         .program
         .file_name()
@@ -279,8 +277,6 @@ enum Ending {
     },
 }
 
-// Waits for the child and its streams, escalating from SIGTERM to SIGKILL at the deadline or on a
-// stop request.
 fn wait_for_end(
     child: &mut Child,
     streams: &Streams,
@@ -294,11 +290,11 @@ fn wait_for_end(
             "the child process ID does not fit a pid_t",
         ));
     };
+
     let mut termination: Option<(Termination, Instant)> = None;
     let mut killed = false;
     loop {
-        // The child is reaped only once its streams are closed or given up on, so its group ID
-        // stays reserved for every signal sent before that.
+        // Reaping releases the group ID, so the child is reaped only after its streams close or are given up on.
         if streams.are_closed()
             && let Some(status) = reap(child)?
         {
@@ -307,6 +303,7 @@ fn wait_for_end(
                 Some((cause, _)) => Ending::Terminated { cause, status },
             });
         }
+
         let now = Instant::now();
         match termination {
             None => {
@@ -342,8 +339,8 @@ fn reap(child: &mut Child) -> io::Result<Option<ExitStatus>> {
 }
 
 fn signal_group(group: libc::pid_t, signal: libc::c_int) {
-    // SAFETY: kill only sends a signal. The child leads the group and is not reaped yet, so the
-    // group ID cannot belong to anything else, and a process that has already exited ignores it.
+    // SAFETY: kill only sends a signal, and a process that has already exited ignores it.
+    // The child leads the group and is not reaped yet, so the group ID cannot belong to anything else.
     unsafe { libc::kill(-group, signal) };
 }
 
@@ -541,9 +538,8 @@ mod tests {
         assert!(error.started());
     }
 
-    // The child ignores SIGTERM and never reads an input larger than a pipe buffer, so the input
-    // writer stays blocked until SIGKILL closes the pipe, and a Terminated result means every
-    // stream thread was joined.
+    // The child ignores SIGTERM and leaves an input larger than a pipe buffer unread, so its writer blocks until SIGKILL.
+    // A Terminated result then means every stream thread was joined.
     #[rstest]
     #[case::timeout(Trigger::Timeout)]
     #[case::stop_request(Trigger::StopRequest)]

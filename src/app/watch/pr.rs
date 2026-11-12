@@ -25,7 +25,6 @@ pub(crate) struct GithubPr {
     pub(crate) url: String,
 }
 
-// The chat a PR is linked to; the running watch hands the PR over when it names another chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrLink {
     pub(crate) pr: PrRef,
@@ -42,7 +41,6 @@ pub(crate) enum ItemKind {
     IssueComment,
 }
 
-// What the full read of a PR gives the watch.
 #[derive(Debug, Clone)]
 pub(crate) struct PrDetail {
     pub(crate) summary: PrSummary,
@@ -69,8 +67,7 @@ pub(crate) struct PrComment {
     pub(crate) approved: bool,
 }
 
-// The watch reads GitHub only through this, and the review bots are passed on every read, since
-// the config is read again each cycle.
+// The config is read again each cycle, so the review bots are passed on every read.
 pub(crate) trait GitHub {
     // One summary per PR, in their order; `None` for a PR the account cannot see.
     fn summaries(

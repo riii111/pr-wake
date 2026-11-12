@@ -37,7 +37,6 @@ use crate::{
     },
 };
 
-// What the review reads from the process environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewEnv {
     pub(crate) home: PathBuf,
@@ -68,7 +67,6 @@ pub(crate) struct Smoke<'smoke> {
     pub(crate) config: &'smoke Path,
     pub(crate) pr: &'smoke str,
     pub(crate) requester: Option<&'smoke str>,
-    // Prints the link instead of opening it.
     pub(crate) no_open: bool,
 }
 
@@ -83,12 +81,12 @@ struct Launched {
 const STOP_CHECK: Duration = Duration::from_millis(200);
 const STATUS_ROWS: usize = 20;
 
-// Watches for review requests until a stop request, or a replaced program that launchd starts
-// again.
+// Runs until a stop request, or until the program is replaced so that launchd starts the new one.
 pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
     let stop = StopRequest::default();
     termination::install(stop.clone())
         .map_err(|error| format!("cannot handle termination signals: {error}"))?;
+
     let tools = load_tools(config, env, &run_tool)?;
     let _lock = match review_record::hold_lock(&env.paths) {
         Ok(Some(lock)) => lock,
@@ -103,6 +101,7 @@ pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
     let state = review_record::load_state(&env.paths)
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
+
     let program = env::current_exe().ok().and_then(ProgramWatch::new);
     if program.is_none() {
         log_line("cannot inspect the program, so a reinstall is not noticed");
@@ -112,6 +111,7 @@ pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
         tools.config.poll_interval_seconds,
         tools.config.choices.len()
     ));
+
     let replaced = program
         .as_ref()
         .map(|program| move || program.is_replaced());
@@ -135,7 +135,7 @@ pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
     ended
 }
 
-// The login, the last poll and the latest requests, read from the state alone.
+// Read from the state alone.
 pub(crate) fn status(paths: &ReviewPaths, zone: &TimeZone) -> Result<String, String> {
     let state = review_record::load_state(paths).map_err(|error| error.to_string())?;
     Ok(state.map_or_else(
@@ -182,6 +182,7 @@ pub(crate) fn check(
             choice.skill_path.display()
         ));
     }
+
     let github = github(&tools, stop);
     out(&format!("github login: {}", github.current_login()?));
     for query in request_queries(&tools.config.owners(), &tools.config.teams) {
@@ -212,6 +213,7 @@ pub(crate) fn smoke(
         "pr: {}#{} {} head={}",
         pr.repo, pr.number, pr.title, pr.head_sha
     ));
+
     let request = Found {
         key: format!("smoke:{}#{}", pr.repo, pr.number),
         repo: pr.repo.clone(),
@@ -237,6 +239,7 @@ pub(crate) fn smoke(
         .get(index)
         .ok_or_else(|| format!("no choice {index} in the config"))?;
     out(&format!("choice: {} ({})", choice.id, choice.skill));
+
     if smoke.no_open {
         let worktree = prepare(&tools, &pr, stop)?;
         let prompt = choice.render(&pr, smoke.requester, &worktree);
@@ -272,7 +275,6 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
     })
 }
 
-// `pr-wake review status`: the agent, then what its state holds.
 pub(crate) fn show_status(env: &ReviewEnv) -> Result<(), String> {
     agent::print_loaded(agent::REVIEW);
     output::write_stdout(&status(&env.paths, &TimeZone::system())?);
@@ -409,6 +411,7 @@ fn status_text(state: &ReviewState, zone: &TimeZone) -> String {
     if let Some(error) = &state.last_error {
         lines.push(format!("last error: {error}"));
     }
+
     let mut requests = state
         .requests
         .values()
@@ -440,6 +443,7 @@ fn status_text(state: &ReviewState, zone: &TimeZone) -> String {
     if requests.len() > STATUS_ROWS {
         lines.push(format!("... {} more", requests.len() - STATUS_ROWS));
     }
+
     let mut text = lines.join("\n");
     text.push('\n');
     text
@@ -501,7 +505,6 @@ fn log_line(message: &str) {
     output::write_stderr(&format!("{at} {message}\n"));
 }
 
-// Tells whether the whole wait passed; a stop request cuts it short.
 fn pause(stop: &StopRequest, wait: Duration) -> bool {
     let until = Instant::now() + wait;
     while !stop.is_requested() {

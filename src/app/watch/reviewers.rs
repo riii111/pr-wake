@@ -1,7 +1,6 @@
 use regex::Regex;
 
-// A review bot is described by data alone, so moving to another AI reviewer changes the config,
-// not the watch.
+// Moving to another AI reviewer changes the config rather than the watch, so a bot is described by data alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewBot {
     // The key the watch records the bot's reviews under; keep it when other fields change.
@@ -13,8 +12,7 @@ pub(crate) struct ReviewBot {
     pub(crate) status: Option<BotProgress>,
     // A review body without this text carries no findings of its own; `None` takes every body.
     pub(crate) actionable_review: Option<String>,
-    // A PR comment with this text says the bot found nothing, which the watch checks against the
-    // findings it saw.
+    // A PR comment with this text says the bot found nothing, which the watch checks against the findings it saw.
     pub(crate) no_actionable: Option<String>,
     pub(crate) severity: Option<Severity>,
 }
@@ -33,8 +31,8 @@ pub(crate) struct Severity(Regex);
 
 pub(crate) const PRESET_NAMES: [&str; 2] = ["coderabbit", "claude"];
 
-// JavaScript's `\b` is an ASCII word boundary and Rust's a Unicode one, so the preset asks for the
-// ASCII one and still reads `**éMajor**` as the TypeScript watch did.
+// JavaScript's `\b` is an ASCII word boundary and Rust's a Unicode one, so the preset asks for the ASCII one.
+// It still reads `**éMajor**` as the TypeScript watch did.
 const CODERABBIT_SEVERITY: &str = r"\*\*[^*\n]*?(?-u:\b)(Critical|Major|Minor|Trivial|Info)\*\*";
 
 const CLAUDE_SEVERITY: &str = r"^\[(critical|warning|suggestion)\]";
@@ -62,8 +60,7 @@ pub(crate) fn coderabbit() -> ReviewBot {
     }
 }
 
-// Claude posts its review with no body and a free-form summary comment, so only its inline
-// findings are read.
+// Claude posts its review with no body and a free-form summary comment, so only its inline findings are read.
 fn claude() -> ReviewBot {
     ReviewBot {
         id: "claude".to_owned(),
@@ -87,8 +84,7 @@ pub(crate) fn severity_of<'body>(bot: &ReviewBot, body: &'body str) -> Option<&'
 }
 
 impl Severity {
-    // The regex crate refuses look-around and backreferences, so a pattern it cannot run in linear
-    // time never reaches the watch.
+    // The regex crate refuses look-around and backreferences, so every pattern runs in linear time.
     pub(crate) fn new(pattern: &str) -> Result<Self, regex::Error> {
         Regex::new(pattern).map(Self)
     }

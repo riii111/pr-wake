@@ -16,12 +16,11 @@ pub(crate) struct SocketFailure {
     pub(crate) message: String,
 }
 
-// Each read and write waits at most this long, well under the one second within which every
-// wait must notice a stop request.
+// Bounds each read and write, well under the one second within which every wait must notice a stop request.
 const STOP_CHECK: Duration = Duration::from_millis(200);
 
-// Sends one line and reads the answer until the bridge closes the connection; the timeout covers
-// the whole call, from connecting to the last byte, however the answer trickles in.
+// The answer is read until the bridge closes the connection.
+// The timeout covers the whole call, from connecting to the last byte, however the answer trickles in.
 pub(crate) fn request_line(
     path: &Path,
     line: &str,
@@ -36,8 +35,7 @@ pub(crate) fn request_line(
     if Instant::now() >= deadline {
         return Err(timed_out());
     }
-    // An empty line is only a probe: the bridge answers nothing to it, but the connection proves
-    // it is alive.
+    // An empty line is a probe the bridge never answers, so the connection alone proves the bridge is alive.
     if line.is_empty() {
         return Ok(String::new());
     }
@@ -91,8 +89,8 @@ fn next_wait(deadline: Instant, stop: &StopRequest) -> Result<Duration, SocketFa
     Ok(left.min(STOP_CHECK))
 }
 
-// macOS refuses socket options with EINVAL once the peer has shut the connection, and the read or
-// write that follows then returns at once, so the wait needs no bound of its own.
+// macOS refuses socket options with EINVAL once the peer has shut the connection.
+// The read or write that follows then returns at once, so ignoring the error leaves no wait unbounded.
 fn settle(set: io::Result<()>) -> Result<(), SocketFailure> {
     match set {
         Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
@@ -183,8 +181,7 @@ mod tests {
         let (client, mut server) = UnixStream::pair().expect("create a socket pair");
         let timeout = Duration::from_millis(600);
         let bridge = thread::spawn(move || {
-            // Answers one byte at a time, faster than any single read would time out, for longer
-            // than the call may take.
+            // Trickles a byte at a time, faster than one read times out, for longer than the call may take.
             for _ in 0..40 {
                 if server.write_all(b" ").is_err() {
                     break;

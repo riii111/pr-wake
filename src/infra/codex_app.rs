@@ -5,8 +5,7 @@ use super::{
     stop::StopRequest,
 };
 
-// The documented route that opens a new local chat with the prompt in its composer; the owner
-// sends it.
+// The documented route that opens a new local chat with the prompt in its composer, for the owner to send.
 const NEW_CHAT: &str = "codex://new";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -34,8 +33,7 @@ pub(crate) fn open_link(
     .map(drop)
 }
 
-// Every byte but the unreserved ones is escaped, and a space as %20 rather than "+", which a
-// decoder may keep as a literal plus.
+// A decoder may keep "+" as a literal plus, so a space is escaped as %20.
 fn query_escape(text: &str) -> String {
     text.bytes()
         .fold(String::with_capacity(text.len()), |mut escaped, byte| {

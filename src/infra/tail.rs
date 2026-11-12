@@ -6,7 +6,6 @@ use std::{
 
 use super::command;
 
-// The end of an agent's log, and with `follow` what is written to it until interrupted.
 pub(crate) struct Tail {
     arguments: Vec<OsString>,
 }
@@ -30,8 +29,7 @@ impl Tail {
         command::command_line(PROGRAM, &self.arguments)
     }
 
-    // The output goes straight to the terminal, and the terminal's Ctrl-C ends a follow, so no
-    // timeout or own process group is given.
+    // The terminal gets the output and its Ctrl-C ends a follow, so no timeout or own process group is given.
     pub(crate) fn run(&self) -> Result<(), String> {
         let status = Command::new(PROGRAM)
             .args(&self.arguments)

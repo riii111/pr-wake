@@ -12,7 +12,6 @@ use crate::infra::stop::StopRequest;
 
 // harnexus's public call socket: one JSON line out, one JSON line back.
 pub(crate) struct Bridge {
-    // Why the socket cannot be named, when it cannot.
     socket: Result<PathBuf, String>,
     timeouts: CallTimeouts,
     stop: StopRequest,
@@ -24,11 +23,9 @@ pub(crate) struct CallTimeouts {
     pub(crate) call: Duration,
 }
 
-// What the bridge offers, or why it cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Capabilities {
     Offered(Vec<String>),
-    // It could not be asked.
     NotSent(String),
     // It answered without protocol 1.
     Unsupported(String),
@@ -36,7 +33,6 @@ pub(crate) enum Capabilities {
 
 pub(crate) const PROTOCOL_VERSION: u64 = 1;
 
-// The tools the watch reads workers and sends to them with.
 pub(crate) const WATCH_OPERATIONS: [&str; 2] = ["read_thread", "send_message_to_thread"];
 
 #[derive(Serialize)]
@@ -100,8 +96,8 @@ impl Bridge {
                 ));
             }
         };
-        // An older bridge answers the query as an invalid call; it is never sent the versionless
-        // form instead.
+
+        // An older bridge answers the query as an invalid call and is never sent the versionless form.
         let offered = serde_json::from_str::<Value>(&answer).ok();
         let operations = offered
             .as_ref()
@@ -127,8 +123,8 @@ impl Bridge {
         )
     }
 
-    // A call goes out only after the bridge said it offers protocol 1 and the tool, so an older
-    // bridge never receives it. The answer always carries an `outcome`.
+    // A call goes out only once the bridge offers protocol 1 and the tool, so an older bridge never gets one.
+    // The answer always carries an `outcome`.
     pub(crate) fn call(
         &self,
         caller: &str,
@@ -146,6 +142,7 @@ impl Bridge {
                 &format!("the harnexus bridge does not offer {tool}"),
             );
         }
+
         let path = match &self.socket {
             Ok(path) => path,
             Err(error) => return outcome("not_sent", error),
@@ -174,8 +171,7 @@ impl Bridge {
         }
     }
 
-    // The watch starts only once the bridge answers protocol 1 with every tool it uses; it never
-    // falls back to the versionless protocol.
+    // The watch never falls back to the versionless protocol, so protocol 1 must offer every tool it uses.
     pub(crate) fn check_v1(&self) -> Result<(), String> {
         let operations = match self.capabilities() {
             Capabilities::Offered(operations) => operations,
@@ -199,8 +195,7 @@ impl Bridge {
     }
 }
 
-// Where harnexus serves the call socket, read by harnexus's documented settings so both sides
-// agree.
+// The path follows harnexus's documented settings, so both sides agree on where the socket is.
 pub(crate) fn call_socket_path(
     call_socket: Option<&OsStr>,
     state_path: Option<&OsStr>,
@@ -218,6 +213,7 @@ pub(crate) fn call_socket_path(
             Err("HARNEXUS_CALL_SOCKET must be on, off or an absolute path".to_owned())
         };
     }
+
     let threads = match state_path.filter(|value| !value.is_empty()).map(Path::new) {
         Some(state) if !state.is_absolute() => {
             return Err("HARNEXUS_STATE_PATH must be an absolute path".to_owned());
@@ -278,8 +274,7 @@ mod tests {
 
     use super::*;
 
-    // A bridge on a socket that answers each request line as the test says, keeping the lines it
-    // was sent. Listening on a Unix socket needs a sandbox that allows it.
+    // Listening on a Unix socket needs a sandbox that allows it.
     struct FakeBridge {
         path: PathBuf,
         lines: Arc<Mutex<Vec<Value>>>,
