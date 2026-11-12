@@ -35,7 +35,6 @@ pub(super) const OPEN_QUERY: &str = "query($search: String!) {
   search(query: $search, type: ISSUE, first: 50) { nodes { ... on PullRequest { number } } }
 }";
 
-// GitHub charges one point per query however many PRs it reads, so an account's PRs share one aliased query.
 pub(super) fn summary_query(prs: &[PrRef], bots: &[ReviewBot]) -> (String, Map<String, Value>) {
     let fields = summary_fields(bots);
     let mut variables = Map::new();
