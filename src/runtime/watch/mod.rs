@@ -404,9 +404,9 @@ fn link(
             "{value} is not watched: {NOT_LINKABLE}"
         )));
     };
-    if !take_over
-        && let Some(current) = watch_record::load_link(root, &named.pr).map_err(Failure::State)?
-    {
+    let current = watch_record::load_link(root, &named.pr).map_err(Failure::State)?;
+    // Only the link is read on a take-over, so an unreadable state never stops a chat from taking its PR over.
+    if !take_over && let Some(current) = &current {
         let state = watch_record::load_watch_state(root, &named.pr).map_err(Failure::State)?;
         if state.status.holds_chat() && current.worker != worker {
             return Err(Failure::Refused(format!(
@@ -415,8 +415,6 @@ fn link(
             )));
         }
     }
-    // Only the link is read, so an unreadable state never stops a chat from taking its PR over.
-    let current = watch_record::load_link(root, &named.pr).map_err(Failure::State)?;
     // Linking the same PR again keeps its start, so comments made since are still reported.
     let linked_at = match current {
         Some(current) if current.worker == worker => current.linked_at,
