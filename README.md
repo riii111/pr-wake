@@ -9,18 +9,13 @@ GitHubのPRの変化を知らせるmacOS用ツール。
 
 ## インストール
 
-Rust（rustup。版は`rust-toolchain.toml`で決まる）と、GitHubにログイン済みの`gh`を用意する。
+Rustと`gh`を用意し、`gh`でGitHubにログインする。
 
 ```bash
 scripts/install.sh
 ```
 
 実行ファイルは`~/.local/bin`に入る。
-`PREFIX=<dir>`を指定すると`<dir>/bin`に入る。
-常駐の登録は、使いたい機能の導入手順で行う。
-
-実行ファイルを入れ替えると、常駐は新しい版で起動し直す。
-`install`は実行したシェルの`XDG_CONFIG_HOME`・`XDG_STATE_HOME`・`HARNEXUS_CALL_SOCKET`・`HARNEXUS_STATE_PATH`・`HARNEXUS_T3_BIN`・`T3CODE_HOME`を常駐の設定へ書くため、これらを変えたら`install`をもう一度実行する。
 
 ## watch
 
@@ -58,18 +53,10 @@ sequenceDiagram
 }
 ```
 
-`reviewBots`に独自のbotを書く場合、`severity`の正規表現はRustの`regex`の書式で読む。
-先読み・後読み・後方参照は使えず、`\b`はUnicodeの単語境界になる（ASCIIの単語境界は`(?-u:\b)`）。
-
 ワーカーのチャットで`pr-wake watch link <PRのURL>`を実行すると、そのPRの監視が始まる。
 T3 Codeのスレッドへは`t3` CLIで送るため、送信元の登録は要らない。
 
-- `pr-wake watch status`: 監視状況を表示する
-- `pr-wake watch dry-run`: 送る内容を確認する
-- `pr-wake watch release <PRのURL>`: 停止した監視を再開する
-- `pr-wake watch link <PRのURL> --take-over`: 別のチャットから監視を引き継ぐ
-
-監視の記録は`$XDG_STATE_HOME/harnexus-crew/watch/`（既定は`~/.local/state/harnexus-crew/watch/`）に置く。
+監視状況は`pr-wake watch status`で確認できる。
 
 ## review
 
@@ -95,8 +82,9 @@ sequenceDiagram
 1. `brew install vjeantet/tap/alerter`でalerterを入れる
 2. 空のフォルダ`~/review-home`を作り、Codex Appのプロジェクトとして追加する
 3. `config.example.json`を`~/.config/pr-wake/review.json`にコピーし、リポジトリとSkillの選択肢を書く
-   `prompt`には`{{.Requester}}`・`{{.Skill}}`・`{{.SkillPath}}`・`{{.Worktree}}`・`{{.PR.Repo}}`・`{{.PR.Number}}`・`{{.PR.Title}}`・`{{.PR.URL}}`・`{{.PR.HeadSHA}}`・`{{.PR.BaseRef}}`の置き換えだけを書ける
 4. `pr-wake review install`で常駐を始め、初回の通知でmacOSの通知を許可する
 
 `pr-wake review smoke --pr owner/repo#123`で通知からスレッドを開くまでを試せる。
 レビュー用のworktreeは自動で消えないため、不要になったら`git worktree remove`で削除する。
+
+コマンドの一覧は`pr-wake watch --help`と`pr-wake review --help`で確認できる。
