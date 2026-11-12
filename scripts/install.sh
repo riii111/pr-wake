@@ -8,7 +8,8 @@ bin="${PREFIX:-$HOME/.local}/bin"
 build="$(mktemp -d)"
 trap 'rm -rf "$build"' EXIT
 
-(cd "$root/engine" && bun ci && bun run build)
+# A CARGO_TARGET_DIR set for other work would move the engine away from the path placed below, so the target is fixed.
+(cd "$root" && cargo build --locked --release --target-dir "$root/target")
 (cd "$root" && go build -o "$build/pr-wake" ./cmd/pr-wake)
 
 mkdir -p "$bin"
@@ -17,6 +18,6 @@ place() {
   install -m 0755 "$1" "$bin/.$2.tmp"
   mv -f "$bin/.$2.tmp" "$bin/$2"
 }
-place "$root/engine/dist/pr-wake-engine" pr-wake-engine
+place "$root/target/release/pr-wake-engine" pr-wake-engine
 place "$build/pr-wake" pr-wake
 echo "installed pr-wake and pr-wake-engine into $bin"

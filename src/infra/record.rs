@@ -13,6 +13,7 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::ser::PrettyFormatter;
+use serde_path_to_error::Track;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BaseDirectories {
@@ -45,7 +46,8 @@ pub(crate) struct RecordError {
 #[derive(Debug)]
 pub(crate) enum RecordErrorKind {
     Read(io::Error),
-    Invalid(serde_json::Error),
+    // The error names the damaged field, so whoever reads it knows what to repair.
+    Invalid(serde_path_to_error::Error<serde_json::Error>),
     Write(io::Error),
     Lock(io::Error),
 }
@@ -98,9 +100,41 @@ pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, R
     else {
         return Ok(None);
     };
-    serde_json::from_slice(&content)
+    decode(&content)
         .map(Some)
         .map_err(|error| RecordError::new(path, RecordErrorKind::Invalid(error)))
+}
+
+// For a file the program cannot go on without, so a missing one is an error too.
+pub(crate) fn load_required_json<T: DeserializeOwned>(path: &Path) -> Result<T, RecordError> {
+    load_json(path)?.ok_or_else(|| {
+        RecordError::new(
+            path,
+            RecordErrorKind::Read(io::Error::from(io::ErrorKind::NotFound)),
+        )
+    })
+}
+
+// The names in a directory in sorted order, or `None` when it does not exist yet.
+pub(crate) fn list_directory(path: &Path) -> Result<Option<Vec<OsString>>, RecordError> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(RecordError::new(path, RecordErrorKind::Read(error))),
+    };
+    let mut names = entries
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(|error| RecordError::new(path, RecordErrorKind::Read(error)))?;
+    names.sort();
+    Ok(Some(names))
 }
 
 pub(crate) fn save_json(
@@ -130,6 +164,17 @@ fn read_regular_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
         return Err(io::Error::other("not a regular file"));
     }
     fs::read(path).map(Some)
+}
+
+fn decode<T: DeserializeOwned>(
+    content: &[u8],
+) -> Result<T, serde_path_to_error::Error<serde_json::Error>> {
+    let mut deserializer = serde_json::Deserializer::from_slice(content);
+    let value = serde_path_to_error::deserialize(&mut deserializer)?;
+    deserializer
+        .end()
+        .map_err(|error| serde_path_to_error::Error::new(Track::new().path(), error))?;
+    Ok(value)
 }
 
 fn encode(value: &impl Serialize, layout: JsonLayout) -> serde_json::Result<Vec<u8>> {
@@ -422,6 +467,39 @@ mod tests {
     }
 
     #[test]
+    fn missing_required_record_is_a_read_error() {
+        let directory = tempfile::tempdir().expect("create a directory");
+        let path = directory.path().join("pr-watch.json");
+
+        let loaded = load_required_json::<Record>(&path);
+
+        let error = loaded.expect_err("the record is missing");
+        assert!(
+            matches!(&error.kind, RecordErrorKind::Read(read) if read.kind() == io::ErrorKind::NotFound),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("pr-watch.json"), "{error}");
+    }
+
+    #[test]
+    fn directory_is_listed_in_order_and_a_missing_one_as_none() {
+        let root = tempfile::tempdir().expect("create a directory");
+        for name in ["b", "a", "c"] {
+            fs::create_dir(root.path().join(name)).expect("create an entry");
+        }
+        let file = root.path().join("a").join("link.json");
+        fs::write(&file, "{}").expect("write a file");
+
+        let listed = list_directory(root.path()).expect("list the directory");
+        let missing = list_directory(&root.path().join("missing")).expect("list a missing one");
+        let not_directory = list_directory(&file).expect("list a file");
+
+        assert_eq!(listed, Some(vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(missing, None);
+        assert_eq!(not_directory, None);
+    }
+
+    #[test]
     fn record_without_the_expected_shape_is_invalid() {
         for (name, content) in [
             ("not_json", "{"),
@@ -429,6 +507,10 @@ mod tests {
             (
                 "wrong_field_type",
                 r#"{"status":1,"seen":[],"pending":[],"summary":null}"#,
+            ),
+            (
+                "trailing_content",
+                r#"{"status":"watching","seen":[],"pending":[],"summary":null} {}"#,
             ),
         ] {
             let directory = tempfile::tempdir().expect("create a directory");
@@ -448,6 +530,22 @@ mod tests {
                 "case: {name}: {loaded:?}"
             );
         }
+    }
+
+    #[test]
+    fn invalid_record_error_names_the_damaged_field() {
+        let directory = tempfile::tempdir().expect("create a directory");
+        let path = directory.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{"status":"watching","seen":[],"pending":[{"type":1}],"summary":null}"#,
+        )
+        .expect("write the record");
+
+        let loaded = load_json::<Record>(&path);
+
+        let error = loaded.expect_err("the record is refused").to_string();
+        assert!(error.contains("pending[0].type"), "{error}");
     }
 
     #[test]
