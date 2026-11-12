@@ -182,9 +182,16 @@ impl Display for CommandError {
                     "{program} was not run because a stop was requested"
                 )
             }
-            CommandErrorKind::Terminated { cause, .. } => {
-                write!(formatter, "{program} was stopped {cause}")
-            }
+            CommandErrorKind::Terminated { cause, status } => match status.signal() {
+                Some(signal) => write!(
+                    formatter,
+                    "{program} was stopped {cause} and ended by signal {signal}"
+                ),
+                None => write!(
+                    formatter,
+                    "{program} was stopped {cause} and ended with {status}"
+                ),
+            },
             CommandErrorKind::OutputHeld { cause } => write!(
                 formatter,
                 "{program} was stopped {cause}, but a process it started still holds its output"

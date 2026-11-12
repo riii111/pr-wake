@@ -1,12 +1,120 @@
 use std::{
+    collections::HashSet,
     fmt::Write as _,
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::record::{self, JsonLayout, RecordError};
-use crate::app::watch::{pr::PrRef, state::WatchState};
+use super::record::{self, BaseDirectories, JsonLayout, ProcessLock, RecordError};
+use crate::app::watch::{
+    config::WatchConfig,
+    pr::{PrLink, PrRef},
+    state::WatchState,
+};
+
+// Where the watch keeps its config and its records; the record directory is shared with
+// harnexus-crew, which reads none of the PR states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WatchPaths {
+    pub(crate) config: PathBuf,
+    pub(crate) state: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredLink {
+    repo: String,
+    number: u64,
+    url: String,
+    worker: String,
+    linked_at: String,
+}
+
+#[derive(Serialize)]
+struct StoredSender<'record> {
+    thread: &'record str,
+    at: &'record str,
+}
+
+const LINK: &str = "link.json";
+const STATE: &str = "state.json";
+const SENDER: &str = "sender.json";
+const LOCK: &str = "watch.lock";
+
+impl WatchPaths {
+    #[must_use]
+    pub(crate) fn of(directories: &BaseDirectories) -> Self {
+        Self {
+            config: directories
+                .config_home()
+                .join("harnexus")
+                .join("pr-watch.json"),
+            state: directories.state_home().join("harnexus-crew").join("watch"),
+        }
+    }
+}
+
+// The config is read again each cycle, so an edit takes effect without a restart.
+pub(crate) fn load_config(path: &Path) -> Result<WatchConfig, RecordError> {
+    record::load_required_json(path)
+}
+
+// The keys in `skip` are not read at all, which spares the watch every PR it has finished with.
+pub(crate) fn list_links(root: &Path, skip: &HashSet<String>) -> Result<Vec<PrLink>, RecordError> {
+    let names = record::list_directory(root)?.unwrap_or_default();
+    Ok(names
+        .iter()
+        .filter_map(|name| name.to_str())
+        .filter(|key| !skip.contains(*key) && root.join(key).is_dir())
+        // An unreadable link is skipped, so one broken record cannot stop the watch of every
+        // other PR.
+        .filter_map(|key| read_link(&root.join(key).join(LINK)).ok().flatten())
+        .collect())
+}
+
+// `None` for a PR no chat has linked, or whose link does not hold one.
+pub(crate) fn load_link(root: &Path, pr: &PrRef) -> Result<Option<PrLink>, RecordError> {
+    read_link(&pr_directory(root, pr).join(LINK))
+}
+
+// Only the link is written here; the running watch is the one writer of a PR's state, and it
+// notices the new chat itself.
+pub(crate) fn record_link(root: &Path, link: &PrLink) -> Result<(), RecordError> {
+    let stored = StoredLink {
+        repo: link.pr.repo.clone(),
+        number: link.pr.number,
+        url: link.url.clone(),
+        worker: link.worker.clone(),
+        linked_at: link.linked_at.clone(),
+    };
+    record::save_json(
+        &pr_directory(root, &link.pr).join(LINK),
+        &stored,
+        JsonLayout::OneSpace,
+    )
+}
+
+// The one chat the watch sends every Codex message from.
+pub(crate) fn record_sender(root: &Path, thread: &str, at: &str) -> Result<(), RecordError> {
+    record::save_json(
+        &root.join(SENDER),
+        &StoredSender { thread, at },
+        JsonLayout::OneSpace,
+    )
+}
+
+pub(crate) fn load_sender(root: &Path) -> Result<Option<String>, RecordError> {
+    let recorded = record::load_json::<Value>(&root.join(SENDER))?;
+    Ok(recorded.and_then(|recorded| recorded.get("thread")?.as_str().map(str::to_owned)))
+}
+
+// One watch at a time, so two never send the same event; `None` while another holds it.
+pub(crate) fn hold_watch_lock(root: &Path) -> Result<Option<ProcessLock>, RecordError> {
+    record::hold_lock(&root.join(LOCK))
+}
 
 // A PR the watch has not read yet starts from a fresh state; a damaged record is refused rather
 // than read as empty, so the tracking in it is never reset by the next save.
@@ -35,7 +143,28 @@ pub(crate) fn pr_key(pr: &PrRef) -> String {
 }
 
 fn state_path(root: &Path, pr: &PrRef) -> PathBuf {
-    root.join(pr_key(pr)).join("state.json")
+    pr_directory(root, pr).join(STATE)
+}
+
+fn pr_directory(root: &Path, pr: &PrRef) -> PathBuf {
+    root.join(pr_key(pr))
+}
+
+// A stored value of another shape is no link, but a file that is not JSON is an error.
+fn read_link(path: &Path) -> Result<Option<PrLink>, RecordError> {
+    let recorded = record::load_json::<Value>(path)?;
+    Ok(recorded
+        .filter(Value::is_object)
+        .and_then(|recorded| serde_json::from_value::<StoredLink>(recorded).ok())
+        .map(|stored| PrLink {
+            pr: PrRef {
+                repo: stored.repo,
+                number: stored.number,
+            },
+            url: stored.url,
+            worker: stored.worker,
+            linked_at: stored.linked_at,
+        }))
 }
 
 #[cfg(test)]
@@ -43,7 +172,7 @@ mod tests {
     use std::fs;
 
     use rstest::rstest;
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::*;
     use crate::{
@@ -202,6 +331,175 @@ mod tests {
 
         let error = loaded.expect_err("the record is refused").to_string();
         assert!(error.contains("pending"), "{error}");
+    }
+
+    #[test]
+    fn link_is_written_with_one_space_and_read_back() {
+        let root = tempfile::tempdir().expect("create a directory");
+        let link = link_of(7, "worker");
+
+        record_link(root.path(), &link).expect("record the link");
+
+        let written = fs::read_to_string(root.path().join("02bff83354bf169d").join(LINK))
+            .expect("read the link");
+        assert_eq!(
+            written,
+            "{\n \"repo\": \"org/pay\",\n \"number\": 7,\n \"url\": \"https://github.com/org/pay/pull/7\",\n \"worker\": \"worker\",\n \"linkedAt\": \"2026-10-20T00:00:00.000Z\"\n}"
+        );
+        assert_eq!(load_link(root.path(), &pay(7)).expect("load"), Some(link));
+        assert_eq!(load_link(root.path(), &pay(8)).expect("load"), None);
+    }
+
+    #[test]
+    fn listing_skips_unreadable_links_skipped_keys_and_stray_files() {
+        let root = tempfile::tempdir().expect("create a directory");
+        for number in [7, 8, 9] {
+            record_link(root.path(), &link_of(number, "worker")).expect("record the link");
+        }
+        let broken = root.path().join(pr_key(&pay(10)));
+        fs::create_dir(&broken).expect("create the PR directory");
+        fs::write(broken.join(LINK), "{").expect("write a broken link");
+        let other_shape = root.path().join(pr_key(&pay(11)));
+        fs::create_dir(&other_shape).expect("create the PR directory");
+        fs::write(other_shape.join(LINK), r#"["org/pay", 11]"#).expect("write a list");
+        fs::write(root.path().join(SENDER), r#"{"thread":"s"}"#).expect("write the sender");
+        let skip = HashSet::from([pr_key(&pay(8))]);
+
+        let links = list_links(root.path(), &skip).expect("list the links");
+
+        let numbers = links.iter().map(|link| link.pr.number).collect::<Vec<_>>();
+        assert_eq!(numbers, [7, 9]);
+    }
+
+    #[test]
+    fn missing_record_directory_lists_no_link() {
+        let root = tempfile::tempdir().expect("create a directory");
+
+        let links = list_links(&root.path().join("watch"), &HashSet::new());
+
+        assert_eq!(links.expect("list the links"), []);
+    }
+
+    #[test]
+    fn sender_is_read_only_from_a_record_naming_a_thread() {
+        for (name, content, expected) in [
+            (
+                "recorded",
+                r#"{"thread":"sender-chat","at":"x"}"#,
+                Some("sender-chat"),
+            ),
+            ("thread_not_text", r#"{"thread":1}"#, None),
+            ("list", r#"["sender-chat"]"#, None),
+        ] {
+            let root = tempfile::tempdir().expect("create a directory");
+            fs::write(root.path().join(SENDER), content).expect("write the sender");
+
+            let loaded = load_sender(root.path()).expect("load the sender");
+
+            assert_eq!(loaded.as_deref(), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn recorded_sender_is_read_back_and_a_damaged_one_refused() {
+        let root = tempfile::tempdir().expect("create a directory");
+        let missing = load_sender(root.path()).expect("load without a record");
+
+        record_sender(root.path(), "sender-chat", "2026-10-19T09:00:00.000Z")
+            .expect("record the sender");
+        let recorded = load_sender(root.path()).expect("load the sender");
+        fs::write(root.path().join(SENDER), "{").expect("damage the sender");
+        let damaged = load_sender(root.path());
+
+        assert_eq!(missing, None);
+        assert_eq!(recorded.as_deref(), Some("sender-chat"));
+        assert!(damaged.is_err(), "{damaged:?}");
+    }
+
+    // Records a later TypeScript watch or harnexus-crew wrote may carry fields this version does
+    // not know.
+    #[test]
+    fn records_harnexus_task_left_with_unknown_fields_still_load() {
+        let root = tempfile::tempdir().expect("create a directory");
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch");
+        for number in [7, 8, 9, 10] {
+            let key = pr_key(&pay(number));
+            fs::create_dir(root.path().join(&key)).expect("create the PR directory");
+            for file in [LINK, STATE] {
+                let mut recorded: Value = serde_json::from_str(
+                    &fs::read_to_string(fixtures.join(&key).join(file)).expect("read the fixture"),
+                )
+                .expect("parse the fixture");
+                recorded["addedLater"] = json!({ "by": "a later version" });
+                fs::write(root.path().join(&key).join(file), recorded.to_string())
+                    .expect("write the record");
+            }
+        }
+        fs::write(
+            root.path().join(SENDER),
+            r#"{"thread":"sender-chat","at":"2026-10-19T09:00:00.000Z","addedLater":1}"#,
+        )
+        .expect("write the sender");
+
+        let links = list_links(root.path(), &HashSet::new()).expect("list the links");
+        let states = links
+            .iter()
+            .map(|link| load_watch_state(root.path(), &link.pr).map(|state| state.status))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("load every state");
+        let sender = load_sender(root.path()).expect("load the sender");
+
+        let workers = links
+            .iter()
+            .map(|link| link.worker.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(workers, ["next-chat", "w8", "w9", "w10"]);
+        assert_eq!(
+            states,
+            [
+                WatchStatus::Watching,
+                WatchStatus::Watching,
+                WatchStatus::Watching,
+                WatchStatus::Halted,
+            ]
+        );
+        assert_eq!(sender.as_deref(), Some("sender-chat"));
+    }
+
+    #[test]
+    fn config_is_required_and_read_with_its_paths() {
+        let directories = BaseDirectories::from_environment().expect("HOME is set for tests");
+        let paths = WatchPaths::of(&directories);
+        let root = tempfile::tempdir().expect("create a directory");
+        let path = root.path().join("pr-watch.json");
+        let missing = load_config(&path);
+        fs::write(&path, r#"{"repositories":{"Org/Pay":{"account":"owner"}}}"#)
+            .expect("write the config");
+
+        let config = load_config(&path).expect("load the config");
+
+        assert!(paths.config.ends_with("harnexus/pr-watch.json"));
+        assert!(paths.state.ends_with("harnexus-crew/watch"));
+        assert!(
+            matches!(
+                missing,
+                Err(RecordError {
+                    kind: RecordErrorKind::Read(_),
+                    ..
+                })
+            ),
+            "{missing:?}"
+        );
+        assert_eq!(config.account_for("org/pay"), Some("owner"));
+    }
+
+    fn link_of(number: u64, worker: &str) -> PrLink {
+        PrLink {
+            pr: pay(number),
+            url: format!("https://github.com/org/pay/pull/{number}"),
+            worker: worker.to_owned(),
+            linked_at: "2026-10-20T00:00:00.000Z".to_owned(),
+        }
     }
 
     fn pay(number: u64) -> PrRef {

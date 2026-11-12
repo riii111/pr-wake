@@ -105,6 +105,38 @@ pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, R
         .map_err(|error| RecordError::new(path, RecordErrorKind::Invalid(error)))
 }
 
+// For a file the program cannot go on without, so a missing one is an error too.
+pub(crate) fn load_required_json<T: DeserializeOwned>(path: &Path) -> Result<T, RecordError> {
+    load_json(path)?.ok_or_else(|| {
+        RecordError::new(
+            path,
+            RecordErrorKind::Read(io::Error::from(io::ErrorKind::NotFound)),
+        )
+    })
+}
+
+// The names in a directory in sorted order, or `None` when it does not exist yet.
+pub(crate) fn list_directory(path: &Path) -> Result<Option<Vec<OsString>>, RecordError> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(RecordError::new(path, RecordErrorKind::Read(error))),
+    };
+    let mut names = entries
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(|error| RecordError::new(path, RecordErrorKind::Read(error)))?;
+    names.sort();
+    Ok(Some(names))
+}
+
 pub(crate) fn save_json(
     path: &Path,
     value: &impl Serialize,
@@ -432,6 +464,39 @@ mod tests {
         let loaded = load_json::<Record>(&directory.path().join("state.json"));
 
         assert!(matches!(loaded, Ok(None)), "{loaded:?}");
+    }
+
+    #[test]
+    fn missing_required_record_is_a_read_error() {
+        let directory = tempfile::tempdir().expect("create a directory");
+        let path = directory.path().join("pr-watch.json");
+
+        let loaded = load_required_json::<Record>(&path);
+
+        let error = loaded.expect_err("the record is missing");
+        assert!(
+            matches!(&error.kind, RecordErrorKind::Read(read) if read.kind() == io::ErrorKind::NotFound),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("pr-watch.json"), "{error}");
+    }
+
+    #[test]
+    fn directory_is_listed_in_order_and_a_missing_one_as_none() {
+        let root = tempfile::tempdir().expect("create a directory");
+        for name in ["b", "a", "c"] {
+            fs::create_dir(root.path().join(name)).expect("create an entry");
+        }
+        let file = root.path().join("a").join("link.json");
+        fs::write(&file, "{}").expect("write a file");
+
+        let listed = list_directory(root.path()).expect("list the directory");
+        let missing = list_directory(&root.path().join("missing")).expect("list a missing one");
+        let not_directory = list_directory(&file).expect("list a file");
+
+        assert_eq!(listed, Some(vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(missing, None);
+        assert_eq!(not_directory, None);
     }
 
     #[test]

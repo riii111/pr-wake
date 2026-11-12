@@ -156,6 +156,26 @@ impl WatchStatus {
     pub(crate) const fn is_finished(self) -> bool {
         matches!(self, Self::Ended | Self::Stopped | Self::Halted)
     }
+
+    // Only a watch stopped for a gone chat has let its chat go; a halted one may have just reached
+    // it.
+    #[must_use]
+    pub(crate) const fn holds_chat(self) -> bool {
+        !matches!(self, Self::Stopped | Self::Ended)
+    }
+}
+
+impl WatchEvent {
+    // The type the record names the event by.
+    #[must_use]
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Finding { .. } => "finding",
+            Self::ReviewDone { .. } => "review_done",
+            Self::Conflict { .. } => "conflict",
+            Self::CiFailed { .. } => "ci_failed",
+        }
+    }
 }
 
 // Unknown keys in a stored record are skipped, since the TypeScript watch kept them readable;
@@ -573,6 +593,47 @@ mod tests {
                 (over, finished),
                 "case: {status:?}"
             );
+        }
+    }
+
+    #[test]
+    fn only_a_stopped_or_ended_watch_lets_its_chat_go() {
+        for (status, holds) in [
+            (WatchStatus::Watching, true),
+            (WatchStatus::Draft, true),
+            (WatchStatus::Halted, true),
+            (WatchStatus::Stopped, false),
+            (WatchStatus::Ended, false),
+        ] {
+            assert_eq!(status.holds_chat(), holds, "case: {status:?}");
+        }
+    }
+
+    #[test]
+    fn event_kind_is_the_type_its_record_names() {
+        for event in [
+            WatchEvent::Finding { finding: finding() },
+            WatchEvent::ReviewDone {
+                bot: "coderabbit".to_owned(),
+                name: "CodeRabbit".to_owned(),
+                head: HEAD.to_owned(),
+                findings: 1,
+                summary_agrees: true,
+            },
+            WatchEvent::Conflict {
+                head: HEAD.to_owned(),
+            },
+            WatchEvent::CiFailed {
+                head: HEAD.to_owned(),
+                check: FailedCheck {
+                    name: "build".to_owned(),
+                    url: None,
+                },
+            },
+        ] {
+            let record = serde_json::to_value(&event).expect("write the event");
+
+            assert_eq!(record["type"], event.kind(), "case: {event:?}");
         }
     }
 

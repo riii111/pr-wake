@@ -285,6 +285,8 @@ mod tests {
                     mergeable: CONFLICTING.to_owned(),
                     ..summary(Some(completed()))
                 },
+                url: PR.to_owned(),
+                title: "Pay".to_owned(),
                 failed_required: vec![build()],
                 comments: vec![comment(1, "2026-10-23T11:00:00Z")],
                 no_actionable: Vec::new(),
@@ -615,6 +617,8 @@ mod tests {
                     mergeable: CONFLICTING.to_owned(),
                     ..summary(Some(completed()))
                 },
+                url: PR.to_owned(),
+                title: "Pay".to_owned(),
                 failed_required: vec![build()],
                 comments: vec![comment(1, "2026-10-23T11:00:00Z")],
                 no_actionable: vec!["coderabbit".to_owned()],
@@ -692,6 +696,8 @@ mod tests {
     fn detail(comments: Vec<PrComment>) -> PrDetail {
         PrDetail {
             summary: summary(None),
+            url: PR.to_owned(),
+            title: "Pay".to_owned(),
             failed_required: Vec::new(),
             comments,
             no_actionable: Vec::new(),

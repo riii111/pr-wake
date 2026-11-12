@@ -6,6 +6,7 @@ pub(crate) mod message;
 pub(crate) mod pr;
 pub(crate) mod reviewers;
 pub(crate) mod state;
+pub(crate) mod worker;
 
 use jiff::{SignedDuration, Timestamp, Zoned};
 use serde_json::{Map, Value};
@@ -397,6 +398,21 @@ pub(crate) fn finish_send(
             SendResult::Halted
         }
     }
+}
+
+// The owner checked the app, so the halted message counts as delivered and is never sent again;
+// `None` for a PR that is not halted.
+#[must_use]
+pub(crate) fn release(state: &WatchState) -> Option<WatchState> {
+    (state.status == WatchStatus::Halted).then(|| WatchState {
+        status: WatchStatus::Watching,
+        reason: None,
+        pending: Vec::new(),
+        follow_up: Vec::new(),
+        delivered: None,
+        halted: None,
+        ..state.clone()
+    })
 }
 
 fn is_queued(pending: &[WatchEvent], finding: &Finding) -> bool {
@@ -1267,6 +1283,49 @@ mod tests {
         }
     }
 
+    mod releasing {
+        use super::*;
+
+        #[test]
+        fn halted_pr_resumes_with_its_message_taken_as_delivered() {
+            let state = WatchState {
+                status: WatchStatus::Halted,
+                reason: Some("x".to_owned()),
+                seen: vec!["inline:1".to_owned()],
+                pending: vec![conflict()],
+                follow_up: vec![finding(2)],
+                delivered: Some(delivered(vec![finding(1)])),
+                worker: Some("w1".to_owned()),
+                halted: Some(Map::new()),
+                ..WatchState::default()
+            };
+
+            let released = release(&state);
+
+            assert_eq!(
+                released,
+                Some(WatchState {
+                    seen: vec!["inline:1".to_owned()],
+                    worker: Some("w1".to_owned()),
+                    ..WatchState::default()
+                })
+            );
+        }
+
+        #[rstest]
+        #[case::watching(WatchStatus::Watching)]
+        #[case::stopped(WatchStatus::Stopped)]
+        #[case::ended(WatchStatus::Ended)]
+        fn pr_that_is_not_halted_is_not_released(#[case] status: WatchStatus) {
+            let state = WatchState {
+                status,
+                ..pending_state()
+            };
+
+            assert_eq!(release(&state), None);
+        }
+    }
+
     // The records harnexus-task watch left on a Mac, read and run as a restarted watch would.
     mod legacy_records {
         use super::*;
@@ -1425,6 +1484,8 @@ mod tests {
                 {
                     let detail = PrDetail {
                         summary: summary.clone(),
+                        url: record.url.clone(),
+                        title: format!("PR {}", record.number),
                         failed_required: Vec::new(),
                         comments: vec![PrComment {
                             id: format!("inline:{}1", record.number),
@@ -1579,6 +1640,8 @@ mod tests {
     fn detail(comments: Vec<PrComment>) -> PrDetail {
         PrDetail {
             summary: summary(),
+            url: PR.to_owned(),
+            title: "Pay".to_owned(),
             failed_required: Vec::new(),
             comments,
             no_actionable: Vec::new(),
