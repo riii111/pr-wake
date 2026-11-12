@@ -1,21 +1,28 @@
 # pr-wake
 
-GitHubのPRで起きたことを知らせる、macOS用の常駐ツール。
-`watch`と`review`は別々に常駐し、片方だけでも使える。
-コマンドの一覧は`pr-wake watch`・`pr-wake review`で表示される。
+GitHubのPRの変化を知らせるmacOS用ツール。
+
+- `watch`: PRのレビュー指摘やCIの失敗をAIワーカーへ伝える
+- `review`: 自分へのレビュー依頼を通知し、AIによるレビューを始める
+
+それぞれ別に常駐し、片方だけでも使える。
+
+## インストール
+
+Go 1.24、Bun 1.4.4、GitHubにログイン済みの`gh`を用意する。
 
 ```bash
 scripts/install.sh
 ```
 
-Go 1.24とBun 1.4.4で`pr-wake`と監視エンジン`pr-wake-engine`をビルドし、`~/.local/bin`へ入れる。
-`PREFIX=<dir>`を付けると`<dir>/bin`へ入れる。
-常駐の登録は変えないので、切り替えは`pr-wake watch install`などで行う。
+実行ファイルは`~/.local/bin`に入る。
+`PREFIX=<dir>`を指定すると`<dir>/bin`に入る。
+常駐の登録は、使いたい機能の導入手順で行う。
 
 ## watch
 
-AIのタスクワーカーが出したPRにレビューコメント・競合・必須チェックの失敗が起きると、そのワーカーのチャットへ知らせる。
-自分がPRを見張って、ワーカーに伝え直す必要がなくなる。
+ワーカーのPRにレビュー指摘、競合、必須チェックの失敗があったとき、担当チャットへ知らせる。
+Codex AppとT3 Codeに対応する。
 
 ```mermaid
 sequenceDiagram
@@ -31,28 +38,34 @@ sequenceDiagram
   W->>G: 対応してpush
 ```
 
-監視の本体は同梱の`pr-wake-engine`で、`pr-wake watch`がその常駐を管理する。
-チャットへの送信には[harnexus](https://github.com/riii111/harnexus)の公開call socketを使う。
-設定は`~/.config/harnexus/pr-watch.json`、記録は`~/.local/state/harnexus-crew/watch/`を使う。
-
 ### 導入
 
-1. harnexusのAppをcall socketを有効にして起動し、`~/.config/harnexus/pr-watch.json`を書く
-2. `scripts/install.sh`で`pr-wake`と`pr-wake-engine`を入れる
-3. `pr-wake watch install`を実行する。`harnexus-task watch`を常駐させていた場合は、この常駐に置き換わる
-4. 送信に使うCodexのチャットで`pr-wake watch sender`を一度実行する。それまでは何も送られない
+1. [harnexus](https://github.com/riii111/harnexus)のcall socketを有効にして起動する
+2. `~/.config/harnexus/pr-watch.json`に監視するリポジトリとGitHubアカウントを書く
+3. `pr-wake watch install`で常駐を始める
+4. Codex Appへ送る場合は、送信元に使うチャットで`pr-wake watch sender`を実行する
 
-ワーカーのチャットで`pr-wake watch link <PRのURL>`を実行すると、そのPRが監視される。
-別のチャットが監視中のPRは、`--take-over`を付けると引き継ぐ。
-T3 Codeのスレッドで実行すると、そのスレッドへはT3 Codeの`t3` CLIで送るので、送信元のチャットは要らない。
-`t3`は`HARNEXUS_T3_BIN`、`PATH`、`~/.t3/bin/t3`の順に探す。
-T3 Codeのスレッドは送られた時刻を示さないので、持ち主が話しかけた直後でも、ワーカーが動いていなければ送る。
-`pr-wake watch status`で監視中のPRと送信元を、`--json`でその元のJSONを表示する。
-止まったPRは`pr-wake watch release <PRのURL>`で再開し、`pr-wake watch dry-run`で送る内容を記録を変えずに確かめられる。
+設定例:
+
+```json
+{
+  "repositories": {
+    "owner/repo": { "account": "github-user" }
+  }
+}
+```
+
+ワーカーのチャットで`pr-wake watch link <PRのURL>`を実行すると、そのPRの監視が始まる。
+T3 Codeのスレッドへは`t3` CLIで送るため、送信元の登録は要らない。
+
+- `pr-wake watch status`: 監視状況を表示する
+- `pr-wake watch dry-run`: 送る内容を確認する
+- `pr-wake watch release <PRのURL>`: 停止した監視を再開する
+- `pr-wake watch link <PRのURL> --take-over`: 別のチャットから監視を引き継ぐ
 
 ## review
 
-自分宛てのレビュー依頼を通知し、選んだSkillでAIのレビューをすぐ始められるようにする。
+自分宛てのレビュー依頼を通知し、選んだSkillでAIのレビューを始められる。
 
 ```mermaid
 sequenceDiagram
@@ -69,15 +82,12 @@ sequenceDiagram
   U->>G: 確認して投稿
 ```
 
-通知を見送るか放置すると、何も起きない。
-レビュー対象のコードはPRのheadに固定した専用worktreeに用意されるので、普段のcheckoutは変わらない。
-worktreeは自動で消えないので、不要になったら`git worktree remove`で消す。
-
 ### 導入
 
-1. `gh`でGitHubにログインし、alerterを入れる: `brew install vjeantet/tap/alerter`
-2. 空のフォルダ`~/review-home`を作り、Codex Appのプロジェクトとして追加する。スレッドはここで開く
+1. `brew install vjeantet/tap/alerter`でalerterを入れる
+2. 空のフォルダ`~/review-home`を作り、Codex Appのプロジェクトとして追加する
 3. `config.example.json`を`~/.config/pr-wake/review.json`にコピーし、リポジトリとSkillの選択肢を書く
-4. `pr-wake review install`を実行する。初回の通知でmacOSの通知を許可する
+4. `pr-wake review install`で常駐を始め、初回の通知でmacOSの通知を許可する
 
-`pr-wake review smoke --pr owner/repo#123`で、常駐させずに通知からスレッドを開くまでを試せる。
+`pr-wake review smoke --pr owner/repo#123`で通知からスレッドを開くまでを試せる。
+レビュー用のworktreeは自動で消えないため、不要になったら`git worktree remove`で削除する。
