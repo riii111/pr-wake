@@ -1,0 +1,53 @@
+[package]
+name = "pr-wake"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Tell AI task workers about what happens on their GitHub pull requests"
+repository = "https://github.com/riii111/pr-wake"
+publish = false
+
+# The Go pr-wake still owns the CLI, so this crate replaces only the watch engine for now.
+[[bin]]
+name = "pr-wake-engine"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+jiff = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+rstest = "0.28"
+tempfile = "3.27"
+
+[lints.rust]
+redundant_imports = "deny"
+unfulfilled_lint_expectations = "deny"
+unreachable_pub = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Keep crate-private visibility explicit across private layer modules.
+redundant_pub_crate = "allow"
+absolute_paths = "warn"
+dbg_macro = "deny"
+exit = "deny"
+get_unwrap = "deny"
+mem_forget = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes_without_reason = "deny"
+allow_attributes = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

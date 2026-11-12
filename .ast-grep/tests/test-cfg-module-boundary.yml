@@ -1,0 +1,178 @@
+id: test-cfg-module-boundary
+valid:
+  # A module owns a test condition; its name and nesting are unrestricted.
+  - |-
+    #[cfg(test)]
+    mod tests {
+        mod retained {
+            #[cfg(test)]
+            mod tests {}
+        }
+    }
+  - |-
+    #[cfg(all(unix, test))]
+    mod tests {}
+  - |-
+    #[cfg(test)]
+    mod test_support;
+  - |-
+    #[cfg(test)]
+    pub(crate) mod git;
+  - |-
+    #[cfg(any(test, feature = "test-support"))]
+    mod test_support;
+
+  - |-
+    #[cfg(all(test, not(unix)))]
+    mod test_support {}
+  - |-
+    #[cfg(any(test, not(unix)))]
+    mod test_support {}
+  - |-
+    #[cfg(all(unix, any(test, feature = "x")))]
+    mod test_support {}
+
+  # Same-line nested definitions remain inside the gated module.
+  - |-
+    #[cfg(test)] mod tests { fn helper() {} impl State { fn helper() {} } }
+
+  # Attributes and comments between cfg and mod remain attached to the module.
+  - |-
+    #[cfg(test)]
+    // doc
+    #[allow(dead_code)]
+    mod tests {}
+  - |-
+    #[cfg(test)]
+    /// Tests this module.
+    mod tests {}
+  - |-
+    #[cfg(test)]
+    /* tests */
+    mod tests {}
+  # Same-line attributes must still be treated as belonging to one module.
+  - |-
+    #[cfg(test)] #[cfg(unix)] pub mod tests;
+
+  # The cross-crate feature gate is distinct from cfg(test).
+  - |-
+    #[cfg(feature = "test-support")]
+    mod test_support;
+
+  # These forms contain no outer cfg predicate named test.
+  - |-
+    #[cfg(unix)]
+    fn f() {}
+  - |-
+    #[cfg(feature = "test")]
+    fn f() {}
+  - |-
+    #[cfg(all(unix, /* test */ feature = "test"))]
+    fn f() {}
+  - |-
+    #[cfg_attr(test, allow(dead_code))]
+    fn f() {}
+
+  # Adjacent definitions on one line cannot make the preceding item a module.
+  - |-
+    fn f() {} #[cfg(test)] mod tests {}
+  - |-
+    #[cfg(test)] mod tests {} fn f() {}
+
+invalid:
+  # Negated test predicates do not define a test-only module.
+  - |-
+    #[cfg(not(test))]
+    mod tests {}
+  - |-
+    #[cfg(all(not(test), unix))]
+    mod tests {}
+  - |-
+    #[cfg(not(not(test)))]
+    mod tests {}
+  - |-
+    #[cfg(not(all(test, unix)))]
+    mod m {}
+  - |-
+    #[cfg(not(any(test, unix)))]
+    mod m {}
+
+  # A test condition on a function or method must move to a module boundary.
+  - |-
+    #[cfg(test)]
+    fn f() {}
+  - |-
+    impl State { #[cfg(test)] fn f() {} }
+  - |-
+    trait T { #[cfg(test)] fn f(&self); }
+  - |-
+    #[cfg(test)] mod tests { #[cfg(test)] fn helper() {} }
+
+  # Types, implementations, values, and imports cannot each carry the test condition.
+  - |-
+    #[cfg(test)]
+    struct S;
+  - |-
+    #[cfg(test)]
+    impl S {}
+  - |-
+    #[cfg(test)]
+    const C: u8 = 0;
+  - |-
+    #[cfg(test)]
+    use foo::Bar;
+
+  # Attributes on fields and statements are also individual gates.
+  - |-
+    struct S {
+        #[cfg(test)]
+        field: u8,
+    }
+  - |-
+    fn f() {
+        #[cfg(test)]
+        let x = 0;
+    }
+
+  # Other attributes and comments do not hide the forbidden attachment.
+  - |-
+    #[cfg(test)] #[allow(dead_code)] fn f() {}
+  - |-
+    #[cfg(test)]
+    /// Helper.
+    fn f() {}
+  - |-
+    #[cfg(test)]
+    /* helper */
+    fn f() {}
+
+  # A line-broken or nested test predicate is still a test condition.
+  - |-
+    #[cfg(
+      test
+    )]
+    fn f() {}
+  - |-
+    #[cfg(all(unix, test))]
+    fn f() {}
+  - |-
+    #[cfg(any(test, feature = "test-support"))]
+    fn f() {}
+  - |-
+    #[cfg(not(test))]
+    fn f() {}
+  - |-
+    #[cfg(all(not(test), unix))]
+    fn f() {}
+  - |-
+    #[cfg(all(unix, /* test */ test))]
+    fn f() {}
+  - |-
+    #[cfg(any(feature = "test", test))]
+    fn f() {}
+
+  # A later module on the same line must not legalize an earlier non-module item.
+  - |-
+    #[cfg(test)] fn f() {} mod tests {}
+  - |-
+    #[cfg(test)] fn f() {} #[cfg(test)] mod tests {}
