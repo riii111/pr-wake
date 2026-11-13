@@ -1,6 +1,8 @@
 use std::{
     env, fs, io,
     path::{self, Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -39,6 +41,9 @@ pub(crate) const WATCH: Agent = Agent {
 // The agents of the tools pr-wake replaced, removed at install so two never send the same news.
 pub(crate) const LEGACY_REVIEW: &str = "io.github.riii111.review-notifier";
 pub(crate) const LEGACY_WATCH: &str = "io.github.riii111.pr-watch";
+
+const UNLOAD_WAIT: Duration = Duration::from_secs(10);
+const UNLOAD_CHECK: Duration = Duration::from_millis(100);
 
 // launchd gives an agent none of the installing shell's environment, so install copies these into the plist, sorted by name.
 const PASSED_ON: [(&str, Passed); 6] = [
@@ -210,7 +215,23 @@ fn stop_service(label: &str) -> Result<(), String> {
         output::write_stdout(&format!("{label} is not running\n"));
         return Ok(());
     }
-    run(&Launchctl::bootout(label))
+    run(&Launchctl::bootout(label))?;
+    // launchd keeps listing a booted-out agent briefly after `bootout` returns, so stopping waits until it is gone.
+    wait_until_unloaded(label)
+}
+
+fn wait_until_unloaded(label: &str) -> Result<(), String> {
+    let deadline = Instant::now() + UNLOAD_WAIT;
+    while launchctl::is_loaded(label) {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{label} is still loaded {}s after bootout",
+                UNLOAD_WAIT.as_secs()
+            ));
+        }
+        thread::sleep(UNLOAD_CHECK);
+    }
+    Ok(())
 }
 
 fn run(launchctl: &Launchctl) -> Result<(), String> {
