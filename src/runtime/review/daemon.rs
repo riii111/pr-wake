@@ -422,7 +422,11 @@ impl<'deps> Daemon<'deps> {
     fn claim_key(&self, key: String) -> Option<Request> {
         let mut state = self.lock_state();
         let now = (self.deps.now)();
-        let before = state.requests.get(&key)?.clone();
+        let before = state
+            .requests
+            .get(&key)
+            .filter(|request| request.status == Status::Queued)?
+            .clone();
         let claimed = Request {
             status: Status::Notifying,
             updated_at: now,
