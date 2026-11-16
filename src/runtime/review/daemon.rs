@@ -12,7 +12,7 @@ use crate::{
     app::review::{
         config::Choice,
         notice::{Notice, Selection},
-        request::{pending_requests, request_queries},
+        request::{pending_requests, pr_key, request_queries},
         state::{Request, ReviewState, Status},
     },
     infra::{
@@ -207,6 +207,10 @@ impl<'deps> Daemon<'deps> {
             drop(shown);
 
             if !full && let Some(request) = self.claim() {
+                if let Some(choice) = self.linked_choice(&request) {
+                    scope.spawn(move || self.resend(&request, choice));
+                    continue;
+                }
                 let close = StopRequest::default();
                 {
                     let mut shown = self.lock_shown();
@@ -287,7 +291,50 @@ impl<'deps> Daemon<'deps> {
         None
     }
 
-    fn start(&self, request: &Request, choice: &Choice) {
+    fn linked_choice(&self, request: &Request) -> Option<&'deps Choice> {
+        let tools = self.deps.tools;
+        let found = &request.found;
+        match review_record::load_chat(&tools.paths, &found.repo, found.number) {
+            Ok(Some(_)) => {}
+            Ok(None) => return None,
+            // The launch reports an unreadable link, so the owner is asked as before.
+            Err(error) => {
+                self.log(&format!("{}: read the linked chat: {error}", found.key));
+                return None;
+            }
+        }
+
+        // No notification asks for a choice here, so the latest launched review of the PR supplies it.
+        let pr = pr_key(&found.repo, found.number);
+        let earlier = self
+            .lock_state()
+            .requests
+            .values()
+            .filter(|earlier| {
+                earlier.found.key != found.key
+                    && earlier.status == Status::Launched
+                    && pr_key(&earlier.found.repo, earlier.found.number) == pr
+            })
+            .max_by_key(|earlier| earlier.updated_at)
+            .and_then(|earlier| earlier.choice.clone())?;
+        tools
+            .config
+            .choices
+            .iter()
+            .find(|choice| choice.id == earlier)
+    }
+
+    fn resend(&self, request: &Request, choice: &Choice) {
+        self.log(&format!(
+            "{}: re-request of a linked PR, sent with {} without asking",
+            request.found.key, choice.id
+        ));
+        if self.start(request, choice) {
+            self.report(request, "再レビューを紐づけ済みのチャットへ送りました");
+        }
+    }
+
+    fn start(&self, request: &Request, choice: &Choice) -> bool {
         let found = &request.found;
         let key = &found.key;
         // Saved before the App opens, so a restart never opens a second chat.
@@ -299,7 +346,7 @@ impl<'deps> Daemon<'deps> {
         if let Err(error) = launching {
             self.log(&format!("{key}: not launched: {error}"));
             self.report_failure(request, &error);
-            return;
+            return false;
         }
 
         self.log(&format!("{key}: chose {}", choice.id));
@@ -334,11 +381,14 @@ impl<'deps> Daemon<'deps> {
             }
         }));
         match (launched.result, &launched.chat) {
-            (Ok(()), Some(chat)) => self.log(&format!(
-                "{key}: sent to chat {chat} for {} at {}",
-                worktree.unwrap_or_default(),
-                head.unwrap_or_default()
-            )),
+            (Ok(()), Some(chat)) => {
+                self.log(&format!(
+                    "{key}: sent to chat {chat} for {} at {}",
+                    worktree.unwrap_or_default(),
+                    head.unwrap_or_default()
+                ));
+                return true;
+            }
             (Ok(()), None) => self.log(&format!(
                 "{key}: opened {} at {}",
                 worktree.unwrap_or_default(),
@@ -349,6 +399,7 @@ impl<'deps> Daemon<'deps> {
                 self.report_failure(request, &error);
             }
         }
+        false
     }
 
     // The oldest queued request becomes notifying, saved before it is shown.
@@ -422,17 +473,21 @@ impl<'deps> Daemon<'deps> {
     }
 
     fn report_failure(&self, request: &Request, error: &str) {
+        self.report(request, &format!("レビューを開始できませんでした: {error}"));
+    }
+
+    fn report(&self, request: &Request, message: &str) {
         let tools = self.deps.tools;
         let found = &request.found;
-        let reported = alerter::notify_failure(
+        let reported = alerter::notify_outcome(
             tools.run,
             &tools.commands.osascript,
             &format!("{} #{}", found.repo, found.number),
-            &format!("レビューを開始できませんでした: {error}"),
+            message,
             self.deps.stop,
         );
         if let Err(failure) = reported {
-            self.log(&format!("{}: failure notification: {failure}", found.key));
+            self.log(&format!("{}: outcome notification: {failure}", found.key));
         }
     }
 
@@ -517,7 +572,6 @@ mod tests {
         app::review::{
             config::{ConfigFile, ReviewConfig},
             state::Found,
-            with_link_step,
         },
         infra::{
             codex_app::new_chat_link,
@@ -605,7 +659,7 @@ mod tests {
         assert_eq!(
             fixture.opened(),
             [new_chat_link(
-                &with_link_step(&prompt, "https://github.com/acme/app/pull/12"),
+                &prompt,
                 &fixture.home.path().join("review-home")
             )]
         );
@@ -652,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn re_request_of_a_linked_pr_goes_to_its_chat_at_the_head_when_chosen() {
+    fn re_request_of_a_linked_pr_goes_to_its_chat_at_the_head_without_asking_and_is_reported() {
         const LATER: &str = "fedcba9876543210fedcba9876543210fedcba98";
         let fixture = Fixture::new();
         fixture.answer(CODE_REVIEW);
@@ -690,6 +744,84 @@ mod tests {
         assert_eq!(fixture.sent(), [to_chat.clone(), to_chat]);
         let sent = fixture.state().requests["acme/app#12@31"].clone();
         assert_eq!(sent.head_sha.as_deref(), Some(LATER));
+        assert_eq!(sent.choice.as_deref(), Some("code"));
+        assert_eq!(
+            fixture.count_calls("alerter "),
+            1,
+            "only the first request is asked"
+        );
+        assert_eq!(
+            fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
+            2
+        );
+    }
+
+    #[test]
+    fn re_request_of_a_linked_pr_without_an_earlier_review_asks_the_owner() {
+        let fixture = Fixture::new();
+        fixture.answer(CODE_REVIEW);
+        fixture.link_chat("acme/app", 12, "review-chat");
+
+        fixture.with_daemon(&Setup::default(), |daemon, stop| {
+            daemon.poll_once().expect("baseline poll");
+            notifying(daemon, stop, || {
+                fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                daemon.poll_once().expect("poll");
+                fixture.wait_status("acme/app#12@30", Status::Launched);
+            });
+        });
+
+        assert_eq!(fixture.count_calls("alerter "), 1);
+        assert_eq!(
+            fixture.sent(),
+            [("review-chat".to_owned(), fixture.prompt_at(HEAD))]
+        );
+        assert_eq!(
+            fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
+            0,
+            "a review the owner chose is not reported again"
+        );
+    }
+
+    #[test]
+    fn failed_automatic_send_is_reported_without_a_new_chat_or_a_resend() {
+        let fixture = Fixture::new();
+        fixture.answer(CODE_REVIEW);
+
+        let queued = fixture.with_daemon(&Setup::default(), |daemon, stop| {
+            daemon.poll_once().expect("baseline poll");
+            notifying(daemon, stop, || {
+                fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                daemon.poll_once().expect("poll the request");
+                fixture.wait_status("acme/app#12@30", Status::Launched);
+                fixture.link_chat("acme/app", 12, "review-chat");
+                fixture.set_delivery(Delivery::NotSent("not_sent: no bridge".to_owned()));
+
+                fixture.request(
+                    "acme/app",
+                    12,
+                    &[requested(30, "sato"), requested(31, "sato")],
+                );
+                daemon.poll_once().expect("poll the re-request");
+                fixture.wait_status("acme/app#12@31", Status::Failed);
+            });
+            daemon.poll_once().expect("poll again");
+            daemon.queued_count()
+        });
+
+        assert_eq!(queued, 0);
+        assert_eq!(fixture.count_calls("alerter "), 1);
+        assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
+        assert_eq!(fixture.sent().len(), 1);
+        assert_eq!(
+            fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
+            0
+        );
+        assert_eq!(
+            fixture
+                .count_calls("レビューを開始できませんでした: could not send to chat review-chat"),
+            1
+        );
     }
 
     #[test]
@@ -1284,6 +1416,15 @@ mod tests {
                 .any(|line| line.starts_with(prefix))
         }
 
+        fn count_calls(&self, text: &str) -> usize {
+            self.calls
+                .lock()
+                .expect("read the calls")
+                .iter()
+                .filter(|line| line.contains(text))
+                .count()
+        }
+
         fn opened(&self) -> Vec<String> {
             self.opened.lock().expect("read the links").clone()
         }
@@ -1336,10 +1477,7 @@ mod tests {
         }
 
         fn new_chat_at(&self, head: &str) -> String {
-            new_chat_link(
-                &with_link_step(&self.prompt_at(head), "https://github.com/acme/app/pull/12"),
-                &self.home.path().join("review-home"),
-            )
+            new_chat_link(&self.prompt_at(head), &self.home.path().join("review-home"))
         }
     }
 

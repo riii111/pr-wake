@@ -22,7 +22,6 @@ use crate::{
             one_line,
             request::request_queries,
             state::{Found, ReviewState, Status},
-            with_link_step,
         },
         time,
         watch::{
@@ -283,7 +282,7 @@ pub(crate) fn smoke(
             }
             None => out(&format!(
                 "link: {}",
-                new_chat_link(&with_link_step(&prompt, &pr.url), &tools.config.chat_home)
+                new_chat_link(&prompt, &tools.config.chat_home)
             )),
         }
         return Ok(());
@@ -319,11 +318,21 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
 // Run in the review chat, which `CODEX_THREAD_ID` names.
 pub(crate) fn link(
     env: &ReviewEnv,
+    run: &RunTool<'_>,
+    stop: &StopRequest,
     pr: &str,
     caller: Result<String, String>,
     now: Timestamp,
 ) -> Result<String, String> {
     let (repo, number) = review::parse_pr_ref(pr)?;
+    // Decided before the caller is read, so an independent review of one's own PR ends normally from any chat.
+    let send = harnexus_sender(env);
+    let tools = load_tools(&env.paths.config, env, run, &send)?;
+    if is_own_pull_request(&tools, stop, &repo, number)? {
+        return Ok(format!(
+            "skipped {repo}#{number}: it is your own pull request, so no re-request comes to this chat"
+        ));
+    }
     let thread = caller?;
     if worker::is_t3_worker(&thread) {
         return Err(
@@ -348,7 +357,8 @@ pub(crate) fn link(
 
 pub(crate) fn link_from_chat(env: &ReviewEnv, pr: &str) -> Result<(), String> {
     let caller = watch::caller_id(&|name| env::var_os(name)).map_err(|failure| failure.to_string());
-    print_line(&link(env, pr, caller, Timestamp::now())?);
+    let stop = stop_on_termination()?;
+    print_line(&link(env, &run_tool, &stop, pr, caller, Timestamp::now())?);
     Ok(())
 }
 
@@ -514,10 +524,22 @@ fn launch(
         return ended(Some(chat.thread), Err(error));
     }
 
-    let link = new_chat_link(&with_link_step(&prompt, &pr.url), &tools.config.chat_home);
+    let link = new_chat_link(&prompt, &tools.config.chat_home);
     let result = open_link(tools.run, &tools.commands.open, &link, stop)
         .map_err(|error| format!("open deep link: {error}"));
     ended(None, result)
+}
+
+fn is_own_pull_request(
+    tools: &Tools<'_>,
+    stop: &StopRequest,
+    repo: &str,
+    number: u64,
+) -> Result<bool, String> {
+    let github = github(tools, stop);
+    let login = github.current_login()?;
+    let author = github.pull_request_author(repo, number)?;
+    Ok(author.is_some_and(|author| author.eq_ignore_ascii_case(&login)))
 }
 
 fn linked_chat(tools: &Tools<'_>, pr: &PullRequest) -> Result<Option<ReviewChat>, String> {
@@ -697,6 +719,7 @@ mod tests {
         directory: tempfile::TempDir,
         env: ReviewEnv,
         declines: AtomicBool,
+        author: Mutex<String>,
         calls: Mutex<Vec<String>>,
     }
 
@@ -923,10 +946,7 @@ mod tests {
                 format!("worktree: {}", worktree.display()),
                 format!(
                     "link: {}",
-                    new_chat_link(
-                        &with_link_step(&prompt, "https://github.com/acme/app/pull/3"),
-                        &home.directory.path().join("review-home")
-                    )
+                    new_chat_link(&prompt, &home.directory.path().join("review-home"))
                 ),
             ]
         );
@@ -951,6 +971,8 @@ mod tests {
 
         let linked = link(
             &home.env,
+            &|call| home.answer(call, "[]"),
+            &StopRequest::default(),
             "https://github.com/acme/app/pull/3",
             Ok("review-chat".to_owned()),
             now,
@@ -996,7 +1018,14 @@ mod tests {
         ] {
             let home = ReviewHome::new();
 
-            let linked = link(&home.env, pr, caller, Timestamp::UNIX_EPOCH);
+            let linked = link(
+                &home.env,
+                &|call| home.answer(call, "[]"),
+                &StopRequest::default(),
+                pr,
+                caller,
+                Timestamp::UNIX_EPOCH,
+            );
 
             let error = linked.expect_err(name);
             assert!(error.contains(expected), "case: {name}: {error}");
@@ -1006,6 +1035,70 @@ mod tests {
                 "case: {name}"
             );
         }
+    }
+
+    #[test]
+    fn link_of_my_own_pr_ends_normally_without_a_link_from_any_chat() {
+        for (name, author, caller) in [
+            ("codex_chat", "me", Ok("review-chat".to_owned())),
+            ("login_in_another_case", "ME", Ok("review-chat".to_owned())),
+            ("t3_thread", "me", Ok("t3:thread".to_owned())),
+            (
+                "no_chat",
+                "me",
+                Err("CODEX_THREAD_ID is not set".to_owned()),
+            ),
+        ] {
+            let home = ReviewHome::new();
+            home.author(author);
+
+            let linked = link(
+                &home.env,
+                &|call| home.answer(call, "[]"),
+                &StopRequest::default(),
+                "acme/app#3",
+                caller,
+                Timestamp::UNIX_EPOCH,
+            );
+
+            let text = linked.expect(name);
+            assert!(
+                text.starts_with("skipped acme/app#3"),
+                "case: {name}: {text}"
+            );
+            assert!(!text.starts_with("linked"), "case: {name}: {text}");
+            assert_eq!(
+                review_record::load_chat(&home.env.paths, "acme/app", 3).expect("read no chat"),
+                None,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_that_cannot_tell_the_author_is_refused_without_a_link() {
+        let home = ReviewHome::new();
+
+        let linked = link(
+            &home.env,
+            &|call| {
+                if call.arguments.iter().any(|argument| argument == "user") {
+                    Err("gh: exit status 1".to_owned())
+                } else {
+                    home.answer(call, "[]")
+                }
+            },
+            &StopRequest::default(),
+            "acme/app#3",
+            Ok("review-chat".to_owned()),
+            Timestamp::UNIX_EPOCH,
+        );
+
+        assert!(linked.is_err(), "{linked:?}");
+        assert_eq!(
+            review_record::load_chat(&home.env.paths, "acme/app", 3).expect("read no chat"),
+            None
+        );
     }
 
     #[test]
@@ -1116,6 +1209,7 @@ mod tests {
                 directory,
                 env,
                 declines: AtomicBool::new(false),
+                author: Mutex::new("tanaka".to_owned()),
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -1131,7 +1225,8 @@ mod tests {
             let answer = match line.as_str() {
                 "/x/gh api user" => r#"{"login":"me"}"#.to_owned(),
                 "/x/gh api repos/acme/app/pulls/3" => format!(
-                    r#"{{"number":3,"title":"T","html_url":"https://github.com/acme/app/pull/3","head":{{"sha":"{HEAD}"}},"base":{{"ref":"main","repo":{{"full_name":"acme/app"}}}}}}"#
+                    r#"{{"number":3,"title":"T","html_url":"https://github.com/acme/app/pull/3","user":{{"login":"{}"}},"head":{{"sha":"{HEAD}"}},"base":{{"ref":"main","repo":{{"full_name":"acme/app"}}}}}}"#,
+                    self.author.lock().expect("read the author")
                 ),
                 "/x/gh api --paginate repos/acme/app/issues/3/events?per_page=100" => events.to_owned(),
                 _ if line.starts_with("/x/gh api --paginate -X GET search/issues") => {
@@ -1155,6 +1250,10 @@ mod tests {
 
         fn decline(&self) {
             self.declines.store(true, Ordering::SeqCst);
+        }
+
+        fn author(&self, login: &str) {
+            login.clone_into(&mut self.author.lock().expect("set the author"));
         }
 
         fn ran(&self, prefix: &str) -> bool {

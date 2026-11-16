@@ -40,8 +40,8 @@ pub(crate) fn notify(
     parse_selection(&output, &notice.actions)
 }
 
-// A failure after the owner chose a review offers nothing, so it is a plain notification that does not wait.
-pub(crate) fn notify_failure(
+// An outcome after the review was started offers nothing to choose, so it is a plain notification that does not wait.
+pub(crate) fn notify_outcome(
     run: &RunTool<'_>,
     osascript: &Path,
     subtitle: &str,
