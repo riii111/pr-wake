@@ -91,6 +91,7 @@ sequenceDiagram
 
 レビューのスレッドで`pr-wake review link <PRのURL>`を実行すると、そのスレッドをPRへ紐づける。
 実行はレビュー用のSkillの手順に含める。
+`~/.config/pr-wake/review.json`がない環境では紐づけず、エラーで終わる。
 自分が作成したPRは紐づけず、`skipped`で始まる行を出して正常に終わる。紐づけたときは`linked`で始まる。
 
 紐づけたPRに再依頼が届くと、通知でSkillを選ばなくても、新しいスレッドを開かず、前回のレビューと同じSkillで、その時点のheadのレビュー依頼をそのスレッドへ送る。
