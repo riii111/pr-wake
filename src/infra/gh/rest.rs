@@ -72,6 +72,12 @@ struct Pull {
 }
 
 #[derive(Deserialize)]
+struct PullAuthor {
+    #[serde(default)]
+    user: Option<Account>,
+}
+
+#[derive(Deserialize)]
 struct Head {
     sha: String,
 }
@@ -202,6 +208,17 @@ impl GhRest<'_> {
             head_sha: pull.head.sha,
             base_ref: pull.base.name,
         })
+    }
+
+    pub(crate) fn pull_request_author(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<String>, String> {
+        let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
+        let pull = serde_json::from_slice::<PullAuthor>(&output)
+            .map_err(|error| format!("pull request {repo}#{number}: {error}"))?;
+        Ok(pull.user.map(|user| user.login))
     }
 
     fn api<'argument>(
@@ -366,6 +383,22 @@ mod tests {
             let pr = gh.rest(|rest| rest.pull_request("acme/app", 12));
 
             assert!(pr.is_err(), "case: {name}: {pr:?}");
+        }
+    }
+
+    #[test]
+    fn pull_request_author_is_the_user_who_opened_it() {
+        for (name, output, expected) in [
+            ("author", r#"{"user":{"login":"tanaka"}}"#, Some("tanaka")),
+            ("deleted_account", r#"{"user":null}"#, None),
+            ("no_user", "{}", None),
+        ] {
+            let gh = FakeGh::answering(Ok(output.to_owned()));
+
+            let author = gh.rest(|rest| rest.pull_request_author("acme/app", 12));
+
+            assert_eq!(author, Ok(expected.map(str::to_owned)), "case: {name}");
+            assert_eq!(gh.asked(), [["api", "repos/acme/app/pulls/12"]]);
         }
     }
 
