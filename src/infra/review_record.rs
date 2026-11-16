@@ -55,16 +55,25 @@ impl ReviewPaths {
     }
 }
 
+// A missing skill does not matter to commands that never launch a review, so the skills are not checked.
+pub(crate) fn read_config(
+    path: &Path,
+    home: &Path,
+    codex_home: &Path,
+) -> Result<ReviewConfig, String> {
+    record::load_required_json::<ConfigFile>(path)
+        .map_err(|error| error.to_string())?
+        .resolve(home, codex_home)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 pub(crate) fn load_config(
     path: &Path,
     home: &Path,
     codex_home: &Path,
 ) -> Result<ReviewConfig, String> {
     let in_file = |error: String| format!("{}: {error}", path.display());
-    let config = record::load_required_json::<ConfigFile>(path)
-        .map_err(|error| error.to_string())?
-        .resolve(home, codex_home)
-        .map_err(in_file)?;
+    let config = read_config(path, home, codex_home)?;
 
     // A missing skill would otherwise fail only after the owner picked it, so each one is checked at load.
     for (index, choice) in config.choices.iter().enumerate() {

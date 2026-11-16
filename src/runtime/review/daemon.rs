@@ -193,6 +193,12 @@ impl<'deps> Daemon<'deps> {
                 return;
             }
 
+            // Taken before the notification slots are counted, as it needs none and must not close another request's notification.
+            if let Some((request, choice)) = self.claim_linked() {
+                scope.spawn(move || self.resend(&request, choice));
+                continue;
+            }
+
             let mut shown = self.lock_shown();
             let full = shown.notices.len() >= self.deps.tools.config.max_notifications;
             // One notification is closed per waiting request; a closing one already makes room.
@@ -207,10 +213,6 @@ impl<'deps> Daemon<'deps> {
             drop(shown);
 
             if !full && let Some(request) = self.claim() {
-                if let Some(choice) = self.linked_choice(&request) {
-                    scope.spawn(move || self.resend(&request, choice));
-                    continue;
-                }
                 let close = StopRequest::default();
                 {
                     let mut shown = self.lock_shown();
@@ -404,8 +406,21 @@ impl<'deps> Daemon<'deps> {
 
     // The oldest queued request becomes notifying, saved before it is shown.
     fn claim(&self) -> Option<Request> {
+        let key = self.lock_state().next_queued()?.to_owned();
+        self.claim_key(key)
+    }
+
+    fn claim_linked(&self) -> Option<(Request, &'deps Choice)> {
+        let queued = self.lock_state().queued_in_order();
+        queued.into_iter().find_map(|request| {
+            let choice = self.linked_choice(&request)?;
+            let claimed = self.claim_key(request.found.key)?;
+            Some((claimed, choice))
+        })
+    }
+
+    fn claim_key(&self, key: String) -> Option<Request> {
         let mut state = self.lock_state();
-        let key = state.next_queued()?.to_owned();
         let now = (self.deps.now)();
         let before = state.requests.get(&key)?.clone();
         let claimed = Request {
@@ -754,6 +769,57 @@ mod tests {
             fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
             2
         );
+    }
+
+    #[test]
+    fn automatic_send_leaves_an_unanswered_notification_of_another_pr_open() {
+        let mut fixture = Fixture::new();
+        fixture.config.max_notifications = 1;
+        let closed = Mutex::new(Vec::new());
+        let alerter = |call: &ToolCall<'_>| {
+            let key = group_of(call);
+            if key.starts_with("acme/app#12@") {
+                return Ok(CODE_REVIEW.as_bytes().to_vec());
+            }
+            wait_for(|| call.stop.is_requested());
+            closed.lock().expect("note the close").push(key);
+            Err("alerter was stopped".to_owned())
+        };
+
+        let closed_before_the_send = fixture.with_daemon(
+            &Setup {
+                alerter: Some(&alerter),
+                ..Setup::default()
+            },
+            |daemon, stop| {
+                daemon.poll_once().expect("baseline poll");
+                notifying(daemon, stop, || {
+                    fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                    daemon.poll_once().expect("poll the request");
+                    fixture.wait_status("acme/app#12@30", Status::Launched);
+                    fixture.link_chat("acme/app", 12, "review-chat");
+
+                    fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
+                    daemon.poll_once().expect("poll the other PR");
+                    fixture.wait_status("acme/app#1@10", Status::Notifying);
+
+                    fixture.request(
+                        "acme/app",
+                        12,
+                        &[requested(30, "sato"), requested(31, "sato")],
+                    );
+                    daemon.poll_once().expect("poll the re-request");
+                    fixture.wait_status("acme/app#12@31", Status::Launched);
+                    closed.lock().expect("read the closes").clone()
+                })
+            },
+        );
+
+        assert!(
+            closed_before_the_send.is_empty(),
+            "{closed_before_the_send:?}"
+        );
+        assert_eq!(fixture.sent().len(), 1);
     }
 
     #[test]

@@ -326,9 +326,13 @@ pub(crate) fn link(
 ) -> Result<String, String> {
     let (repo, number) = review::parse_pr_ref(pr)?;
     // Decided before the caller is read, so an independent review of one's own PR ends normally from any chat.
-    let send = harnexus_sender(env);
-    let tools = load_tools(&env.paths.config, env, run, &send)?;
-    if is_own_pull_request(&tools, stop, &repo, number)? {
+    let config = review_record::read_config(&env.paths.config, &env.home, &env.codex_home)?;
+    let gh = match config.commands.gh {
+        Some(gh) => gh,
+        None => find_command("gh", &agent_path(&env.home, env.user.as_deref()))?,
+    };
+    let github = GhRest { run, gh: &gh, stop };
+    if is_own_pull_request(&github, &repo, number)? {
         return Ok(format!(
             "skipped {repo}#{number}: it is your own pull request, so no re-request comes to this chat"
         ));
@@ -530,13 +534,7 @@ fn launch(
     ended(None, result)
 }
 
-fn is_own_pull_request(
-    tools: &Tools<'_>,
-    stop: &StopRequest,
-    repo: &str,
-    number: u64,
-) -> Result<bool, String> {
-    let github = github(tools, stop);
+fn is_own_pull_request(github: &GhRest<'_>, repo: &str, number: u64) -> Result<bool, String> {
     let login = github.current_login()?;
     let author = github.pull_request_author(repo, number)?;
     Ok(author.is_some_and(|author| author.eq_ignore_ascii_case(&login)))

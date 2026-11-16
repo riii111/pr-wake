@@ -176,6 +176,20 @@ impl ReviewState {
     }
 
     #[must_use]
+    pub(crate) fn queued_in_order(&self) -> Vec<Request> {
+        let mut queued = self
+            .requests
+            .values()
+            .filter(|request| request.status == Status::Queued)
+            .cloned()
+            .collect::<Vec<_>>();
+        queued.sort_by(|left, right| {
+            (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
+        });
+        queued
+    }
+
+    #[must_use]
     pub(crate) fn queued_count(&self) -> usize {
         self.requests
             .values()
