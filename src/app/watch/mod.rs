@@ -146,8 +146,7 @@ fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
     let told = state
         .delivered
         .take()
-        .map(|delivered| delivered.findings)
-        .unwrap_or_default()
+        .map_or_default(|delivered| delivered.findings)
         .into_iter()
         .chain(std::mem::take(&mut state.follow_up))
         .filter(|finding| !is_queued(&state.pending, finding))
@@ -612,7 +611,7 @@ mod tests {
                 }
             );
             assert_eq!(state.worker.as_deref(), Some("new"));
-            assert!(state.pending.is_empty());
+            assert_eq!(state.pending, []);
             assert!(state.delivered.is_some());
         }
     }
@@ -1206,7 +1205,7 @@ mod tests {
                 }
             );
             assert_eq!(state.pending, pending_state().pending);
-            assert!(state.follow_up.is_empty());
+            assert_eq!(state.follow_up, []);
             assert_eq!(
                 state.delivered.map(|delivered| delivered.follow_up),
                 Some(true)

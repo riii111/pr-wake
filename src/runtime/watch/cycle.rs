@@ -531,7 +531,7 @@ mod tests {
             assert!(input.contains(PR), "{input}");
             let after = fixture.state();
             assert_eq!(after.status, WatchStatus::Watching);
-            assert!(after.pending.is_empty());
+            assert_eq!(after.pending, []);
             assert_eq!(after.delivered, None);
         }
     }
@@ -590,7 +590,7 @@ mod tests {
             }
             let saved = fixture.state();
             assert_eq!(saved.status, WatchStatus::Watching);
-            assert!(saved.pending.is_empty());
+            assert_eq!(saved.pending, []);
             assert_eq!(
                 saved.delivered.map(|delivered| delivered.findings.len()),
                 Some(1)
@@ -627,7 +627,7 @@ mod tests {
             assert_eq!(fixture.sent().len(), 2);
             assert!(fixture.prompt(1).contains(&format!("{PR}#discussion_r5")));
             assert!(!fixture.prompt(1).contains("discussion_r1"));
-            assert!(fixture.state().follow_up.is_empty());
+            assert_eq!(fixture.state().follow_up, []);
         }
 
         #[test]
@@ -788,7 +788,7 @@ mod tests {
             fixture.cycle();
 
             assert_eq!(fixture.sent().len(), 2);
-            assert!(fixture.state().pending.is_empty());
+            assert_eq!(fixture.state().pending, []);
             assert_eq!(fixture.logged("send_not_sent").len(), 1);
         }
 
@@ -863,7 +863,7 @@ mod tests {
 
             let first = fixture.state();
             assert!(fixture.sent().is_empty());
-            assert!(first.pending.is_empty());
+            assert_eq!(first.pending, []);
             assert_eq!(first.conflict_head.as_deref(), Some(HEAD));
 
             fixture.later(1);

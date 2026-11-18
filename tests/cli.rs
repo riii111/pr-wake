@@ -32,7 +32,7 @@ fn help_shows_both_features_and_succeeds() {
     assert!(stdout.contains("Usage: pr-wake <COMMAND>"), "{stdout}");
     assert!(stdout.contains("review"), "{stdout}");
     assert!(stdout.contains("watch"), "{stdout}");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, *b"");
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn wrong_command_line_is_a_usage_error_on_stderr(#[case] arguments: &[&str]) {
     let output = run(arguments);
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, *b"");
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 error");
     assert!(stderr.contains("Usage: pr-wake"), "{stderr}");
 }
@@ -116,7 +116,7 @@ fn link_from_a_chat_without_a_confirmed_id_is_refused(#[case] id: &str) {
     let refused = Home::new().watch(&["link", PR_9], &[("CODEX_THREAD_ID", id)]);
 
     assert_eq!(refused.code, Some(1));
-    assert!(refused.stdout.is_empty());
+    assert_eq!(refused.stdout, "");
     assert!(
         refused.stderr.contains("CODEX_THREAD_ID"),
         "{}",
