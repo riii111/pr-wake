@@ -682,7 +682,7 @@ mod tests {
                 &fixture.home.path().join("review-home")
             )]
         );
-        assert!(fixture.sent().is_empty());
+        assert_eq!(fixture.sent(), []);
         let launched = fixture.state().requests["acme/app#12@30"].clone();
         assert_eq!(launched.choice.as_deref(), Some("code"));
         assert_eq!(launched.head_sha.as_deref(), Some(HEAD));
@@ -994,7 +994,7 @@ mod tests {
         });
 
         let failed = fixture.state().requests["acme/unknown#5@50"].clone();
-        assert!(fixture.opened().is_empty());
+        assert_eq!(fixture.opened(), Vec::<String>::new());
         assert_eq!(failed.head_sha.as_deref(), Some(HEAD));
         assert!(
             failed
@@ -1186,7 +1186,7 @@ mod tests {
             "stopped {waited:?} after the request"
         );
         assert_eq!(fixture.status("acme/app#1@10"), Status::Notifying);
-        assert!(fixture.opened().is_empty());
+        assert_eq!(fixture.opened(), Vec::<String>::new());
     }
 
     #[test]

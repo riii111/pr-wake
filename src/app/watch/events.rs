@@ -390,7 +390,7 @@ mod tests {
                 })
             );
             assert_eq!(finding_ids(&first.events), ["inline:1"]);
-            assert!(again.events.is_empty());
+            assert_eq!(again.events, []);
         }
 
         #[test]
@@ -603,7 +603,7 @@ mod tests {
                     check: build(),
                 }]
             );
-            assert!(again.events.is_empty());
+            assert_eq!(again.events, []);
         }
 
         #[test]

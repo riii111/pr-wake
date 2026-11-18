@@ -234,14 +234,13 @@ fn page_of(answer: &Map<String, Value>) -> Lookup<Page> {
     let turns = read
         .get("turns")
         .and_then(Value::as_array)
-        .map(|turns| {
+        .map_or_default(|turns| {
             turns
                 .iter()
                 .filter_map(Value::as_object)
                 .map(turn_of)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     let page = read.get("page").and_then(Value::as_object);
     let next_cursor = page
         .filter(|page| page.get("hasMore") == Some(&Value::Bool(true)))
@@ -259,23 +258,20 @@ fn result_text(answer: &Map<String, Value>) -> String {
         .get("result")
         .and_then(Value::as_object)
         .and_then(|result| result.get("content")?.as_array());
-    content
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("text")?.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
+    content.map_or_default(|items| {
+        items
+            .iter()
+            .filter_map(|item| item.get("text")?.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 fn turn_of(turn: &Map<String, Value>) -> Turn {
     let items = turn
         .get("items")
         .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+        .map_or_default(Vec::as_slice);
     let first = items.first();
     let delegation = first.and_then(delegation_of);
     let origin = if delegation.is_some() {

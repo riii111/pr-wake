@@ -2,7 +2,7 @@
 name = "pr-wake"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.100"
 description = "Tell AI task workers about what happens on their GitHub pull requests"
 repository = "https://github.com/riii111/pr-wake"
 publish = false

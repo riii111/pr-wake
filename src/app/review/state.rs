@@ -348,7 +348,7 @@ mod tests {
         let added = state.apply_poll(vec![found("acme/app", 1, 10)], at(NOW), true);
 
         assert!(was_new);
-        assert!(added.is_empty());
+        assert_eq!(added, Vec::<String>::new());
         assert_eq!(status_of(&state, "acme/app#1@10"), Status::Baseline);
     }
 

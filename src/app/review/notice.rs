@@ -37,8 +37,7 @@ impl Notice {
         let team = request
             .team
             .as_ref()
-            .map(|team| format!("（{team} 宛て）"))
-            .unwrap_or_default();
+            .map_or_default(|team| format!("（{team} 宛て）"));
         Self {
             key: request.key.clone(),
             title: TITLE,
