@@ -380,10 +380,16 @@ impl<'deps> Daemon<'deps> {
             let Some((index, digest)) = due else {
                 return;
             };
-            self.notify_digest(&digest);
+            if let Err(error) = self.notify_digest(&digest) {
+                self.log(&format!("batch notification: {error}"));
+                // A stop may have kept osascript from running, so the digest stays for the restarted review.
+                if self.deps.stop.is_requested() {
+                    return;
+                }
+            }
 
             let mut state = self.lock_state();
-            // Removed even when it was not shown or not saved, so a broken osascript or disk never repeats it every second.
+            // Removed even when it failed otherwise or was not saved, so a broken osascript or disk never repeats it every second.
             state.pending_digests.remove(index);
             let saved = self.save(&state);
             drop(state);
@@ -416,18 +422,15 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    fn notify_digest(&self, digest: &Digest) {
+    fn notify_digest(&self, digest: &Digest) -> Result<(), String> {
         let tools = self.deps.tools;
-        let shown = alerter::notify_outcome(
+        alerter::notify_outcome(
             tools.run,
             &tools.commands.osascript,
             &digest.subtitle(),
             &digest.message(),
             self.deps.stop,
-        );
-        if let Err(error) = shown {
-            self.log(&format!("batch notification: {error}"));
-        }
+        )
     }
 
     // Bounds the alerter processes without letting unanswered notifications block new requests.
@@ -1667,6 +1670,35 @@ mod tests {
             1
         );
         assert_eq!(fixture.state().pending_digests, []);
+    }
+
+    #[test]
+    fn batch_notification_cut_short_by_a_stop_is_shown_once_after_the_restart() {
+        let fixture = Fixture::batched();
+        fixture.save_queued(&[(1, 10)]);
+        fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
+        let now = || tokyo("2026-11-18T11:30:00");
+        let setup = Setup {
+            now: Some(&now),
+            ..Setup::default()
+        };
+        fixture.answer_with("osascript", |call| {
+            call.stop.request();
+            Err("stopped before osascript started".to_owned())
+        });
+
+        fixture.with_daemon(&setup, |daemon, _| daemon.batch_once());
+        let kept = fixture.state().pending_digests.len();
+        fixture.overrides.lock().expect("drop the stop").clear();
+        fixture.with_daemon(&setup, |daemon, _| {
+            daemon.batch_once();
+            daemon.batch_once();
+        });
+
+        assert_eq!(kept, 1);
+        assert_eq!(fixture.count_calls("#1 PR 1 pr-wake レビュー 1件"), 2);
+        assert_eq!(fixture.state().pending_digests, []);
+        assert_eq!(fixture.opened().len(), 1, "launched once");
     }
 
     #[test]

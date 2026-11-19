@@ -1536,10 +1536,13 @@ mod tests {
             let fixture = legacy_fixture();
 
             fixture.cycle();
+            let first = fixture.sent().len();
             fixture.later(2);
             fixture.cycle();
             fixture.later(2);
             fixture.cycle();
+
+            assert_eq!(first, 2);
 
             let sent = fixture
                 .sent()
