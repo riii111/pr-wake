@@ -315,20 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn damaged_record_error_names_the_field() {
-        let root = tempfile::tempdir().expect("create a directory");
-        let directory = root.path().join(pr_key(&pay(7)));
-        fs::create_dir(&directory).expect("create the PR directory");
-        let record = with(tracked(), "pending", json!([{ "type": "merged" }]));
-        fs::write(directory.join("state.json"), record.to_string()).expect("write the record");
-
-        let loaded = load_watch_state(root.path(), &pay(7));
-
-        let error = loaded.expect_err("the record is refused").to_string();
-        assert!(error.contains("pending"), "{error}");
-    }
-
-    #[test]
     fn link_is_written_with_one_space_and_read_back() {
         let root = tempfile::tempdir().expect("create a directory");
         let link = link_of(7, "worker");

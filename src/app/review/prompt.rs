@@ -137,39 +137,27 @@ mod tests {
             base_ref: "main".to_owned(),
         };
 
-        let rendered = prompt.render(&PromptData {
-            pr: &pr,
-            requester: Some("tanaka"),
-            skill: "code-review",
-            skill_path: Path::new("/c/SKILL.md"),
-        });
+        for (name, requester, expected) in [
+            (
+                "requester",
+                Some("tanaka"),
+                "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main @tanaka }} done",
+            ),
+            (
+                "unknown_requester",
+                None,
+                "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main @ }} done",
+            ),
+        ] {
+            let rendered = prompt.render(&PromptData {
+                pr: &pr,
+                requester,
+                skill: "code-review",
+                skill_path: Path::new("/c/SKILL.md"),
+            });
 
-        assert_eq!(
-            rendered,
-            "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main @tanaka }} done"
-        );
-    }
-
-    #[test]
-    fn unknown_requester_is_left_empty() {
-        let prompt = Prompt::parse("by {{.Requester}}.").expect("a valid prompt");
-        let pr = PullRequest {
-            repo: "acme/app".to_owned(),
-            number: 1,
-            title: String::new(),
-            url: String::new(),
-            head_sha: String::new(),
-            base_ref: String::new(),
-        };
-
-        let rendered = prompt.render(&PromptData {
-            pr: &pr,
-            requester: None,
-            skill: "s",
-            skill_path: Path::new("/s"),
-        });
-
-        assert_eq!(rendered, "by .");
+            assert_eq!(rendered, expected, "case: {name}");
+        }
     }
 
     #[test]

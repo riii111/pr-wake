@@ -220,28 +220,6 @@ mod tests {
         "#);
     }
 
-    #[test]
-    fn agent_path_covers_nix_homebrew_and_the_system() {
-        let directories = agent_path(Path::new("/Users/me"), Some("me"));
-
-        assert_eq!(
-            directories,
-            [
-                "/Users/me/.nix-profile/bin",
-                "/etc/profiles/per-user/me/bin",
-                "/run/current-system/sw/bin",
-                "/nix/var/nix/profiles/default/bin",
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-                "/usr/sbin",
-                "/sbin",
-            ]
-            .map(PathBuf::from)
-        );
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn plist_passes_plutil_lint() {

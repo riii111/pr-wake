@@ -35,10 +35,6 @@ pub(crate) fn request_line(
     if Instant::now() >= deadline {
         return Err(timed_out());
     }
-    // An empty line is a probe the bridge never answers, so the connection alone proves the bridge is alive.
-    if line.is_empty() {
-        return Ok(String::new());
-    }
     exchange(stream, line, deadline, stop)
 }
 

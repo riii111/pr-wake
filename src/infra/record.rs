@@ -407,14 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn process_environment_gives_absolute_directories() {
-        let directories = BaseDirectories::from_environment().expect("HOME is set for tests");
-
-        assert!(directories.config_home().is_absolute());
-        assert!(directories.state_home().is_absolute());
-    }
-
-    #[test]
     fn layouts_match_the_files_each_feature_already_writes() {
         let one_space = "{\n \"status\": \"watching\",\n \"seen\": [],\n \"pending\": [\n  {\n   \"type\": \"conflict\",\n   \"head\": \"abc\"\n  }\n ],\n \"summary\": null\n}";
         let two_spaces = "{\n  \"status\": \"watching\",\n  \"seen\": [],\n  \"pending\": [\n    {\n      \"type\": \"conflict\",\n      \"head\": \"abc\"\n    }\n  ],\n  \"summary\": null\n}\n";

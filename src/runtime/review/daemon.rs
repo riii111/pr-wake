@@ -201,7 +201,6 @@ impl<'deps> Daemon<'deps> {
         Ok(())
     }
 
-    // The owner reads about the requests in the batch's notification, so GitHub's own notifications of them are cleared.
     fn clear_inbox(&self, github: &GhRest<'_>) {
         let tracked = self.lock_state().tracked_prs((self.deps.now)());
         if tracked.is_empty() {
@@ -316,7 +315,6 @@ impl<'deps> Daemon<'deps> {
         ));
     }
 
-    // Started whatever the reviewers, as the owner asked for this PR.
     fn start_now(&self, pr: &str) {
         let (repo, number) = match parse_pr_ref(pr) {
             Ok(pr) => pr,
@@ -393,7 +391,6 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    // A lookup that fails starts the review, so no request is dropped for it.
     fn plan(&self, request: &Request, login: &str) -> Plan {
         let found = &request.found;
         match github(self.deps.tools, self.deps.stop)
@@ -889,7 +886,6 @@ mod tests {
         creation: Mutex<Created>,
         // Each prompt a new chat was started with, after the head its worktree starts at.
         started: Mutex<Vec<(String, String)>>,
-        // The unread GitHub notifications, as GitHub answers them.
         inbox: Mutex<String>,
     }
 
@@ -1731,7 +1727,6 @@ mod tests {
         let fixture = Fixture::batched();
         fixture.save_queued(&[(1, 10)]);
         fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
-        // The Mac slept through the 10:50 start.
         let now = || tokyo("2026-11-18T13:00:00");
         let setup = Setup {
             now: Some(&now),
@@ -1823,13 +1818,18 @@ mod tests {
                 &[
                     "gh api -X DELETE notifications/threads/1/subscription",
                     "gh api -X DELETE notifications/threads/1",
+                    "gh api -X DELETE notifications/threads/5/subscription",
+                    "gh api -X DELETE notifications/threads/5",
                 ][..],
             ),
             (
                 "failing_unsubscribe",
                 true,
                 true,
-                &["gh api -X DELETE notifications/threads/1/subscription"][..],
+                &[
+                    "gh api -X DELETE notifications/threads/1/subscription",
+                    "gh api -X DELETE notifications/threads/5/subscription",
+                ][..],
             ),
             ("without_batches", false, false, &[][..]),
         ] {
@@ -1840,20 +1840,23 @@ mod tests {
             };
             fixture.save_queued(&[(12, 30)]);
             fixture.request("acme/app", 12, &[requested(30, "sato")]);
-            let thread = |id: u64, reason: &str, number: u64| {
+            let thread = |id: u64, reason: &str, kind: &str, path: &str| {
                 json!({
                     "id": id.to_string(),
                     "reason": reason,
                     "subject": {
-                        "type": "PullRequest",
-                        "url": format!("https://api.github.com/repos/acme/app/pulls/{number}"),
+                        "type": kind,
+                        "url": format!("https://api.github.com/repos/{path}"),
                     },
                 })
             };
             *fixture.inbox.lock().expect("set the inbox") = json!([
-                thread(1, "review_requested", 12),
-                thread(2, "mention", 12),
-                thread(3, "review_requested", 13),
+                thread(1, "review_requested", "PullRequest", "acme/app/pulls/12"),
+                thread(2, "mention", "PullRequest", "acme/app/pulls/12"),
+                thread(3, "review_requested", "PullRequest", "acme/app/pulls/13"),
+                thread(4, "team_mention", "PullRequest", "acme/app/pulls/12"),
+                thread(5, "comment", "PullRequest", "Acme/App/pulls/12"),
+                thread(6, "subscribed", "Issue", "acme/app/issues/12"),
             ])
             .to_string();
             if failing_unsubscribe {
@@ -1908,7 +1911,6 @@ mod tests {
             }
         }
 
-        // Batches at 11:00 and 16:00 in Tokyo, each started ten minutes before.
         fn batched() -> Self {
             let mut fixture = Self::new();
             fixture.config.batches = Some(Batches {
@@ -2123,7 +2125,6 @@ mod tests {
                 .push((prefix, Arc::new(answer)));
         }
 
-        // A state that has polled once and holds queued requests of acme/app, each a PR number and its event.
         fn save_queued(&self, requests: &[(u64, u64)]) {
             let now = Timestamp::now();
             let mut state = ReviewState::default();

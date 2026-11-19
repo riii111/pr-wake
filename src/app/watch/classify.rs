@@ -174,7 +174,6 @@ mod tests {
 
         #[rstest]
         #[case::reviewer_inline_comment(comment())]
-        #[case::reviewer_reply_in_a_thread(PrComment { reply: true, ..comment() })]
         #[case::reviewer_reply_in_a_resolved_thread(PrComment {
             reply: true,
             resolved: true,

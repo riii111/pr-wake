@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_socket_is_not_sent() {
+    fn missing_socket_is_not_sent_and_refuses_the_check() {
         let directory = tempfile::tempdir().expect("create a directory");
         let bridge = Bridge::new(
             Ok(directory.path().join("missing.sock")),
@@ -367,6 +367,7 @@ mod tests {
         );
 
         let answer = bridge.call("caller", "send_message_to_thread", &Map::new());
+        let checked = bridge.check_v1();
 
         assert_eq!(answer["outcome"], "not_sent");
         assert!(
@@ -374,6 +375,12 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("ENOENT; no bridge has opened the socket")),
             "{answer:?}"
+        );
+        assert!(
+            checked
+                .as_ref()
+                .is_err_and(|error| error.contains("cannot use the harnexus call socket")),
+            "{checked:?}"
         );
     }
 
@@ -429,25 +436,6 @@ mod tests {
 
         assert!(
             checked.as_ref().is_err_and(|error| error.contains(says)),
-            "{checked:?}"
-        );
-    }
-
-    #[test]
-    fn check_v1_refuses_when_the_bridge_cannot_be_asked() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let bridge = Bridge::new(
-            Ok(directory.path().join("missing.sock")),
-            QUICK,
-            StopRequest::default(),
-        );
-
-        let checked = bridge.check_v1();
-
-        assert!(
-            checked
-                .as_ref()
-                .is_err_and(|error| error.contains("cannot use the harnexus call socket")),
             "{checked:?}"
         );
     }

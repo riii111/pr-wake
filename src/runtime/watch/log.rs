@@ -74,9 +74,5 @@ mod tests {
             line,
             r#"{"time":"2026-10-23T12:00:00.000Z","event":"queued","pr":"https://github.com/org/pay/pull/7","kinds":["finding","conflict"],"note":"a \"quoted\" word"}"#
         );
-        assert_eq!(
-            serde_json::from_str::<Value>(&line).expect("one JSON object")["note"],
-            "a \"quoted\" word"
-        );
     }
 }

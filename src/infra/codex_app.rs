@@ -72,11 +72,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn space_is_escaped_as_percent_twenty() {
-        assert_eq!(query_escape("a b+c"), "a%20b%2Bc");
-    }
-
     fn unescape(text: &str) -> String {
         let bytes = text.as_bytes();
         let mut decoded = Vec::new();

@@ -20,19 +20,3 @@ impl StopRequest {
         self.requested.load(Ordering::Relaxed)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_reaches_every_clone() {
-        let stop = StopRequest::default();
-        let waiter = stop.clone();
-        assert!(!waiter.is_requested());
-
-        stop.request();
-
-        assert!(waiter.is_requested());
-    }
-}

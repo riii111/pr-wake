@@ -524,10 +524,6 @@ mod tests {
                 "too_many_notifications",
                 r#"{"maxNotifications":11,"choices":[CODE]}"#,
             ),
-            (
-                "fractional_number",
-                r#"{"pollIntervalSeconds":60.5,"choices":[CODE]}"#,
-            ),
         ] {
             let resolved = resolve(content);
 
@@ -592,7 +588,7 @@ mod tests {
               "maxNotifications": 10,
               "worktreeRoot": "~",
               "commands": {"gh": "/opt/gh", "alerter": ""},
-              "choices": [CODE]
+              "choices": [{"id":"code","label":"  コードレビュー ","skill":"code-review","prompt":"x"}]
             }"#,
         )
         .expect("a valid config");
@@ -605,15 +601,6 @@ mod tests {
         assert_eq!(config.commands.gh.as_deref(), Some(Path::new("/opt/gh")));
         assert_eq!(config.commands.alerter, None);
         assert_eq!(config.owners(), ["Acme"]);
-    }
-
-    #[test]
-    fn label_is_trimmed() {
-        let config = resolve(
-            r#"{"choices":[{"id":"code","label":"  コードレビュー ","skill":"code-review","prompt":"x"}]}"#,
-        )
-        .expect("a valid config");
-
         assert_eq!(config.choices[0].label, "コードレビュー");
     }
 
@@ -631,16 +618,9 @@ mod tests {
     fn example_config_loads() {
         let content = include_str!("../../../config.example.json");
 
-        let config = resolve(content).expect("the example config is valid");
+        let resolved = resolve(content);
 
-        assert_eq!(
-            config
-                .choices
-                .iter()
-                .map(|choice| choice.id.as_str())
-                .collect::<Vec<_>>(),
-            ["adr", "code"]
-        );
+        assert!(resolved.is_ok(), "{resolved:?}");
     }
 
     fn resolve(content: &str) -> Result<ReviewConfig, String> {

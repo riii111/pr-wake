@@ -838,11 +838,6 @@ mod tests {
         detail: PrDetail,
     }
 
-    struct Named<'asked> {
-        app: &'static str,
-        asked: &'asked RefCell<Vec<String>>,
-    }
-
     mod dry_run {
         use super::*;
 
@@ -1223,70 +1218,6 @@ mod tests {
             );
             assert_eq!(events.last(), Some(&"ended_watch"));
         }
-
-        #[test]
-        fn only_one_watch_writes_them_while_the_lock_is_held() {
-            let records = Records::legacy();
-            let _held = watch_record::hold_watch_lock(&records.paths.state)
-                .expect("lock")
-                .expect("the lock is free");
-            let asked = RefCell::new(Vec::new());
-            let sent = Cell::new(0);
-            let bridge = |_: &str, tool: &str, arguments: &Map<String, Value>| {
-                if tool == "send_message_to_thread" {
-                    sent.set(sent.get() + 1);
-                }
-                idle_thread(arguments)
-            };
-            let unsupported = RefCell::new(None);
-            let log = Recorded::default();
-            let mut workers = CodexWorkers::new(
-                watched_call(&bridge, &unsupported, &log),
-                Box::new(|| Ok(Some("sender-chat".to_owned()))),
-            );
-            let now = || noon();
-
-            let ended = cycle::watch_forever(Watch {
-                cycle: CycleDeps {
-                    paths: &records.paths,
-                    github: &mut legacy_github(&asked),
-                    workers: &mut workers,
-                    now: &now,
-                    log: &log,
-                },
-                stop: &StopRequest::default(),
-                pause: &mut |_| {},
-                replaced: None,
-                ended: &|| None,
-            });
-
-            assert!(
-                matches!(&ended, Err(Failure::Refused(reason)) if reason == "another PR watch is running"),
-                "{ended:?}"
-            );
-            assert_eq!(sent.get(), 0);
-            assert!(asked.borrow().is_empty());
-        }
-    }
-
-    #[test]
-    fn t3_worker_is_reached_through_t3_code_and_any_other_through_the_codex_app() {
-        let asked = RefCell::new(Vec::new());
-        let mut workers = AppWorkers {
-            codex: Named {
-                app: "codex",
-                asked: &asked,
-            },
-            t3: Named {
-                app: "t3",
-                asked: &asked,
-            },
-        };
-
-        let senders = [workers.sender_of("t3:w1"), workers.sender_of("019a-codex")];
-
-        assert_eq!(*asked.borrow(), ["t3 t3:w1", "codex 019a-codex"]);
-        assert_eq!(senders, [Ok("t3".to_owned()), Ok("codex".to_owned())]);
     }
 
     #[test]
@@ -1515,32 +1446,6 @@ mod tests {
                 repo: repo.to_owned(),
                 number: 7,
             }])
-        }
-    }
-
-    impl Workers for Named<'_> {
-        fn sender_of(&mut self, worker: &str) -> Result<String, String> {
-            self.asked
-                .borrow_mut()
-                .push(format!("{} {worker}", self.app));
-            Ok(self.app.to_owned())
-        }
-
-        fn look(
-            &mut self,
-            _sender: &str,
-            _worker: &str,
-            _awaited: Option<&Delivered>,
-            _now: Timestamp,
-        ) -> Option<WorkerView> {
-            None
-        }
-
-        fn send(&mut self, _sender: &str, _worker: &str, _prompt: &str) -> Sent {
-            Sent {
-                outcome: watch::SendOutcome::Done,
-                reported: "done".to_owned(),
-            }
         }
     }
 

@@ -943,7 +943,7 @@ mod tests {
         }
 
         #[test]
-        fn failed_first_read_of_the_detail_is_tried_again_next_cycle() {
+        fn failed_first_read_of_the_detail_is_logged_by_its_kind_and_tried_again_next_cycle() {
             let fixture = Fixture::new(json!({}), Read::First, "worker");
             fixture.update(|world| {
                 world.comments = vec![comment()];
@@ -952,6 +952,15 @@ mod tests {
             fixture.cycle();
 
             assert_eq!(fixture.state().summary, None);
+            let failed = fixture.logged("detail_failed");
+            assert_eq!(failed.len(), 1);
+            assert!(
+                failed[0]
+                    .fields
+                    .contains(&("error", json!("GithubUnreachable")))
+            );
+            let logs = format!("{:?}", fixture.logs.0.borrow());
+            assert!(!logs.contains("GitHub is down"), "{logs}");
 
             fixture.update(|world| world.detail_fails = false);
             fixture.later(1);
@@ -965,24 +974,6 @@ mod tests {
 
     mod polling {
         use super::*;
-
-        #[test]
-        fn failed_read_of_the_detail_is_logged_by_its_kind_without_its_message() {
-            let fixture = Fixture::new(json!({}), Read::First, "worker");
-            fixture.update(|world| world.detail_fails = true);
-
-            fixture.cycle();
-
-            let failed = fixture.logged("detail_failed");
-            assert_eq!(failed.len(), 1);
-            assert!(
-                failed[0]
-                    .fields
-                    .contains(&("error", json!("GithubUnreachable")))
-            );
-            let logs = format!("{:?}", fixture.logs.0.borrow());
-            assert!(!logs.contains("GitHub is down"), "{logs}");
-        }
 
         #[test]
         fn draft_is_paused_without_reading_its_detail_and_resumed_when_ready() {
@@ -1541,9 +1532,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn first_cycle_hands_a_pr_over_and_sends_what_each_record_still_held() {
+        fn records_are_handed_over_sent_once_and_a_halted_pr_stays_halted() {
             let fixture = legacy_fixture();
 
+            fixture.cycle();
+            fixture.later(2);
+            fixture.cycle();
+            fixture.later(2);
             fixture.cycle();
 
             let sent = fixture
@@ -1572,29 +1567,6 @@ mod tests {
                     .all(|field| handed[0].fields.contains(field)),
                 "{handed:?}"
             );
-        }
-
-        #[test]
-        fn restarted_watch_sends_nothing_twice() {
-            let fixture = legacy_fixture();
-            fixture.cycle();
-            let first = fixture.sent().len();
-
-            fixture.later(2);
-            fixture.cycle();
-            fixture.later(2);
-            fixture.cycle();
-
-            assert_eq!((first, fixture.sent().len()), (2, 2));
-        }
-
-        #[test]
-        fn halted_pr_stays_halted_and_gets_nothing() {
-            let fixture = legacy_fixture();
-
-            fixture.cycle();
-
-            assert!(fixture.sent().iter().all(|sent| sent.thread != "w10"));
             let halted = watch_record::load_watch_state(&fixture.paths.state, &numbered(10))
                 .expect("load PR 10");
             assert_eq!(halted.status, WatchStatus::Halted);
@@ -1675,6 +1647,8 @@ mod tests {
                 "{ended:?}"
             );
             assert!(fixture.sent().is_empty());
+            let calls = fixture.calls.borrow();
+            assert_eq!((calls.summaries, calls.details), (0, 0));
         }
 
         #[test]

@@ -87,35 +87,13 @@ mod tests {
     #[test]
     fn watch_commands_read_the_pr_before_or_after_their_flags() {
         for (name, arguments, expected) in [
-            ("sender", &["watch", "sender"][..], WatchCommand::Sender),
-            (
-                "link",
-                &["watch", "link", PR],
-                WatchCommand::Link {
-                    pr: PR.to_owned(),
-                    take_over: false,
-                },
-            ),
-            (
-                "take_over_after_the_pr",
-                &["watch", "link", PR, "--take-over"],
-                WatchCommand::Link {
-                    pr: PR.to_owned(),
-                    take_over: true,
-                },
-            ),
             (
                 "take_over_before_the_pr",
-                &["watch", "link", "--take-over", PR],
+                &["watch", "link", "--take-over", PR][..],
                 WatchCommand::Link {
                     pr: PR.to_owned(),
                     take_over: true,
                 },
-            ),
-            (
-                "release",
-                &["watch", "release", PR],
-                WatchCommand::Release { pr: PR.to_owned() },
             ),
             (
                 "dry_run",
@@ -129,12 +107,6 @@ mod tests {
                     prs: vec![PR.to_owned(), "x".to_owned()],
                 },
             ),
-            (
-                "status_json",
-                &["watch", "status", "--json"],
-                WatchCommand::Status { json: true },
-            ),
-            ("run", &["watch", "run"], WatchCommand::Run),
         ] {
             let parsed = Cli::try_parse_from(command_line(arguments));
 

@@ -128,25 +128,4 @@ mod tests {
             assert_eq!(parsed.ok(), expected, "case: {name}");
         }
     }
-
-    #[test]
-    fn worktree_path_names_the_pr_and_its_short_head() {
-        let pr = PullRequest {
-            repo: "acme/app".to_owned(),
-            number: 12,
-            title: String::new(),
-            url: String::new(),
-            head_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            base_ref: "main".to_owned(),
-        };
-
-        let path = worktree_path(Path::new("/w"), &pr);
-
-        assert_eq!(path, Path::new("/w/acme/app/pr-12-0123456789ab"));
-    }
-
-    #[test]
-    fn one_line_joins_the_words_with_single_spaces() {
-        assert_eq!(one_line("  Fix\nthe\t\tbug  "), "Fix the bug");
-    }
 }

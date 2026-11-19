@@ -584,32 +584,19 @@ mod tests {
     }
 
     #[test]
-    fn state_status_tells_over_and_finished_apart() {
-        for (status, over, finished) in [
-            (WatchStatus::Watching, false, false),
-            (WatchStatus::Draft, false, false),
-            (WatchStatus::Ended, true, true),
-            (WatchStatus::Stopped, false, true),
-            (WatchStatus::Halted, false, true),
+    fn state_status_tells_over_finished_and_holding_the_chat_apart() {
+        for (status, over, finished, holds_chat) in [
+            (WatchStatus::Watching, false, false, true),
+            (WatchStatus::Draft, false, false, true),
+            (WatchStatus::Ended, true, true, false),
+            (WatchStatus::Stopped, false, true, false),
+            (WatchStatus::Halted, false, true, true),
         ] {
             assert_eq!(
-                (status.is_over(), status.is_finished()),
-                (over, finished),
+                (status.is_over(), status.is_finished(), status.holds_chat()),
+                (over, finished, holds_chat),
                 "case: {status:?}"
             );
-        }
-    }
-
-    #[test]
-    fn only_a_stopped_or_ended_watch_lets_its_chat_go() {
-        for (status, holds) in [
-            (WatchStatus::Watching, true),
-            (WatchStatus::Draft, true),
-            (WatchStatus::Halted, true),
-            (WatchStatus::Stopped, false),
-            (WatchStatus::Ended, false),
-        ] {
-            assert_eq!(status.holds_chat(), holds, "case: {status:?}");
         }
     }
 
