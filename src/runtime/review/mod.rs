@@ -17,6 +17,7 @@ use crate::{
     app::{
         review::{
             self, PullRequest,
+            batch::NowRequest,
             config::{Choice, ConfiguredCommands, ReviewConfig},
             notice::{Notice, Selection, Size},
             one_line,
@@ -164,12 +165,14 @@ pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
         .as_ref()
         .map(|program| move || program.is_replaced());
     let wait = |duration| pause(&stop, duration);
+    let zone = TimeZone::system();
     let ended = Daemon::new(
         DaemonDeps {
             tools: &tools,
             paths: &env.paths,
             log: &log_line,
             now: &Timestamp::now,
+            zone: &zone,
             pause: &wait,
             stop: &stop,
             replaced: replaced
@@ -385,6 +388,33 @@ pub(crate) fn link(
     Ok(format!(
         "linked {repo}#{number} to chat {thread}; its re-requests are sent here"
     ))
+}
+
+// The running review holds the state's lock, so the request goes to it through a file of its own.
+pub(crate) fn request_now(
+    env: &ReviewEnv,
+    pr: Option<&str>,
+    at: Timestamp,
+) -> Result<String, String> {
+    let config = review_record::read_config(&env.paths.config, &env.home, &env.codex_home)?;
+    if config.batches.is_none() {
+        return Err(format!(
+            "pr-wake review now needs batches in {}",
+            env.paths.config.display()
+        ));
+    }
+    let pr = pr.map(|pr| startable_pr(&env.paths, pr)).transpose()?;
+    review_record::request_now(&env.paths, &NowRequest { pr: pr.clone() }, at)
+        .map_err(|error| error.to_string())?;
+    Ok(pr.map_or_else(
+        || "handed the queued requests to the running review".to_owned(),
+        |pr| format!("handed {pr} to the running review"),
+    ))
+}
+
+pub(crate) fn request_now_from_terminal(env: &ReviewEnv, pr: Option<&str>) -> Result<(), String> {
+    print_line(&request_now(env, pr, Timestamp::now())?);
+    Ok(())
 }
 
 pub(crate) fn link_from_chat(env: &ReviewEnv, pr: &str) -> Result<(), String> {
@@ -687,6 +717,20 @@ fn link_started(tools: &Tools<'_>, pr: &PullRequest, thread: &str) -> Result<(),
     })
 }
 
+// Checked here, as the running review could only log a PR it has no request for.
+fn startable_pr(paths: &ReviewPaths, pr: &str) -> Result<String, String> {
+    let (repo, number) = review::parse_pr_ref(pr)?;
+    let state = review_record::load_state(paths)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    if state.startable(&repo, number).is_none() {
+        return Err(format!(
+            "{repo}#{number} has no queued or reported review request"
+        ));
+    }
+    Ok(format!("{repo}#{number}"))
+}
+
 fn is_own_pull_request(github: &GhRest<'_>, repo: &str, number: u64) -> Result<bool, String> {
     let login = github.current_login()?;
     let author = github.pull_request_author(repo, number)?;
@@ -931,7 +975,7 @@ mod tests {
         let at = |text: &str| text.parse::<Timestamp>().expect("parse the time");
         state.apply_poll(vec![found(1)], at("2026-11-12T00:00:00Z"), true);
         state.apply_poll(
-            vec![found(1), found(2), found(3)],
+            vec![found(1), found(2), found(3), found(4)],
             at("2026-11-12T01:00:00Z"),
             false,
         );
@@ -942,6 +986,11 @@ mod tests {
         let failed = state.requests.get_mut("acme/app#3@3").expect("request");
         failed.status = Status::Failed;
         failed.error = Some("no checkout".to_owned());
+        state
+            .requests
+            .get_mut("acme/app#4@4")
+            .expect("request")
+            .status = Status::Reported;
         state.login = Some("me".to_owned());
         state.last_poll = Some(at("2026-11-12T02:31:05Z"));
 
@@ -949,7 +998,7 @@ mod tests {
 
         assert_eq!(
             text,
-            "login: me\nlast poll: 2026-11-12 11:31:05\n11-12 11:30  launched  acme/app#2 PR 2  [code]\n11-12 10:00  failed    acme/app#3 PR 3  error: no checkout\n"
+            "login: me\nlast poll: 2026-11-12 11:31:05\n11-12 11:30  launched  acme/app#2 PR 2  [code]\n11-12 10:00  failed    acme/app#3 PR 3  error: no checkout\n11-12 10:00  reported  acme/app#4 PR 4\n"
         );
     }
 
@@ -1259,6 +1308,72 @@ mod tests {
     }
 
     #[test]
+    fn review_now_is_handed_over_only_with_batches_and_a_request_to_start() {
+        for (name, batches, pr, expected) in [
+            (
+                "without_batches",
+                false,
+                None,
+                Err("pr-wake review now needs batches"),
+            ),
+            (
+                "queued_requests",
+                true,
+                None,
+                Ok(("handed the queued requests to the running review", None)),
+            ),
+            (
+                "queued_pr",
+                true,
+                Some("https://github.com/acme/app/pull/3"),
+                Ok((
+                    "handed acme/app#3 to the running review",
+                    Some("acme/app#3"),
+                )),
+            ),
+            (
+                "pr_without_a_request",
+                true,
+                Some("acme/app#4"),
+                Err("acme/app#4 has no queued or reported review request"),
+            ),
+        ] {
+            let home = ReviewHome::new();
+            if batches {
+                home.add_batches();
+            }
+            let mut state = ReviewState::default();
+            state.apply_poll(vec![found(3)], Timestamp::UNIX_EPOCH, false);
+            review_record::save_state(&home.env.paths, &state).expect("save the state");
+
+            let handed = request_now(&home.env, pr, Timestamp::UNIX_EPOCH);
+
+            let taken = review_record::take_now_requests(&home.env.paths)
+                .expect("take the requests")
+                .into_iter()
+                .map(|request| request.map_err(|error| error.to_string()))
+                .collect::<Vec<_>>();
+            match expected {
+                Ok((line, pr)) => {
+                    assert_eq!(handed.as_deref(), Ok(line), "case: {name}");
+                    assert_eq!(
+                        taken,
+                        [Ok(NowRequest {
+                            pr: pr.map(str::to_owned)
+                        })],
+                        "case: {name}"
+                    );
+                }
+                Err(text) => {
+                    let error = handed.expect_err(name);
+                    assert!(error.contains(text), "case: {name}: {error}");
+                    assert_eq!(taken, [], "case: {name}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn send_without_a_sender_or_a_bridge_is_not_sent() {
         for (name, sender, expected) in [
             ("no_sender", None, "no chat is registered to send from"),
@@ -1403,6 +1518,15 @@ mod tests {
                 _ => return Err(format!("unexpected command: {line}")),
             };
             Ok(answer.into_bytes())
+        }
+
+        fn add_batches(&self) {
+            let path = &self.env.paths.config;
+            let mut config =
+                serde_json::from_slice::<Value>(&fs::read(path).expect("read the config"))
+                    .expect("a JSON config");
+            config["batches"] = serde_json::json!({"readyAt": ["11:00", "16:00"]});
+            fs::write(path, config.to_string()).expect("write the config");
         }
 
         fn decline(&self) {

@@ -18,6 +18,13 @@ pub(crate) struct ReviewState {
     pub(crate) last_poll: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_error: Option<String>,
+    // The start of the latest scheduled batch, so a restart in the same slot does not run it again.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_stamp"
+    )]
+    pub(crate) last_batch: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +86,7 @@ pub(crate) enum Status {
     Launching,
     Launched,
     Failed,
+    Reported,
 }
 
 // Only version 1 exists, so any other is refused rather than read as it.
@@ -87,6 +95,8 @@ struct Version;
 
 // A late search result must not notify a finished request again, so it outlives the search by this long.
 const RETENTION: SignedDuration = SignedDuration::from_hours(90 * 24);
+// Notifications of a PR reviewed weeks ago are rare, so only recent PRs are tracked.
+const TRACKED: SignedDuration = SignedDuration::from_hours(30 * 24);
 
 const INTERRUPTED_LAUNCH: &str =
     "interrupted while launching; check the Codex App before starting it again";
@@ -197,6 +207,32 @@ impl ReviewState {
             .count()
     }
 
+    #[must_use]
+    pub(crate) fn startable(&self, repo: &str, number: u64) -> Option<&Request> {
+        let pr = pr_key(repo, number);
+        self.requests
+            .values()
+            .filter(|request| {
+                matches!(request.status, Status::Queued | Status::Reported)
+                    && pr_key(&request.found.repo, request.found.number) == pr
+            })
+            .max_by(|left, right| {
+                (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
+            })
+    }
+
+    #[must_use]
+    pub(crate) fn tracked_prs(&self, now: Timestamp) -> HashSet<String> {
+        self.requests
+            .values()
+            .filter(|request| {
+                request.status != Status::Baseline
+                    && now.duration_since(request.updated_at) <= TRACKED
+            })
+            .map(|request| pr_key(&request.found.repo, request.found.number))
+            .collect()
+    }
+
     // Retries interrupted notifications, but never a launch that may already have opened a chat.
     pub(crate) fn recover(&mut self, now: Timestamp) {
         for request in self.requests.values_mut() {
@@ -231,6 +267,7 @@ impl Status {
             Self::Launching => "launching",
             Self::Launched => "launched",
             Self::Failed => "failed",
+            Self::Reported => "reported",
         }
     }
 }
@@ -270,6 +307,28 @@ mod stamp {
         String::deserialize(deserializer)?
             .parse()
             .map_err(D::Error::custom)
+    }
+}
+
+mod optional_stamp {
+    use jiff::Timestamp;
+    use serde::{Deserializer, Serializer};
+
+    #[expect(clippy::ref_option, reason = "serde passes the field by reference")]
+    pub(super) fn serialize<S: Serializer>(
+        at: &Option<Timestamp>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match at {
+            Some(at) => super::stamp::serialize(at, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Timestamp>, D::Error> {
+        super::stamp::deserialize(deserializer).map(Some)
     }
 }
 
@@ -460,6 +519,66 @@ mod tests {
         assert_eq!(launch.updated_at, at("2026-11-12T03:05:00Z"));
     }
 
+    #[test]
+    fn startable_is_the_latest_queued_or_reported_request_of_the_pr() {
+        for (name, statuses, expected) in [
+            (
+                "latest_reported",
+                [Status::Queued, Status::Reported],
+                Some("acme/app#1@11"),
+            ),
+            (
+                "earlier_queued",
+                [Status::Queued, Status::Launched],
+                Some("acme/app#1@10"),
+            ),
+            ("none_left", [Status::Launched, Status::Declined], None),
+        ] {
+            let mut state = ReviewState::default();
+            state.apply_poll(vec![found("acme/app", 1, 10)], at(NOW), false);
+            state.apply_poll(
+                vec![found("acme/app", 1, 10), found("acme/app", 1, 11)],
+                at("2026-11-12T04:00:00Z"),
+                false,
+            );
+            for (key, status) in ["acme/app#1@10", "acme/app#1@11"].into_iter().zip(statuses) {
+                state.requests.get_mut(key).expect("request").status = status;
+            }
+
+            let startable = state.startable("Acme/App", 1);
+
+            assert_eq!(
+                startable.map(|request| request.found.key.as_str()),
+                expected,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tracked_prs_are_the_requests_of_the_last_thirty_days_but_the_baseline() {
+        let mut state = ReviewState::default();
+        state.apply_poll(vec![found("acme/app", 1, 10)], at(NOW), true);
+        state.apply_poll(
+            vec![
+                found("acme/app", 1, 10),
+                found("Acme/App", 2, 20),
+                found("acme/app", 3, 30),
+            ],
+            at(NOW),
+            false,
+        );
+        state
+            .requests
+            .get_mut("acme/app#3@30")
+            .expect("request")
+            .updated_at = at("2026-10-12T02:59:59Z");
+
+        let tracked = state.tracked_prs(at(NOW));
+
+        assert_eq!(tracked, HashSet::from(["acme/app#2".to_owned()]));
+    }
+
     mod record {
         use super::*;
 
@@ -550,6 +669,7 @@ mod tests {
             let mut state = serde_json::from_str::<ReviewState>(GO_STATE).expect("read the state");
             state.last_poll = Some(at(NOW));
             state.last_error = Some("HTTP 403".to_owned());
+            state.last_batch = Some(at("2026-11-12T01:50:00Z"));
             // Written to the millisecond, as the TypeScript watch writes its times.
             state
                 .requests

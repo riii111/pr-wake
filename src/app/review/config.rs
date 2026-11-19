@@ -4,6 +4,7 @@ use std::{
     sync::LazyLock,
 };
 
+use jiff::{SignedDuration, civil::Time};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -26,6 +27,14 @@ pub(crate) struct ReviewConfig {
     pub(crate) max_notifications: usize,
     pub(crate) commands: ConfiguredCommands,
     pub(crate) choices: Vec<Choice>,
+    pub(crate) batches: Option<Batches>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Batches {
+    // Local times in order, each the time the owner reads the batch's notification.
+    pub(crate) ready_at: Vec<Time>,
+    pub(crate) lead: SignedDuration,
 }
 
 // Absolute paths that replace the lookup in the fixed directories.
@@ -68,6 +77,18 @@ pub(crate) struct ConfigFile {
     commands: CommandsFile,
     #[serde(default)]
     choices: Vec<ChoiceFile>,
+    #[serde(default)]
+    batches: Option<BatchesFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BatchesFile {
+    #[serde(default)]
+    ready_at: Vec<String>,
+    // Unlike the older numbers, 0 is a valid lead, so only a missing one takes the default.
+    #[serde(default)]
+    lead_minutes: Option<i64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -99,10 +120,13 @@ const DEFAULT_POLL_SECONDS: u64 = 30;
 const MIN_POLL_SECONDS: i64 = 30;
 const DEFAULT_NOTIFICATIONS: usize = 3;
 const MAX_NOTIFICATIONS: i64 = 10;
+const DEFAULT_LEAD_MINUTES: i64 = 10;
+const MINUTES_PER_DAY: i64 = 24 * 60;
 
 const CHOICE_ID_PATTERN: &str = "^[a-z0-9][a-z0-9-]*$";
 static CHOICE_ID: LazyLock<Regex> = LazyLock::new(|| pattern(CHOICE_ID_PATTERN));
 static SKILL_NAME: LazyLock<Regex> = LazyLock::new(|| pattern("^[A-Za-z0-9][A-Za-z0-9_-]*$"));
+static CLOCK_TIME: LazyLock<Regex> = LazyLock::new(|| pattern("^([01][0-9]|2[0-3]):([0-5][0-9])$"));
 
 impl ConfigFile {
     // Checking that each skill exists reads the disk, so it is left to the caller.
@@ -117,6 +141,7 @@ impl ConfigFile {
             repositories: checked_repositories(self.repositories, home)?,
             commands: self.commands.resolve()?,
             choices: checked_choices(self.choices, codex_home)?,
+            batches: self.batches.map(BatchesFile::resolve).transpose()?,
         })
     }
 }
@@ -176,6 +201,47 @@ impl CommandsFile {
             osascript: absolute("osascript", self.osascript)?,
         })
     }
+}
+
+impl BatchesFile {
+    fn resolve(self) -> Result<Batches, String> {
+        if self.ready_at.is_empty() {
+            return Err("batches.readyAt must have at least one time".to_owned());
+        }
+        let minutes = self.lead_minutes.unwrap_or(DEFAULT_LEAD_MINUTES);
+        if !(0..MINUTES_PER_DAY).contains(&minutes) {
+            return Err(format!(
+                "batches.leadMinutes must be between 0 and {}",
+                MINUTES_PER_DAY - 1
+            ));
+        }
+        let lead = SignedDuration::from_mins(minutes);
+
+        let mut ready_at = Vec::with_capacity(self.ready_at.len());
+        for (index, text) in self.ready_at.iter().enumerate() {
+            let time = clock_time(text)
+                .ok_or_else(|| format!("batches.readyAt[{index}] is not HH:MM: {text:?}"))?;
+            // A batch that would start the day before cannot be told apart from that day's batches.
+            if time.duration_since(Time::midnight()) < lead {
+                return Err(format!(
+                    "batches.leadMinutes puts readyAt[{index}] {text:?} before midnight"
+                ));
+            }
+            if ready_at.contains(&time) {
+                return Err(format!("batches.readyAt: duplicate time {text:?}"));
+            }
+            ready_at.push(time);
+        }
+        ready_at.sort();
+        Ok(Batches { ready_at, lead })
+    }
+}
+
+fn clock_time(text: &str) -> Option<Time> {
+    let captures = CLOCK_TIME.captures(text)?;
+    let hour = captures.get(1)?.as_str().parse().ok()?;
+    let minute = captures.get(2)?.as_str().parse().ok()?;
+    Time::new(hour, minute, 0, 0).ok()
 }
 
 fn notification_timeout(seconds: i64) -> Result<u64, String> {
@@ -367,6 +433,31 @@ mod tests {
             Path::new("/Users/me/.codex/skills/code-review/SKILL.md")
         );
         assert_eq!(config.commands, ConfiguredCommands::default());
+        assert_eq!(config.batches, None);
+    }
+
+    #[test]
+    fn batches_are_read_in_time_order_with_the_lead() {
+        for (name, batches, expected_lead) in [
+            ("default_lead", r#"{"readyAt":["16:00","11:00"]}"#, 10),
+            (
+                "explicit_lead",
+                r#"{"readyAt":["16:00","11:00"],"leadMinutes":0}"#,
+                0,
+            ),
+        ] {
+            let config = resolve(&format!(r#"{{"batches":{batches},"choices":[CODE]}}"#))
+                .expect("a valid config");
+
+            assert_eq!(
+                config.batches,
+                Some(Batches {
+                    ready_at: vec![Time::constant(11, 0, 0, 0), Time::constant(16, 0, 0, 0)],
+                    lead: SignedDuration::from_mins(expected_lead),
+                }),
+                "case: {name}"
+            );
+        }
     }
 
     #[test]
@@ -436,6 +527,52 @@ mod tests {
             (
                 "fractional_number",
                 r#"{"pollIntervalSeconds":60.5,"choices":[CODE]}"#,
+            ),
+        ] {
+            let resolved = resolve(content);
+
+            assert!(resolved.is_err(), "case: {name}: {resolved:?}");
+        }
+    }
+
+    #[test]
+    fn batches_that_would_misbehave_are_refused() {
+        for (name, content) in [
+            (
+                "no_batch_time",
+                r#"{"batches":{"readyAt":[]},"choices":[CODE]}"#,
+            ),
+            (
+                "batch_time_without_a_leading_zero",
+                r#"{"batches":{"readyAt":["9:00"]},"choices":[CODE]}"#,
+            ),
+            (
+                "batch_time_past_the_day",
+                r#"{"batches":{"readyAt":["24:00"]},"choices":[CODE]}"#,
+            ),
+            (
+                "batch_time_with_seconds",
+                r#"{"batches":{"readyAt":["11:00:00"]},"choices":[CODE]}"#,
+            ),
+            (
+                "duplicate_batch_time",
+                r#"{"batches":{"readyAt":["11:00","11:00"]},"choices":[CODE]}"#,
+            ),
+            (
+                "negative_lead",
+                r#"{"batches":{"readyAt":["11:00"],"leadMinutes":-1},"choices":[CODE]}"#,
+            ),
+            (
+                "overflowing_lead",
+                r#"{"batches":{"readyAt":["11:00"],"leadMinutes":9223372036854775807},"choices":[CODE]}"#,
+            ),
+            (
+                "lead_before_midnight",
+                r#"{"batches":{"readyAt":["00:05"]},"choices":[CODE]}"#,
+            ),
+            (
+                "unsupported_batch_key",
+                r#"{"batches":{"readyAt":["11:00"],"days":["mon"]},"choices":[CODE]}"#,
             ),
         ] {
             let resolved = resolve(content);

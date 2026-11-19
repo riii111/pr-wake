@@ -6,6 +6,10 @@
   "pollIntervalSeconds": 30,
   "notificationTimeoutSeconds": 1800,
   "maxNotifications": 3,
+  "batches": {
+    "readyAt": ["11:00", "16:00"],
+    "leadMinutes": 10
+  },
   "choices": [
     {
       "id": "adr",

@@ -1,4 +1,6 @@
+pub(crate) mod batch;
 pub(crate) mod config;
+pub(crate) mod inbox;
 pub(crate) mod notice;
 pub(crate) mod prompt;
 pub(crate) mod request;
