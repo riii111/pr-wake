@@ -145,18 +145,12 @@ impl ReviewConfig {
 
 impl Choice {
     #[must_use]
-    pub(crate) fn render(
-        &self,
-        pr: &PullRequest,
-        requester: Option<&str>,
-        worktree: &Path,
-    ) -> String {
+    pub(crate) fn render(&self, pr: &PullRequest, requester: Option<&str>) -> String {
         self.prompt.render(&PromptData {
             pr,
             requester,
             skill: &self.skill,
             skill_path: &self.skill_path,
-            worktree,
         })
     }
 }

@@ -6,6 +6,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use crate::{
     app::review::{
         PullRequest, is_repo_name,
+        notice::Size,
         request::{ReviewRequest, SearchHit},
     },
     infra::{
@@ -69,6 +70,13 @@ struct Pull {
     html_url: String,
     head: Head,
     base: Base,
+}
+
+#[derive(Deserialize)]
+struct PullSize {
+    additions: u64,
+    deletions: u64,
+    changed_files: u64,
 }
 
 #[derive(Deserialize)]
@@ -207,6 +215,17 @@ impl GhRest<'_> {
             url: pull.html_url,
             head_sha: pull.head.sha,
             base_ref: pull.base.name,
+        })
+    }
+
+    pub(crate) fn pull_request_size(&self, repo: &str, number: u64) -> Result<Size, String> {
+        let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
+        let pull = serde_json::from_slice::<PullSize>(&output)
+            .map_err(|error| format!("pull request {repo}#{number}: {error}"))?;
+        Ok(Size {
+            additions: pull.additions,
+            deletions: pull.deletions,
+            changed_files: pull.changed_files,
         })
     }
 

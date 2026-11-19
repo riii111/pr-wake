@@ -65,7 +65,7 @@ struct Delegation {
 
 // Outcomes the call socket reports for a request that never reached the app.
 // `unsupported` is the client's own outcome for a bridge it never wrote to.
-const NOT_SENT: [&str; 4] = ["not_sent", "rejected", "invalid", "unsupported"];
+pub(super) const NOT_SENT: [&str; 4] = ["not_sent", "rejected", "invalid", "unsupported"];
 
 // A runaway cursor stops here; the answer wait then gives up as for a lost turn.
 const MAX_PAGES: usize = 20;
@@ -253,7 +253,7 @@ fn page_of(answer: &Map<String, Value>) -> Lookup<Page> {
     })
 }
 
-fn result_text(answer: &Map<String, Value>) -> String {
+pub(super) fn result_text(answer: &Map<String, Value>) -> String {
     let content = answer
         .get("result")
         .and_then(Value::as_object)

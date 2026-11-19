@@ -14,9 +14,18 @@ pub(crate) struct Notice {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Size {
+    pub(crate) additions: u64,
+    pub(crate) deletions: u64,
+    pub(crate) changed_files: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Selection {
     // The index of the choice in the config.
     Chosen(usize),
+    // The notification body was clicked, which opens the PR.
+    Opened,
     Declined,
     TimedOut,
     Dismissed,
@@ -26,10 +35,11 @@ const TITLE: &str = "GitHub レビュー依頼";
 const DROPDOWN_LABEL: &str = "レビュー方法を選択";
 const DECLINE_LABEL: &str = "見送る";
 const UNKNOWN_REQUESTER: &str = "依頼者不明";
+const OPEN_HINT: &str = "クリックでPRを開く";
 
 impl Notice {
     #[must_use]
-    pub(crate) fn of(request: &Found, choices: &[Choice]) -> Self {
+    pub(crate) fn of(request: &Found, choices: &[Choice], size: Option<&Size>) -> Self {
         let requester = request.requester.as_ref().map_or_else(
             || UNKNOWN_REQUESTER.to_owned(),
             |login| format!("依頼者: @{login}"),
@@ -38,11 +48,20 @@ impl Notice {
             .team
             .as_ref()
             .map_or_default(|team| format!("（{team} 宛て）"));
+        let size = size.map_or_default(|size| {
+            format!(
+                "・+{} -{}（{}ファイル）",
+                size.additions, size.deletions, size.changed_files
+            )
+        });
         Self {
             key: request.key.clone(),
             title: TITLE,
             subtitle: one_line(&request.title),
-            message: format!("{requester}{team}\n{} #{}", request.repo, request.number),
+            message: format!(
+                "{requester}{team}\n{} #{}{size}\n{OPEN_HINT}",
+                request.repo, request.number
+            ),
             actions: choices.iter().map(|choice| choice.label.clone()).collect(),
             decline: DECLINE_LABEL,
             dropdown: (choices.len() > 1).then_some(DROPDOWN_LABEL),
@@ -55,6 +74,7 @@ impl Selection {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Chosen(_) => "chosen",
+            Self::Opened => "opened",
             Self::Declined => "declined",
             Self::TimedOut => "timeout",
             Self::Dismissed => "dismissed",
@@ -73,13 +93,22 @@ mod tests {
     fn notice_shows_the_choices_in_config_order_and_the_requester() {
         let choices = choices(&["コードレビュー", "AIレビュー", "ADRレビュー"]);
 
-        let notice = Notice::of(&request(Some("tanaka"), None), &choices);
+        let size = Size {
+            additions: 120,
+            deletions: 30,
+            changed_files: 5,
+        };
+
+        let notice = Notice::of(&request(Some("tanaka"), None), &choices, Some(&size));
 
         assert_eq!(
             notice.actions,
             ["コードレビュー", "AIレビュー", "ADRレビュー"]
         );
-        assert_eq!(notice.message, "依頼者: @tanaka\nacme/app #7");
+        assert_eq!(
+            notice.message,
+            "依頼者: @tanaka\nacme/app #7・+120 -30（5ファイル）\nクリックでPRを開く"
+        );
         assert_eq!(notice.subtitle, "Fix the bug");
         assert_eq!(notice.dropdown, Some(DROPDOWN_LABEL));
     }
@@ -87,15 +116,24 @@ mod tests {
     #[test]
     fn requester_line_tells_an_unknown_requester_and_a_team() {
         for (name, requester, team, expected) in [
-            ("unknown", None, None, "依頼者不明\nacme/app #7"),
+            (
+                "unknown",
+                None,
+                None,
+                "依頼者不明\nacme/app #7\nクリックでPRを開く",
+            ),
             (
                 "team",
                 Some("sato"),
                 Some("acme/backend"),
-                "依頼者: @sato（acme/backend 宛て）\nacme/app #7",
+                "依頼者: @sato（acme/backend 宛て）\nacme/app #7\nクリックでPRを開く",
             ),
         ] {
-            let notice = Notice::of(&request(requester, team), &choices(&["コードレビュー"]));
+            let notice = Notice::of(
+                &request(requester, team),
+                &choices(&["コードレビュー"]),
+                None,
+            );
 
             assert_eq!(notice.message, expected, "case: {name}");
         }
@@ -103,7 +141,7 @@ mod tests {
 
     #[test]
     fn single_choice_needs_no_dropdown() {
-        let notice = Notice::of(&request(None, None), &choices(&["コードレビュー"]));
+        let notice = Notice::of(&request(None, None), &choices(&["コードレビュー"]), None);
 
         assert_eq!(notice.dropdown, None);
     }

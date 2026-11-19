@@ -11,7 +11,6 @@ pub(crate) struct PromptData<'data> {
     pub(crate) requester: Option<&'data str>,
     pub(crate) skill: &'data str,
     pub(crate) skill_path: &'data Path,
-    pub(crate) worktree: &'data Path,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +24,6 @@ enum Field {
     Requester,
     Skill,
     SkillPath,
-    Worktree,
     Repo,
     Number,
     Title,
@@ -34,11 +32,12 @@ enum Field {
     BaseRef,
 }
 
-const FIELDS: [(&str, Field); 10] = [
+const REMOVED_WORKTREE: &str = ".Worktree";
+
+const FIELDS: [(&str, Field); 9] = [
     (".Requester", Field::Requester),
     (".Skill", Field::Skill),
     (".SkillPath", Field::SkillPath),
-    (".Worktree", Field::Worktree),
     (".PR.Repo", Field::Repo),
     (".PR.Number", Field::Number),
     (".PR.Title", Field::Title),
@@ -61,6 +60,12 @@ impl Prompt {
             };
             // Prompts written for Go templates put spaces inside the braces or not, so both are allowed.
             let name = action[..close].trim_matches(' ');
+            // A config copied from an older example names it, so the error tells how to update the config.
+            if name == REMOVED_WORKTREE {
+                return Err(format!(
+                    "{{{{{REMOVED_WORKTREE}}}}} is no longer a field: the review now starts in a worktree at the PR head, so remove the sentence naming it, as in config.example.json"
+                ));
+            }
             let Some((_, field)) = FIELDS.iter().find(|(known, _)| *known == name) else {
                 return Err(format!(
                     "{{{{{}}}}} is not a field; a prompt can name only {}",
@@ -95,7 +100,6 @@ impl Field {
             Self::Requester => data.requester.unwrap_or_default().to_owned(),
             Self::Skill => data.skill.to_owned(),
             Self::SkillPath => data.skill_path.to_string_lossy().into_owned(),
-            Self::Worktree => data.worktree.to_string_lossy().into_owned(),
             Self::Repo => data.pr.repo.clone(),
             Self::Number => data.pr.number.to_string(),
             Self::Title => data.pr.title.clone(),
@@ -121,7 +125,7 @@ mod tests {
     #[test]
     fn every_field_is_replaced_and_the_rest_kept() {
         let prompt = Prompt::parse(
-            "[${{.Skill}}]({{.SkillPath}}) {{.PR.Repo}}#{{ .PR.Number }} {{.PR.Title}}\n{{.PR.URL}} {{.PR.HeadSHA}} {{.PR.BaseRef}} {{.Worktree}} @{{.Requester}} }} done",
+            "[${{.Skill}}]({{.SkillPath}}) {{.PR.Repo}}#{{ .PR.Number }} {{.PR.Title}}\n{{.PR.URL}} {{.PR.HeadSHA}} {{.PR.BaseRef}} @{{.Requester}} }} done",
         )
         .expect("a valid prompt");
         let pr = PullRequest {
@@ -138,12 +142,11 @@ mod tests {
             requester: Some("tanaka"),
             skill: "code-review",
             skill_path: Path::new("/c/SKILL.md"),
-            worktree: Path::new("/w/pr-12"),
         });
 
         assert_eq!(
             rendered,
-            "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main /w/pr-12 @tanaka }} done"
+            "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main @tanaka }} done"
         );
     }
 
@@ -164,10 +167,19 @@ mod tests {
             requester: None,
             skill: "s",
             skill_path: Path::new("/s"),
-            worktree: Path::new("/w"),
         });
 
         assert_eq!(rendered, "by .");
+    }
+
+    #[test]
+    fn prompt_of_an_older_example_is_told_to_drop_the_worktree() {
+        let parsed = Prompt::parse("PR: {{.PR.URL}}\nコードは{{ .Worktree }}を読んでください。");
+
+        assert_eq!(
+            parsed,
+            Err("{{.Worktree}} is no longer a field: the review now starts in a worktree at the PR head, so remove the sentence naming it, as in config.example.json".to_owned())
+        );
     }
 
     #[test]

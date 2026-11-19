@@ -1,4 +1,5 @@
 pub(crate) mod alerter;
+pub(crate) mod browser;
 pub(crate) mod codex_app;
 pub(crate) mod command;
 pub(crate) mod gh;
