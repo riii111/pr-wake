@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
-use super::request::pr_key;
+use super::{batch::Digest, request::pr_key};
 
 // Saved in the layout the Go review wrote, so either version reads the other's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +25,16 @@ pub(crate) struct ReviewState {
         with = "optional_stamp"
     )]
     pub(crate) last_batch: Option<Timestamp>,
+    // Kept until shown, so a restart before a batch's time still shows its notification once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pending_digests: Vec<PendingDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PendingDigest {
+    #[serde(with = "stamp")]
+    pub(crate) ready: Timestamp,
+    pub(crate) digest: Digest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,6 +591,7 @@ mod tests {
 
     mod record {
         use super::*;
+        use crate::app::review::batch::{Listed, ReportReason};
 
         // As the Go review wrote it: nanoseconds with the local offset, an empty requester and no team.
         const GO_STATE: &str = r#"{
@@ -626,6 +637,8 @@ mod tests {
             let request = &state.requests["acme/app#1@10"];
             assert_eq!(state.login.as_deref(), Some("me"));
             assert_eq!(state.last_poll, None);
+            assert_eq!(state.last_batch, None);
+            assert_eq!(state.pending_digests, []);
             assert_eq!(request.found.requester, None);
             assert_eq!(request.status, Status::Launched);
             assert_eq!(request.first_seen, at("2026-11-12T03:00:00.123456789Z"));
@@ -670,6 +683,23 @@ mod tests {
             state.last_poll = Some(at(NOW));
             state.last_error = Some("HTTP 403".to_owned());
             state.last_batch = Some(at("2026-11-12T01:50:00Z"));
+            state.pending_digests.push(PendingDigest {
+                ready: at("2026-11-12T02:00:00Z"),
+                digest: Digest {
+                    started: vec![Listed {
+                        number: 1,
+                        title: "T".to_owned(),
+                    }],
+                    reported: vec![(
+                        Listed {
+                            number: 2,
+                            title: "U".to_owned(),
+                        },
+                        ReportReason::ApprovedByOther,
+                    )],
+                    failed: 1,
+                },
+            });
             // Written to the millisecond, as the TypeScript watch writes its times.
             state
                 .requests

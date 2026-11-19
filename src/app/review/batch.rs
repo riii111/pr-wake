@@ -30,20 +30,21 @@ pub(crate) enum Plan {
     Report(ReportReason),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum ReportReason {
     ManyReviewers,
     ApprovedByOther,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Digest {
     pub(crate) started: Vec<Listed>,
     pub(crate) reported: Vec<(Listed, ReportReason)>,
     pub(crate) failed: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Listed {
     pub(crate) number: u64,
     pub(crate) title: String,
@@ -119,11 +120,6 @@ impl ReportReason {
 }
 
 impl Digest {
-    #[must_use]
-    pub(crate) const fn is_empty(&self) -> bool {
-        self.started.is_empty() && self.reported.is_empty() && self.failed == 0
-    }
-
     #[must_use]
     pub(crate) fn subtitle(&self) -> String {
         format!(
@@ -372,9 +368,7 @@ mod tests {
         ] {
             assert_eq!(digest.subtitle(), subtitle, "case: {name}");
             assert_eq!(digest.message(), message, "case: {name}");
-            assert!(!digest.is_empty(), "case: {name}");
         }
-        assert!(Digest::default().is_empty());
     }
 
     fn batches() -> Batches {

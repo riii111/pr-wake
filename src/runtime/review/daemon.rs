@@ -16,7 +16,7 @@ use crate::{
         notice::Selection,
         parse_pr_ref,
         request::{pending_requests, pr_key, request_queries},
-        state::{Request, ReviewState, Status},
+        state::{PendingDigest, Request, ReviewState, Status},
     },
     infra::{
         alerter,
@@ -101,7 +101,7 @@ impl<'deps> Daemon<'deps> {
 
         thread::scope(|scope| {
             if self.deps.tools.config.batches.is_some() {
-                scope.spawn(|| self.batch_loop(scope));
+                scope.spawn(|| self.batch_loop());
             } else {
                 scope.spawn(|| self.notify_loop(scope));
             }
@@ -232,16 +232,16 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    fn batch_loop<'scope>(&'scope self, scope: &'scope Scope<'scope, '_>) {
+    fn batch_loop(&self) {
         while !self.deps.stop.is_requested() {
-            self.batch_once(scope);
+            self.batch_once();
             if !(self.deps.pause)(BATCH_CHECK) {
                 return;
             }
         }
     }
 
-    pub(super) fn batch_once<'scope>(&'scope self, scope: &'scope Scope<'scope, '_>) {
+    pub(super) fn batch_once(&self) {
         let Some(batches) = &self.deps.tools.config.batches else {
             return;
         };
@@ -250,7 +250,7 @@ impl<'deps> Daemon<'deps> {
                 for request in requests {
                     match request {
                         Ok(NowRequest { pr: Some(pr) }) => self.start_now(&pr),
-                        Ok(NowRequest { pr: None }) => self.run_batch(scope, None),
+                        Ok(NowRequest { pr: None }) => self.run_batch((self.deps.now)()),
                         Err(error) => self.log(&format!("review now: {error}")),
                     }
                 }
@@ -260,23 +260,25 @@ impl<'deps> Daemon<'deps> {
 
         let now = (self.deps.now)().to_zoned(self.deps.zone.clone());
         let mut state = self.lock_state();
-        let Some(slot) = due_slot(batches, &now, state.last_batch) else {
-            return;
-        };
-        // Saved before any review starts, so a restart within the slot does not run it again.
-        let before = state.last_batch.replace(slot.start);
-        let saved = self.save(&state);
-        if saved.is_err() {
-            state.last_batch = before;
+        if let Some(slot) = due_slot(batches, &now, state.last_batch) {
+            // Saved before any review starts, so a restart within the slot does not run it again.
+            let before = state.last_batch.replace(slot.start);
+            let saved = self.save(&state);
+            if saved.is_err() {
+                state.last_batch = before;
+            }
+            drop(state);
+            match saved {
+                Ok(()) => self.run_batch(slot.ready),
+                Err(error) => self.log(&format!("batch not run: save state: {error}")),
+            }
+        } else {
+            drop(state);
         }
-        drop(state);
-        match saved {
-            Ok(()) => self.run_batch(scope, Some(slot.ready)),
-            Err(error) => self.log(&format!("batch not run: save state: {error}")),
-        }
+        self.show_due_digests();
     }
 
-    fn run_batch<'scope>(&'scope self, scope: &'scope Scope<'scope, '_>, ready: Option<Timestamp>) {
+    fn run_batch(&self, ready: Timestamp) {
         let (login, queued) = {
             let state = self.lock_state();
             (
@@ -285,6 +287,7 @@ impl<'deps> Daemon<'deps> {
             )
         };
         let mut digest = Digest::default();
+        let mut pending = None;
         for request in queued {
             // What is left stays queued for the next batch after the restart.
             if self.deps.stop.is_requested() {
@@ -302,6 +305,8 @@ impl<'deps> Daemon<'deps> {
                 }
                 Plan::Start => self.start_listed(&request, &mut digest),
             }
+            // Saved after each request, so a stop in the middle still shows what was done.
+            self.keep_digest(&mut pending, ready, &digest);
         }
         self.log(&format!(
             "batch: {} started, {} reported, {} failed",
@@ -309,22 +314,6 @@ impl<'deps> Daemon<'deps> {
             digest.reported.len(),
             digest.failed
         ));
-        if digest.is_empty() {
-            return;
-        }
-
-        let wait = ready
-            .and_then(|ready| Duration::try_from(ready.duration_since((self.deps.now)())).ok())
-            .unwrap_or(Duration::ZERO);
-        if wait.is_zero() {
-            self.notify_digest(&digest);
-            return;
-        }
-        scope.spawn(move || {
-            if (self.deps.pause)(wait) {
-                self.notify_digest(&digest);
-            }
-        });
     }
 
     // Started whatever the reviewers, as the owner asked for this PR.
@@ -351,7 +340,57 @@ impl<'deps> Daemon<'deps> {
         };
         let mut digest = Digest::default();
         self.start_listed(&request, &mut digest);
-        self.notify_digest(&digest);
+        self.keep_digest(&mut None, (self.deps.now)(), &digest);
+    }
+
+    // Only the batch thread adds or removes digests, so the index stays valid while the batch runs.
+    fn keep_digest(&self, pending: &mut Option<usize>, ready: Timestamp, digest: &Digest) {
+        let mut state = self.lock_state();
+        let before = state.pending_digests.clone();
+        let digests = &mut state.pending_digests;
+        if let Some(kept) = pending.and_then(|index| digests.get_mut(index)) {
+            kept.digest = digest.clone();
+        } else {
+            *pending = Some(digests.len());
+            digests.push(PendingDigest {
+                ready,
+                digest: digest.clone(),
+            });
+        }
+        let saved = self.save(&state);
+        if saved.is_err() {
+            state.pending_digests = before;
+        }
+        drop(state);
+        self.log_saved(saved.map_err(|error| format!("save state: {error}")));
+    }
+
+    fn show_due_digests(&self) {
+        let now = (self.deps.now)();
+        loop {
+            // A stop may have cut a notification short, so what is left is shown after the restart.
+            if self.deps.stop.is_requested() {
+                return;
+            }
+            let due = self
+                .lock_state()
+                .pending_digests
+                .iter()
+                .enumerate()
+                .find(|(_, pending)| pending.ready <= now)
+                .map(|(index, pending)| (index, pending.digest.clone()));
+            let Some((index, digest)) = due else {
+                return;
+            };
+            self.notify_digest(&digest);
+
+            let mut state = self.lock_state();
+            // Removed even when it was not shown or not saved, so a broken osascript or disk never repeats it every second.
+            state.pending_digests.remove(index);
+            let saved = self.save(&state);
+            drop(state);
+            self.log_saved(saved.map_err(|error| format!("save state: {error}")));
+        }
     }
 
     // A lookup that fails starts the review, so no request is dropped for it.
@@ -1584,22 +1623,21 @@ mod tests {
         fixture.answer_with("gh api repos/acme/app/pulls/4/requested_reviewers", |_| {
             Err("HTTP 502".to_owned())
         });
-        let waits = Mutex::new(Vec::new());
-        let pause = |wait| {
-            waits.lock().expect("note the wait").push(wait);
-            true
-        };
-        let now = || tokyo("2026-11-18T10:51:00");
+        let clock = Mutex::new(tokyo("2026-11-18T10:51:00"));
+        let now = || *clock.lock().expect("read the clock");
 
-        fixture.with_daemon(
+        let shown_before_the_ready_time = fixture.with_daemon(
             &Setup {
-                pause: Pause::With(&pause),
                 now: Some(&now),
                 ..Setup::default()
             },
             |daemon, _| {
-                thread::scope(|scope| daemon.batch_once(scope));
-                thread::scope(|scope| daemon.batch_once(scope));
+                daemon.batch_once();
+                let shown = fixture.count_calls("osascript ");
+                *clock.lock().expect("move the clock") = tokyo("2026-11-18T11:00:00");
+                daemon.batch_once();
+                daemon.batch_once();
+                shown
             },
         );
 
@@ -1623,10 +1661,7 @@ mod tests {
             fixture.state().last_batch,
             Some(tokyo("2026-11-18T10:50:00"))
         );
-        assert_eq!(
-            waits.into_inner().expect("read the waits"),
-            [Duration::from_mins(9)]
-        );
+        assert_eq!(shown_before_the_ready_time, 0);
         assert_eq!(fixture.count_calls("alerter "), 0);
         assert_eq!(fixture.count_calls("osascript "), 1, "the slot runs once");
         assert_eq!(
@@ -1635,6 +1670,60 @@ mod tests {
             ),
             1
         );
+        assert_eq!(fixture.state().pending_digests, []);
+    }
+
+    #[test]
+    fn batch_notification_survives_a_restart_before_its_ready_time() {
+        for (name, resumed, shown_on_resume) in [
+            ("resumed_before_ready", "2026-11-18T10:55:00", 0),
+            ("resumed_after_ready", "2026-11-18T11:30:00", 1),
+        ] {
+            let fixture = Fixture::batched();
+            fixture.save_queued(&[(1, 10), (2, 20)]);
+            fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
+            fixture.request("acme/app", 2, &[requested(20, "tanaka")]);
+            fixture.answer_with("gh api --paginate repos/acme/app/pulls/2/reviews", |_| {
+                Ok(br#"[{"user":{"login":"sato","type":"User"},"state":"APPROVED"}]"#.to_vec())
+            });
+            let clock = Mutex::new(tokyo("2026-11-18T10:51:00"));
+            let now = || *clock.lock().expect("read the clock");
+            let setup = Setup {
+                now: Some(&now),
+                ..Setup::default()
+            };
+
+            fixture.with_daemon(&setup, |daemon, _| daemon.batch_once());
+            *clock.lock().expect("move the clock") = tokyo(resumed);
+            let shown = fixture.with_daemon(&setup, |daemon, _| {
+                daemon.poll_once().expect("poll after the restart");
+                daemon.batch_once();
+                let shown = fixture.count_calls("osascript ");
+                *clock.lock().expect("move the clock") = tokyo("2026-11-18T11:45:00");
+                daemon.batch_once();
+                shown
+            });
+
+            assert_eq!(shown, shown_on_resume, "case: {name}");
+            assert_eq!(fixture.count_calls("osascript "), 1, "case: {name}");
+            assert_eq!(
+                fixture.count_calls(
+                    "#1 PR 1\n報告のみ: #2 PR 2（他の人が承認済み） pr-wake レビュー 2件"
+                ),
+                1,
+                "case: {name}"
+            );
+            assert_eq!(fixture.opened().len(), 1, "case: {name}: launched once");
+            assert_eq!(
+                [
+                    fixture.status("acme/app#1@10"),
+                    fixture.status("acme/app#2@20")
+                ],
+                [Status::Launched, Status::Reported],
+                "case: {name}"
+            );
+            assert_eq!(fixture.state().pending_digests, [], "case: {name}");
+        }
     }
 
     #[test]
@@ -1650,12 +1739,12 @@ mod tests {
         };
 
         fixture.with_daemon(&setup, |daemon, _| {
-            thread::scope(|scope| daemon.batch_once(scope));
+            daemon.batch_once();
         });
         fixture.request("acme/app", 5, &[requested(50, "sato")]);
         fixture.with_daemon(&setup, |daemon, _| {
             daemon.poll_once().expect("poll the new request");
-            thread::scope(|scope| daemon.batch_once(scope));
+            daemon.batch_once();
         });
 
         assert_eq!(fixture.status("acme/app#1@10"), Status::Launched);
@@ -1708,7 +1797,7 @@ mod tests {
                     now: Some(&now),
                     ..Setup::default()
                 },
-                |daemon, _| thread::scope(|scope| daemon.batch_once(scope)),
+                |daemon, _| daemon.batch_once(),
             );
 
             let statuses = ["acme/app#1@10", "acme/app#2@20"].map(|key| fixture.status(key));
