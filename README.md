@@ -69,10 +69,9 @@ sequenceDiagram
   actor U as 自分
   participant C as Codex App
   G-->>P: 自分宛てのレビュー依頼
-  P->>U: 通知（依頼者・PRタイトル）
+  P->>U: 通知（依頼者・PRタイトル・変更の規模）
   U->>P: 通知のメニューからSkillを選ぶ
-  P->>C: プロンプト入力済みのスレッドを開く
-  U->>C: Enterでレビュー開始
+  P->>C: PRのheadのworktreeでスレッドを作り、レビューを始める
   C-->>U: レビュー結果
   U->>G: 確認して投稿
 ```
@@ -84,12 +83,26 @@ sequenceDiagram
 3. `config.example.json`を`~/.config/pr-wake/review.json`にコピーし、リポジトリとSkillの選択肢を書く
 4. `pr-wake review install`で常駐を始め、初回の通知でmacOSの通知を許可する
 
-`pr-wake review smoke --pr owner/repo#123`で通知からスレッドを開くまでを試せる。
-レビュー用のworktreeは自動で消えないため、不要になったら`git worktree remove`で削除する。
+通知を押すと、PRをブラウザで開いてから同じ通知をもう一度出す。
+既定のブラウザがChromeなどChromium系なら、新しいウィンドウで開く。
+
+選んだレビューは、harnexusでCodex Appにスレッドを作って始める。
+スレッドは、リポジトリのクローンを登録したCodex Appのプロジェクトで、PRのheadから作ったworktreeで動く。
+そのため次を用意する。
+
+- harnexusのcall socketを有効にする
+- `pr-wake watch sender`で送信元のチャットを登録する
+- `repositories`に書いたクローンをCodex Appのプロジェクトとして追加する
+
+用意がないなどでスレッドを作れないときは、pr-wakeが作ったworktreeの場所をプロンプトに足してスレッドを開き、Enterで始める。
+pr-wakeのworktreeは自動で消えないため、不要になったら`git worktree remove`で削除する。
+
+`pr-wake review smoke --pr owner/repo#123`で通知からレビューを始めるまでを試せる。
 
 ### 再レビュー
 
-レビューのスレッドで`pr-wake review link <PRのURL>`を実行すると、そのスレッドをPRへ紐づける。
+pr-wakeが作ったスレッドは、作った時点でPRへ紐づける。
+それ以外のスレッドは、そのスレッドで`pr-wake review link <PRのURL>`を実行すると紐づく。
 実行はレビュー用のSkillの手順に含める。
 `~/.config/pr-wake/review.json`がない環境では紐づけず、エラーで終わる。
 自分が作成したPRは紐づけず、`skipped`で始まる行を出して正常に終わる。紐づけたときは`linked`で始まる。

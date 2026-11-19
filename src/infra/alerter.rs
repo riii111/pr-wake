@@ -107,6 +107,7 @@ fn parse_selection(output: &[u8], actions: &[String]) -> Result<Selection, Strin
 
     match answer.kind.as_str() {
         "closed" => return Ok(Selection::Declined),
+        "contentsClicked" => return Ok(Selection::Opened),
         "timeout" => return Ok(Selection::TimedOut),
         "actionClicked" => {}
         _ => return Ok(Selection::Dismissed),
@@ -194,6 +195,11 @@ mod tests {
             (
                 "body_click",
                 r#"{"activationType":"contentsClicked"}"#,
+                Ok(Selection::Opened),
+            ),
+            (
+                "reply",
+                r#"{"activationType":"replied"}"#,
                 Ok(Selection::Dismissed),
             ),
             (

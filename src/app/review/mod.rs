@@ -58,6 +58,15 @@ pub(crate) fn worktree_path(root: &Path, pr: &PullRequest) -> PathBuf {
 }
 
 #[must_use]
+pub(crate) fn with_worktree(prompt: &str, worktree: &Path, pr: &PullRequest) -> String {
+    format!(
+        "{prompt}\n\nコードは{}（{}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。",
+        worktree.display(),
+        pr.head_sha
+    )
+}
+
+#[must_use]
 pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

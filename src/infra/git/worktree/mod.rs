@@ -44,18 +44,7 @@ pub(crate) fn prepare_worktree(
     base: &Path,
     pr: &PullRequest,
 ) -> Result<PathBuf, String> {
-    // The configured URL, before any url.<base>.insteadOf rewriting, names the repository.
-    let remote = checkout.git_at(checkout.path, ["config", "--get", "remote.origin.url"])?;
-    let remote = String::from_utf8_lossy(&remote);
-    if !remote_repo(&remote).is_some_and(|repo| repo.eq_ignore_ascii_case(&pr.repo)) {
-        return Err(format!(
-            "{}: origin {:?} is not {}",
-            checkout.path.display(),
-            remote.trim(),
-            pr.repo
-        ));
-    }
-
+    check_origin(checkout, pr)?;
     let (path, reused) = pick_worktree(checkout, base, &pr.head_sha)?;
     if reused {
         return Ok(path);
@@ -82,6 +71,29 @@ pub(crate) fn prepare_worktree(
         ],
     )?;
     Ok(path)
+}
+
+pub(crate) fn fetch_pr_head(checkout: &Checkout<'_>, pr: &PullRequest) -> Result<(), String> {
+    check_origin(checkout, pr)?;
+    if checkout.has_commit(&pr.head_sha) {
+        return Ok(());
+    }
+    fetch_head(checkout, pr)
+}
+
+// The configured URL, before any url.<base>.insteadOf rewriting, names the repository.
+fn check_origin(checkout: &Checkout<'_>, pr: &PullRequest) -> Result<(), String> {
+    let remote = checkout.git_at(checkout.path, ["config", "--get", "remote.origin.url"])?;
+    let remote = String::from_utf8_lossy(&remote);
+    if remote_repo(&remote).is_some_and(|repo| repo.eq_ignore_ascii_case(&pr.repo)) {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: origin {:?} is not {}",
+        checkout.path.display(),
+        remote.trim(),
+        pr.repo
+    ))
 }
 
 impl Checkout<'_> {
