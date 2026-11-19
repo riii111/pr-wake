@@ -107,8 +107,7 @@ pub(super) fn detail_of(pull: &Object, lists: &Lists, bots: &[ReviewBot]) -> PrD
 pub(super) fn nodes_of(connection: Option<&Value>) -> Vec<Object> {
     connection
         .and_then(|connection| connection.get("nodes")?.as_array())
-        .map(|nodes| nodes.iter().filter_map(Value::as_object).cloned().collect())
-        .unwrap_or_default()
+        .map_or_default(|nodes| nodes.iter().filter_map(Value::as_object).cloned().collect())
 }
 
 pub(super) fn next_cursor(connection: Option<&Value>) -> Option<String> {

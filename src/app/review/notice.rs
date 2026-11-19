@@ -47,16 +47,13 @@ impl Notice {
         let team = request
             .team
             .as_ref()
-            .map(|team| format!("（{team} 宛て）"))
-            .unwrap_or_default();
-        let size = size
-            .map(|size| {
-                format!(
-                    "・+{} -{}（{}ファイル）",
-                    size.additions, size.deletions, size.changed_files
-                )
-            })
-            .unwrap_or_default();
+            .map_or_default(|team| format!("（{team} 宛て）"));
+        let size = size.map_or_default(|size| {
+            format!(
+                "・+{} -{}（{}ファイル）",
+                size.additions, size.deletions, size.changed_files
+            )
+        });
         Self {
             key: request.key.clone(),
             title: TITLE,
