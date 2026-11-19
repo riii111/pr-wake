@@ -32,6 +32,8 @@ enum Field {
     BaseRef,
 }
 
+const REMOVED_WORKTREE: &str = ".Worktree";
+
 const FIELDS: [(&str, Field); 9] = [
     (".Requester", Field::Requester),
     (".Skill", Field::Skill),
@@ -58,6 +60,12 @@ impl Prompt {
             };
             // Prompts written for Go templates put spaces inside the braces or not, so both are allowed.
             let name = action[..close].trim_matches(' ');
+            // A config copied from an older example names it, so the error tells how to update the config.
+            if name == REMOVED_WORKTREE {
+                return Err(format!(
+                    "{{{{{REMOVED_WORKTREE}}}}} is no longer a field: the review now starts in a worktree at the PR head, so remove the sentence naming it, as in config.example.json"
+                ));
+            }
             let Some((_, field)) = FIELDS.iter().find(|(known, _)| *known == name) else {
                 return Err(format!(
                     "{{{{{}}}}} is not a field; a prompt can name only {}",
@@ -162,6 +170,16 @@ mod tests {
         });
 
         assert_eq!(rendered, "by .");
+    }
+
+    #[test]
+    fn prompt_of_an_older_example_is_told_to_drop_the_worktree() {
+        let parsed = Prompt::parse("PR: {{.PR.URL}}\nコードは{{ .Worktree }}を読んでください。");
+
+        assert_eq!(
+            parsed,
+            Err("{{.Worktree}} is no longer a field: the review now starts in a worktree at the PR head, so remove the sentence naming it, as in config.example.json".to_owned())
+        );
     }
 
     #[test]
