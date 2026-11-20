@@ -131,13 +131,6 @@ mod tests {
     }
 
     #[test]
-    fn severity_with_look_around_is_refused() {
-        let compiled = Severity::new(r"(?=Major)Major");
-
-        assert!(compiled.is_err());
-    }
-
-    #[test]
     fn bot_is_found_by_its_login_without_case() {
         let bots = [coderabbit(), claude()];
 

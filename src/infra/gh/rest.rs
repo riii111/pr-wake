@@ -5,7 +5,10 @@ use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::{
     app::review::{
-        PullRequest, is_repo_name,
+        PullRequest,
+        batch::{Reviewers, SubmittedReview},
+        inbox::InboxThread,
+        is_repo_name,
         notice::Size,
         request::{ReviewRequest, SearchHit},
     },
@@ -83,6 +86,41 @@ struct PullSize {
 struct PullAuthor {
     #[serde(default)]
     user: Option<Account>,
+}
+
+#[derive(Deserialize)]
+struct RequestedReviewers {
+    #[serde(default)]
+    users: Vec<Actor>,
+}
+
+#[derive(Deserialize)]
+struct Review {
+    #[serde(default)]
+    user: Option<Actor>,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct Actor {
+    login: String,
+    #[serde(default, rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct Notification {
+    id: String,
+    reason: String,
+    subject: Subject,
+}
+
+#[derive(Deserialize)]
+struct Subject {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +278,84 @@ impl GhRest<'_> {
         Ok(pull.user.map(|user| user.login))
     }
 
+    pub(crate) fn pull_request_reviewers(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> Result<Reviewers, String> {
+        let author = self.pull_request_author(repo, number)?;
+        let output =
+            self.api([format!("repos/{repo}/pulls/{number}/requested_reviewers").as_str()])?;
+        let requested = serde_json::from_slice::<RequestedReviewers>(&output)
+            .map_err(|error| format!("requested reviewers of {repo}#{number}: {error}"))?;
+        let output = self.api([
+            "--paginate",
+            &format!("repos/{repo}/pulls/{number}/reviews?per_page=100"),
+        ])?;
+        let reviews = decode_pages::<Vec<Review>>(&output)
+            .map_err(|error| format!("reviews of {repo}#{number}: {error}"))?;
+
+        Ok(Reviewers {
+            author,
+            requested: requested
+                .users
+                .into_iter()
+                .filter(|user| !user.is_bot())
+                .map(|user| user.login)
+                .collect(),
+            reviews: reviews
+                .into_iter()
+                .flatten()
+                .filter_map(|review| {
+                    let user = review.user.filter(|user| !user.is_bot())?;
+                    Some(SubmittedReview {
+                        author: user.login,
+                        state: review.state,
+                    })
+                })
+                .collect(),
+        })
+    }
+
+    pub(crate) fn unread_notifications(&self) -> Result<Vec<InboxThread>, String> {
+        let output = self.api([
+            "--paginate",
+            "-X",
+            "GET",
+            "notifications",
+            "-f",
+            "per_page=50",
+        ])?;
+        let pages = decode_pages::<Vec<Notification>>(&output)
+            .map_err(|error| format!("notifications: {error}"))?;
+        Ok(pages
+            .into_iter()
+            .flatten()
+            .map(|notification| InboxThread {
+                pr: (notification.subject.kind == "PullRequest")
+                    .then(|| notification.subject.url.as_deref().and_then(pull_of_url))
+                    .flatten(),
+                id: notification.id,
+                reason: notification.reason,
+            })
+            .collect())
+    }
+
+    pub(crate) fn unsubscribe_thread(&self, id: &str) -> Result<(), String> {
+        self.api([
+            "-X",
+            "DELETE",
+            &format!("notifications/threads/{id}/subscription"),
+        ])
+        .map(drop)
+    }
+
+    // Done, unlike read, takes the thread out of the inbox.
+    pub(crate) fn mark_thread_done(&self, id: &str) -> Result<(), String> {
+        self.api(["-X", "DELETE", &format!("notifications/threads/{id}")])
+            .map(drop)
+    }
+
     fn api<'argument>(
         &self,
         arguments: impl IntoIterator<Item = &'argument str>,
@@ -254,6 +370,19 @@ impl GhRest<'_> {
             stop: self.stop,
         })
     }
+}
+
+impl Actor {
+    fn is_bot(&self) -> bool {
+        self.kind == "Bot" || self.login.ends_with("[bot]")
+    }
+}
+
+fn pull_of_url(url: &str) -> Option<(String, u64)> {
+    let path = url.strip_prefix(REPOSITORY_API)?;
+    let (repo, number) = path.rsplit_once("/pulls/")?;
+    let number = number.parse::<u64>().ok().filter(|number| *number > 0)?;
+    is_repo_name(repo).then(|| (repo.to_owned(), number))
 }
 
 // `gh api --paginate` writes one JSON value per page, back to back.
@@ -419,6 +548,118 @@ mod tests {
             assert_eq!(author, Ok(expected.map(str::to_owned)), "case: {name}");
             assert_eq!(gh.asked(), [["api", "repos/acme/app/pulls/12"]]);
         }
+    }
+
+    #[test]
+    fn reviewers_are_the_requested_users_and_the_review_authors_without_bots() {
+        let stop = StopRequest::default();
+        let asked = Mutex::new(Vec::new());
+        let run = |call: &ToolCall<'_>| {
+            let arguments = call
+                .arguments
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let answer = match arguments.last().map(String::as_str) {
+                Some("repos/acme/app/pulls/12") => r#"{"user":{"login":"tanaka"}}"#,
+                Some("repos/acme/app/pulls/12/requested_reviewers") => {
+                    r#"{"users":[{"login":"sato","type":"User"},{"login":"renovate[bot]","type":"Bot"}],"teams":[{"slug":"backend"}]}"#
+                }
+                Some("repos/acme/app/pulls/12/reviews?per_page=100") => {
+                    r#"[{"user":{"login":"suzuki","type":"User"},"state":"APPROVED"},{"user":{"login":"copilot","type":"Bot"},"state":"COMMENTED"}][{"user":null,"state":"COMMENTED"}]"#
+                }
+                _ => return Err(format!("unexpected call: {arguments:?}")),
+            };
+            asked.lock().expect("note the call").push(arguments);
+            Ok(answer.as_bytes().to_vec())
+        };
+
+        let reviewers = GhRest {
+            run: &run,
+            gh: Path::new("gh"),
+            stop: &stop,
+        }
+        .pull_request_reviewers("acme/app", 12);
+
+        assert_eq!(
+            reviewers,
+            Ok(Reviewers {
+                author: Some("tanaka".to_owned()),
+                requested: vec!["sato".to_owned()],
+                reviews: vec![SubmittedReview {
+                    author: "suzuki".to_owned(),
+                    state: "APPROVED".to_owned(),
+                }],
+            })
+        );
+        assert_eq!(
+            asked.into_inner().expect("read the calls")[2],
+            [
+                "api",
+                "--paginate",
+                "repos/acme/app/pulls/12/reviews?per_page=100"
+            ]
+        );
+    }
+
+    #[test]
+    fn unread_notifications_name_the_pull_request_they_are_about() {
+        let first = r#"[{"id":"1","reason":"review_requested","subject":{"type":"PullRequest","url":"https://api.github.com/repos/acme/app/pulls/12"}}]"#;
+        let second = r#"[{"id":"2","reason":"mention","subject":{"type":"Issue","url":"https://api.github.com/repos/acme/app/issues/3"}},{"id":"3","reason":"ci_activity","subject":{"type":"CheckSuite","url":null}}]"#;
+        let gh = FakeGh::answering(Ok(format!("{first}{second}")));
+
+        let threads = gh.rest(|rest| rest.unread_notifications());
+
+        let thread = |id: &str, reason: &str, pr: Option<u64>| InboxThread {
+            id: id.to_owned(),
+            reason: reason.to_owned(),
+            pr: pr.map(|number| ("acme/app".to_owned(), number)),
+        };
+        assert_eq!(
+            threads,
+            Ok(vec![
+                thread("1", "review_requested", Some(12)),
+                thread("2", "mention", None),
+                thread("3", "ci_activity", None),
+            ])
+        );
+        assert_eq!(
+            gh.asked(),
+            [[
+                "api",
+                "--paginate",
+                "-X",
+                "GET",
+                "notifications",
+                "-f",
+                "per_page=50"
+            ]]
+        );
+    }
+
+    #[test]
+    fn thread_is_unsubscribed_then_marked_done() {
+        let gh = FakeGh::answering(Ok(String::new()));
+
+        let cleared = gh.rest(|rest| {
+            rest.unsubscribe_thread("42")
+                .and_then(|()| rest.mark_thread_done("42"))
+        });
+
+        assert_eq!(cleared, Ok(()));
+        assert_eq!(
+            gh.asked(),
+            [
+                [
+                    "api",
+                    "-X",
+                    "DELETE",
+                    "notifications/threads/42/subscription"
+                ]
+                .as_slice(),
+                ["api", "-X", "DELETE", "notifications/threads/42"].as_slice(),
+            ]
+        );
     }
 
     #[test]

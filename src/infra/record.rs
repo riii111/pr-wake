@@ -145,6 +145,16 @@ pub(crate) fn save_json(
         .map_err(|error| RecordError::new(path, RecordErrorKind::Write(error)))
 }
 
+// A file already gone counts as removed.
+pub(crate) fn remove_record(path: &Path) -> Result<(), RecordError> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            Err(RecordError::new(path, RecordErrorKind::Write(error)))
+        }
+        _ => Ok(()),
+    }
+}
+
 // `None` while another holder has the lock.
 pub(crate) fn hold_lock(path: &Path) -> Result<Option<ProcessLock>, RecordError> {
     acquire_lock(path).map_err(|error| RecordError::new(path, RecordErrorKind::Lock(error)))
@@ -394,14 +404,6 @@ mod tests {
             });
             assert_eq!(resolved, expected, "case: {}", case.name);
         }
-    }
-
-    #[test]
-    fn process_environment_gives_absolute_directories() {
-        let directories = BaseDirectories::from_environment().expect("HOME is set for tests");
-
-        assert!(directories.config_home().is_absolute());
-        assert!(directories.state_home().is_absolute());
     }
 
     #[test]

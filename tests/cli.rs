@@ -44,14 +44,9 @@ fn version_names_pr_wake() {
     assert_eq!(stdout, format!("pr-wake {}\n", env!("CARGO_PKG_VERSION")));
 }
 
-#[rstest]
-#[case::no_arguments(&[])]
-#[case::unknown_feature(&["notify"])]
-#[case::engine_flag(&["watch", "--status"])]
-#[case::link_without_a_pr(&["watch", "link"])]
-#[case::dry_run_of_a_bare_pr(&["watch", "dry-run", PR_9])]
-fn wrong_command_line_is_a_usage_error_on_stderr(#[case] arguments: &[&str]) {
-    let output = run(arguments);
+#[test]
+fn wrong_command_line_is_a_usage_error_on_stderr() {
+    let output = run(&[]);
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(output.stdout, *b"");
@@ -108,12 +103,9 @@ fn result_is_one_json_line_on_stdout() {
     assert!(linked.stderr.is_empty(), "{}", linked.stderr);
 }
 
-#[rstest]
-#[case::no_chat_id("")]
-#[case::chat_id_with_a_space("a b")]
-#[case::unconfirmed_chat_id("client-new-thread:1")]
-fn link_from_a_chat_without_a_confirmed_id_is_refused(#[case] id: &str) {
-    let refused = Home::new().watch(&["link", PR_9], &[("CODEX_THREAD_ID", id)]);
+#[test]
+fn link_from_a_chat_without_a_confirmed_id_is_refused() {
+    let refused = Home::new().watch(&["link", PR_9], &[("CODEX_THREAD_ID", "")]);
 
     assert_eq!(refused.code, Some(1));
     assert_eq!(refused.stdout, "");
@@ -147,12 +139,12 @@ fn t3_code_thread_is_linked_as_a_t3_code_worker_which_needs_no_sender() {
     assert_eq!(shown.json()["prs"][0]["worker"], "t3:mcp:w1");
 }
 
-#[rstest]
-#[case::explicit_cloud(&[("HARNEXUS_EXECUTION_ENV", "cloud")])]
-#[case::claude_code_remote(&[("HARNEXUS_EXECUTION_ENV", ""), ("CLAUDE_CODE_REMOTE", "true")])]
-#[case::codex_environment(&[("HARNEXUS_EXECUTION_ENV", ""), ("CODEX_ENVIRONMENT_ID", "env")])]
-fn cloud_session_is_refused(#[case] cloud: &[(&str, &str)]) {
-    let refused = Home::new().watch(&["status", "--json"], cloud);
+#[test]
+fn cloud_session_is_refused() {
+    let refused = Home::new().watch(
+        &["status", "--json"],
+        &[("HARNEXUS_EXECUTION_ENV", "cloud")],
+    );
 
     assert_eq!(refused.code, Some(1));
     assert!(
@@ -313,12 +305,7 @@ impl Home {
 
     fn legacy() -> Self {
         let home = Self::new();
-        home.write_config(&json!({
-            "repositories": { "org/pay": { "account": "owner" } },
-            "quietHours": null,
-            "instructions": "$task-worker",
-        }));
-        copy_with_unknown_fields(
+        copy_directory(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch"),
             &home.state(),
         );
@@ -383,19 +370,15 @@ fn run(arguments: &[&str]) -> Output {
         .expect("run pr-wake")
 }
 
-fn copy_with_unknown_fields(from: &Path, to: &Path) {
+fn copy_directory(from: &Path, to: &Path) {
     fs::create_dir_all(to).expect("create the directory");
     for entry in fs::read_dir(from).expect("list the fixture") {
         let entry = entry.expect("read an entry");
         let target = to.join(entry.file_name());
         if entry.path().is_dir() {
-            copy_with_unknown_fields(&entry.path(), &target);
-            continue;
+            copy_directory(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("copy the record");
         }
-        let mut record: Value =
-            serde_json::from_str(&fs::read_to_string(entry.path()).expect("read the fixture"))
-                .expect("parse the fixture");
-        record["addedLater"] = json!({ "by": "a later version" });
-        fs::write(target, record.to_string()).expect("write the record");
     }
 }

@@ -24,6 +24,15 @@ pub(super) enum ReviewCommand {
         #[arg(value_name = "OWNER/REPO#N|URL")]
         pr: String,
     },
+    #[command(about = "Start the queued reviews now, or only one PR's with --pr")]
+    Now {
+        #[arg(
+            long,
+            value_name = "OWNER/REPO#N|URL",
+            help = "A queued or reported PR to start whatever its reviewers"
+        )]
+        pr: Option<String>,
+    },
     #[command(about = "Check the config, then start the LaunchAgent")]
     Install,
     #[command(about = "Stop and remove the LaunchAgent")]
@@ -91,6 +100,7 @@ pub(super) fn run(command: ReviewCommand) -> Result<(), String> {
             )
         }
         ReviewCommand::Link { pr } => review::link_from_chat(&env()?, &pr),
+        ReviewCommand::Now { pr } => review::request_now_from_terminal(&env()?, pr.as_deref()),
         ReviewCommand::Install => review::install(&env()?),
         ReviewCommand::Uninstall => agent::uninstall(agent::REVIEW, &env()?.home),
         ReviewCommand::Start => agent::start(agent::REVIEW, &env()?.home),
@@ -133,6 +143,14 @@ mod tests {
                 "link",
                 &["review", "link", PR],
                 ReviewCommand::Link { pr: PR.to_owned() },
+            ),
+            ("now", &["review", "now"], ReviewCommand::Now { pr: None }),
+            (
+                "now_for_one_pr",
+                &["review", "now", "--pr", PR],
+                ReviewCommand::Now {
+                    pr: Some(PR.to_owned()),
+                },
             ),
             (
                 "logs_followed",

@@ -122,6 +122,10 @@ mod tests {
             ("release_without_a_pr", &["watch", "release"]),
             ("unknown_watch_command", &["watch", "unknown"]),
             ("smoke_without_a_pr", &["review", "smoke"]),
+            ("unknown_feature", &["notify"]),
+            ("engine_flag", &["watch", "--status"]),
+            ("link_without_a_pr", &["watch", "link"]),
+            ("dry_run_of_a_bare_pr", &["watch", "dry-run", PR]),
         ] {
             let parsed = Cli::try_parse_from(command_line(arguments));
 

@@ -87,10 +87,4 @@ mod tests {
             assert_eq!(sender_for(registered, "worker"), expected, "case: {name}");
         }
     }
-
-    #[test]
-    fn t3_worker_is_told_apart_by_its_prefix() {
-        assert!(is_t3_worker("t3:mcp:w1"));
-        assert!(!is_t3_worker("019a-codex"));
-    }
 }

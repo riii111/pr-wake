@@ -136,14 +136,8 @@ mod tests {
             );
 
             assert_eq!(notice.message, expected, "case: {name}");
+            assert_eq!(notice.dropdown, None, "case: {name}");
         }
-    }
-
-    #[test]
-    fn single_choice_needs_no_dropdown() {
-        let notice = Notice::of(&request(None, None), &choices(&["コードレビュー"]), None);
-
-        assert_eq!(notice.dropdown, None);
     }
 
     fn request(requester: Option<&str>, team: Option<&str>) -> Found {
@@ -151,7 +145,7 @@ mod tests {
             key: "acme/app#7@1".to_owned(),
             repo: "acme/app".to_owned(),
             number: 7,
-            title: " Fix\nthe  bug".to_owned(),
+            title: " Fix\nthe \tbug".to_owned(),
             requester: requester.map(str::to_owned),
             team: team.map(str::to_owned),
         }

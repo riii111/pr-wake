@@ -1,8 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process,
 };
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -11,6 +13,7 @@ use super::{
 };
 use crate::app::{
     review::{
+        batch::NowRequest,
         config::{ConfigFile, ReviewConfig},
         state::ReviewState,
     },
@@ -36,6 +39,7 @@ pub(crate) struct ReviewChat {
 const STATE: &str = "state.json";
 const LOCK: &str = "lock";
 const CHATS: &str = "chats";
+const NOW: &str = "now";
 
 impl ReviewPaths {
     #[must_use]
@@ -112,6 +116,44 @@ pub(crate) fn load_chat(
     number: u64,
 ) -> Result<Option<ReviewChat>, RecordError> {
     record::load_json(&chat_path(paths, repo, number))
+}
+
+// The running review holds the lock on the state, so each request gets its own file and none overwrites another.
+pub(crate) fn request_now(
+    paths: &ReviewPaths,
+    request: &NowRequest,
+    at: Timestamp,
+) -> Result<(), RecordError> {
+    let name = format!("{}-{}.json", at.as_nanosecond(), process::id());
+    record::save_json(
+        &paths.state.join(NOW).join(name),
+        request,
+        JsonLayout::TwoSpacesAndNewline,
+    )
+}
+
+// Each request is removed before it is handed over, so one that cannot be removed is never run again and again.
+pub(crate) fn take_now_requests(
+    paths: &ReviewPaths,
+) -> Result<Vec<Result<NowRequest, RecordError>>, RecordError> {
+    let directory = paths.state.join(NOW);
+    let names = record::list_directory(&directory)?.unwrap_or_default();
+    Ok(names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.into_string().ok()?;
+            // Dot files are the temporary files of a request still being written.
+            let json = Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+            (!name.starts_with('.') && json).then(|| directory.join(name))
+        })
+        .map(|path| {
+            let request = record::load_required_json::<NowRequest>(&path);
+            record::remove_record(&path)?;
+            request
+        })
+        .collect())
 }
 
 fn chat_path(paths: &ReviewPaths, repo: &str, number: u64) -> PathBuf {
@@ -221,6 +263,34 @@ mod tests {
             load_chat(&paths, "acme/app", 13).expect("read no chat"),
             None
         );
+    }
+
+    #[test]
+    fn now_requests_are_taken_once_in_the_order_they_came() {
+        let directory = tempfile::tempdir().expect("create a directory");
+        let paths = ReviewPaths {
+            config: directory.path().join("review.json"),
+            state: directory.path().join("review"),
+        };
+        let at = |text: &str| text.parse::<Timestamp>().expect("parse the time");
+        let one_pr = NowRequest {
+            pr: Some("acme/app#12".to_owned()),
+        };
+        request_now(&paths, &one_pr, at("2026-11-18T01:00:01Z")).expect("ask for one PR");
+        request_now(&paths, &NowRequest::default(), at("2026-11-18T01:00:00Z"))
+            .expect("ask for a batch");
+        fs::write(paths.state.join("now/0-damaged.json"), "{").expect("write a damaged one");
+
+        let taken = take_now_requests(&paths).expect("take the requests");
+        let again = take_now_requests(&paths).expect("take nothing");
+
+        let taken = taken
+            .into_iter()
+            .map(|request| request.map_err(|error| error.to_string()))
+            .collect::<Vec<_>>();
+        assert!(taken[0].is_err(), "{taken:?}");
+        assert_eq!(taken[1..], [Ok(NowRequest::default()), Ok(one_pr)]);
+        assert_eq!(again.len(), 0);
     }
 
     #[test]
