@@ -130,13 +130,13 @@ pub(super) fn text(value: Option<&Value>) -> String {
     value.and_then(Value::as_str).unwrap_or_default().to_owned()
 }
 
-// A rerun is a later run of the same name, so only the latest run counts.
-// Runs are ordered by id, since ids grow with creation while a queued run has no start time yet.
 fn check_run_status_of(suites: Option<&Value>) -> Option<BotStatus> {
     let runs = nodes_of(suites)
         .iter()
         .flat_map(|suite| nodes_of(suite.get("checkRuns")))
         .collect::<Vec<_>>();
+    // A rerun is a later run of the same name, so only the latest run counts.
+    // Runs are ordered by id, since ids grow with creation while a queued run has no start time yet.
     let run = runs
         .iter()
         .fold(None, |latest: Option<&Object>, next| match latest {
@@ -222,8 +222,8 @@ fn login_of(author: Option<&Value>) -> String {
     }
 }
 
-// A bot's own status tells its review's progress, not a failure of the PR.
 fn failed_required(contexts: &[Object], bots: &[ReviewBot]) -> Vec<FailedCheck> {
+    // A bot's own status tells its review's progress, not a failure of the PR.
     let statuses = bots
         .iter()
         .filter_map(|bot| match &bot.status {

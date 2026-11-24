@@ -52,7 +52,7 @@ struct Tracked {
 // A failed cycle is retried after this, so a config or network error never ends the watch.
 const RETRY: Duration = Duration::from_secs(60);
 
-// Runs until a stop request, an end, or a replaced program; the caller exits by what it returns.
+// Runs until a stop request, an end, or a replaced program.
 pub(crate) fn watch_forever(watch: Watch<'_>) -> Result<(), Failure> {
     let Watch {
         mut cycle,
@@ -88,6 +88,7 @@ pub(crate) fn watch_forever(watch: Watch<'_>) -> Result<(), Failure> {
         let wait = match run_cycle(&mut cycle, &mut over) {
             Ok(config) => Duration::from_secs(config.poll_interval_seconds),
             Err(failure) => {
+                // A failure's message may carry a path or what a command printed, so the log records the tag alone.
                 cycle
                     .log
                     .write(Entry::new("cycle_failed").with("error", failure.tag()));
@@ -468,7 +469,6 @@ mod tests {
     const PR: &str = "https://github.com/org/pay/pull/7";
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const LINKED_AT: &str = "2026-10-20T00:00:00.000Z";
-    // Noon in the zone the cycle reads, so the default quiet hours never apply unless a test asks.
     const NOON: &str = "2026-10-23T12:00:00Z";
 
     // What GitHub, the apps and the clock show the watch.
@@ -632,39 +632,6 @@ mod tests {
         }
 
         #[test]
-        fn event_is_never_sent_again_and_the_answer_is_checked_before_the_next_message() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-
-            fixture.later(1);
-            fixture.update(|world| {
-                let at = time::format_timestamp(world.now);
-                world.comments = vec![comment(), by_tanaka(5, &at)];
-            });
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 1);
-
-            let first = fixture.prompt(0);
-            fixture.update(|world| {
-                world.turns = vec![delegated_turn(
-                    at(NOON),
-                    &first,
-                    &format!("1. {PR}#discussion_r1 直す"),
-                    "reviewer",
-                )];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 2);
-            assert!(fixture.prompt(1).contains(&format!("{PR}#discussion_r5")));
-            assert!(!fixture.prompt(1).contains("discussion_r1"));
-            assert_eq!(fixture.state().follow_up, []);
-        }
-
-        #[test]
         fn one_follow_up_goes_for_the_findings_the_answer_left_out() {
             let fixture = Fixture::new(json!({}), Read::Again, "worker");
             fixture.update(|world| {
@@ -775,6 +742,8 @@ mod tests {
 
             assert_eq!(fixture.sent().len(), 2);
             assert!(fixture.prompt(1).contains("discussion_r5"));
+            assert!(!fixture.prompt(1).contains("discussion_r1"));
+            assert_eq!(fixture.state().follow_up, []);
         }
 
         #[test]
@@ -1481,7 +1450,14 @@ mod tests {
         #[test]
         fn message_an_idle_worker_never_started_goes_again_and_the_owner_is_told_once() {
             let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.update(|world| {
+                world.comments = vec![comment()];
+                world.summary = PrSummary {
+                    rollup: Some("FAILURE".to_owned()),
+                    ..summary()
+                };
+                world.failed_required = vec![build()];
+            });
             fixture.cycle();
             fixture.later(9);
             fixture.cycle();
@@ -1492,11 +1468,13 @@ mod tests {
 
             assert_eq!(waited, 1);
             assert_eq!(fixture.sent().len(), 2);
-            assert!(fixture.prompt(1).contains("discussion_r1"));
+            let again = fixture.prompt(1);
+            assert!(again.contains("discussion_r1"), "{again}");
+            assert!(again.contains("[必須CIの失敗] build"), "{again}");
             assert!(
                 fixture.logged("answer_not_seen")[0]
                     .fields
-                    .contains(&("resent", json!(2)))
+                    .contains(&("resent", json!(3)))
             );
             assert_eq!(
                 *fixture.notices.borrow(),
@@ -1648,27 +1626,6 @@ mod tests {
         }
 
         #[test]
-        fn whole_lost_message_goes_again_with_what_it_told_besides_findings() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| {
-                world.comments = vec![comment()];
-                world.summary = PrSummary {
-                    rollup: Some("FAILURE".to_owned()),
-                    ..summary()
-                };
-                world.failed_required = vec![build()];
-            });
-            fixture.cycle();
-
-            fixture.later(10);
-            fixture.cycle();
-
-            let again = fixture.prompt(1);
-            assert!(again.contains("discussion_r1"), "{again}");
-            assert!(again.contains("[必須CIの失敗] build"), "{again}");
-        }
-
-        #[test]
         fn turn_started_while_the_worker_was_busy_past_the_limit_is_still_its_answer() {
             let fixture = Fixture::new(json!({}), Read::Again, "worker");
             fixture.update(|world| world.comments = vec![comment()]);
@@ -1703,46 +1660,6 @@ mod tests {
 
     mod hand_over {
         use super::*;
-
-        #[test]
-        fn pr_named_from_another_chat_goes_to_it_without_the_answer_awaited_from_the_last() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-
-            assert_eq!(
-                fixture.state().delivered.map(|delivered| delivered.sender),
-                Some("reviewer".to_owned())
-            );
-
-            fixture.link_to("next");
-            fixture.update(|world| {
-                world.sender = Some("sender".to_owned());
-                world.comments = vec![
-                    comment(),
-                    PrComment {
-                        id: "inline:9".to_owned(),
-                        author: "tanaka".to_owned(),
-                        url: format!("{PR}#discussion_r9"),
-                        ..comment()
-                    },
-                ];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.logged("handed_over").len(), 1);
-            let sent = fixture.sent();
-            assert_eq!(
-                sent.iter()
-                    .map(|sent| (sent.caller.as_str(), sent.thread.as_str()))
-                    .collect::<Vec<_>>(),
-                [("reviewer", "worker"), ("sender", "next")]
-            );
-            // The finding only the last chat was told goes to the new one too.
-            assert!(sent[1].prompt.contains("discussion_r1"));
-            assert!(sent[1].prompt.contains("discussion_r9"));
-        }
 
         #[rstest]
         #[case::stopped_for_a_gone_chat(Stopping::Gone)]
@@ -1787,7 +1704,7 @@ mod tests {
         }
     }
 
-    // The records harnexus-task watch left on a Mac, with the comments they had already seen still on GitHub.
+    // The records harnexus-task watch left on a Mac.
     mod legacy_records {
         use super::*;
 

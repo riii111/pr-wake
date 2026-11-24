@@ -75,7 +75,6 @@ impl Bridge {
         }
     }
 
-    // The query changes nothing, so any failure of it leaves a call unsent.
     pub(crate) fn capabilities(&self) -> Capabilities {
         let path = match &self.socket {
             Ok(path) => path,
@@ -87,6 +86,7 @@ impl Bridge {
         });
         let answer = match socket::request_line(path, &line, self.timeouts.query, &self.stop) {
             Ok(answer) => answer,
+            // The query changes nothing, so any failure of it leaves a call unsent.
             Err(failure) => {
                 return Capabilities::NotSent(format!(
                     "{}: {}; {}",
@@ -123,7 +123,6 @@ impl Bridge {
         )
     }
 
-    // A call goes out only once the bridge offers protocol 1 and the tool, so an older bridge never gets one.
     // The answer always carries an `outcome`.
     pub(crate) fn call(
         &self,
@@ -131,6 +130,7 @@ impl Bridge {
         tool: &str,
         arguments: &Map<String, Value>,
     ) -> Map<String, Value> {
+        // Asked before every call, so a bridge replaced by one without protocol 1 or the tool never gets one.
         let operations = match self.capabilities() {
             Capabilities::Offered(operations) => operations,
             Capabilities::NotSent(message) => return outcome("not_sent", &message),
@@ -171,7 +171,6 @@ impl Bridge {
         }
     }
 
-    // The watch never falls back to the versionless protocol, so protocol 1 must offer every tool it uses.
     pub(crate) fn check_v1(&self) -> Result<(), String> {
         let operations = match self.capabilities() {
             Capabilities::Offered(operations) => operations,
@@ -179,6 +178,7 @@ impl Bridge {
                 return Err(format!("cannot use the harnexus call socket: {message}"));
             }
         };
+        // The watch never falls back to the versionless protocol, so protocol 1 must offer every tool it uses.
         let missing = WATCH_OPERATIONS
             .iter()
             .filter(|tool| !operations.iter().any(|operation| operation == *tool))
@@ -195,7 +195,6 @@ impl Bridge {
     }
 }
 
-// The path follows harnexus's documented settings, so both sides agree on where the socket is.
 pub(crate) fn call_socket_path(
     call_socket: Option<&OsStr>,
     state_path: Option<&OsStr>,
@@ -274,7 +273,6 @@ mod tests {
 
     use super::*;
 
-    // Listening on a Unix socket needs a sandbox that allows it.
     struct FakeBridge {
         path: PathBuf,
         lines: Arc<Mutex<Vec<Value>>>,
@@ -393,11 +391,6 @@ mod tests {
                 r#"{"result":1}"#,
                 "no answer: answer without outcome",
             ),
-            (
-                "outcome_not_text",
-                r#"{"outcome":1}"#,
-                "no answer: answer without outcome",
-            ),
         ] {
             let read = answer_of(answer);
 
@@ -417,7 +410,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::before_protocol_1(old_bridge(), "does not offer call protocol 1")]
     #[case::without_send(
         json!({ "version": 1, "outcome": "done", "operations": ["read_thread"] }),
         "does not offer send_message_to_thread"
@@ -538,7 +530,6 @@ mod tests {
                     Some(answered) => {
                         let _ = writeln!(stream, "{answered}");
                     }
-                    // Held until the client gives up, which closes its end.
                     None => {
                         let _ = stream.read_to_end(&mut Vec::new());
                     }

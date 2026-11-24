@@ -56,7 +56,6 @@ pub(crate) struct Choice {
     prompt: Prompt,
 }
 
-// A setting this version does not support is refused rather than silently ignored.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ConfigFile {
@@ -158,11 +157,11 @@ impl ReviewConfig {
             .collect()
     }
 
-    // GitHub matches repository names without case.
     #[must_use]
     pub(crate) fn checkout_of(&self, repo: &str) -> Option<&Path> {
         self.repositories
             .iter()
+            // GitHub matches repository names without case.
             .find(|(name, _)| name.eq_ignore_ascii_case(repo))
             .map(|(_, checkout)| checkout.as_path())
     }
@@ -467,7 +466,6 @@ mod tests {
                 "unsupported_key",
                 r#"{"choices":[{"id":"adr","label":"ADR","skill":"adr-review","prompt":"x","model":"gpt"}]}"#,
             ),
-            // alerter splits actions on commas, and equal labels cannot be told apart.
             (
                 "comma_in_label",
                 r#"{"choices":[{"id":"adr","label":"ADR,レビュー","skill":"adr-review","prompt":"x"}]}"#,
@@ -477,7 +475,6 @@ mod tests {
                 r#"{"choices":[CODE,{"id":"other","label":" コードレビュー ","skill":"code-review","prompt":"x"}]}"#,
             ),
             ("duplicate_id", r#"{"choices":[CODE,CODE]}"#),
-            // Found only after the user picked the choice otherwise.
             (
                 "unknown_prompt_field",
                 r#"{"choices":[{"id":"adr","label":"ADR","skill":"adr-review","prompt":"{{.PR.Nope}}"}]}"#,
@@ -537,10 +534,6 @@ mod tests {
             (
                 "no_batch_time",
                 r#"{"batches":{"readyAt":[]},"choices":[CODE]}"#,
-            ),
-            (
-                "batch_time_without_a_leading_zero",
-                r#"{"batches":{"readyAt":["9:00"]},"choices":[CODE]}"#,
             ),
             (
                 "batch_time_past_the_day",

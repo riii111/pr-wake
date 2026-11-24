@@ -22,9 +22,9 @@ impl Launchctl {
         Self::of(["bootstrap".into(), domain().into(), plist.into()])
     }
 
-    // `-k` stops the running agent first, so it starts again on the program at its path.
     #[must_use]
     pub(crate) fn kickstart(label: &str) -> Self {
+        // `-k` stops the running agent first, so it starts again on the program at its path.
         Self::of(["kickstart".into(), "-k".into(), service(label).into()])
     }
 

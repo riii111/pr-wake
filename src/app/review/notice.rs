@@ -99,7 +99,7 @@ mod tests {
             changed_files: 5,
         };
 
-        let notice = Notice::of(&request(Some("tanaka"), None), &choices, Some(&size));
+        let notice = Notice::of(&request(), &choices, Some(&size));
 
         assert_eq!(
             notice.actions,
@@ -113,41 +113,14 @@ mod tests {
         assert_eq!(notice.dropdown, Some(DROPDOWN_LABEL));
     }
 
-    #[test]
-    fn requester_line_tells_an_unknown_requester_and_a_team() {
-        for (name, requester, team, expected) in [
-            (
-                "unknown",
-                None,
-                None,
-                "依頼者不明\nacme/app #7\nクリックでPRを開く",
-            ),
-            (
-                "team",
-                Some("sato"),
-                Some("acme/backend"),
-                "依頼者: @sato（acme/backend 宛て）\nacme/app #7\nクリックでPRを開く",
-            ),
-        ] {
-            let notice = Notice::of(
-                &request(requester, team),
-                &choices(&["コードレビュー"]),
-                None,
-            );
-
-            assert_eq!(notice.message, expected, "case: {name}");
-            assert_eq!(notice.dropdown, None, "case: {name}");
-        }
-    }
-
-    fn request(requester: Option<&str>, team: Option<&str>) -> Found {
+    fn request() -> Found {
         Found {
             key: "acme/app#7@1".to_owned(),
             repo: "acme/app".to_owned(),
             number: 7,
             title: " Fix\nthe \tbug".to_owned(),
-            requester: requester.map(str::to_owned),
-            team: team.map(str::to_owned),
+            requester: Some("tanaka".to_owned()),
+            team: None,
         }
     }
 

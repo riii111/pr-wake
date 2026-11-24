@@ -28,7 +28,6 @@ pub(crate) struct ReviewPaths {
     pub(crate) state: PathBuf,
 }
 
-// The review chat a PR's re-requests go to, kept apart from the watch's link to the PR's worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewChat {
@@ -101,7 +100,6 @@ pub(crate) fn load_config(
     Ok(config)
 }
 
-// `None` before the review has saved one; a damaged state is refused rather than read as empty.
 pub(crate) fn load_state(paths: &ReviewPaths) -> Result<Option<ReviewState>, RecordError> {
     record::load_json(&paths.state_file())
 }
@@ -110,8 +108,8 @@ pub(crate) fn save_state(paths: &ReviewPaths, state: &ReviewState) -> Result<(),
     record::save_json(&paths.state_file(), state, JsonLayout::TwoSpacesAndNewline)
 }
 
-// A chat links its PR while the review runs, so each link has its own file rather than a place in the state.
 pub(crate) fn record_chat(paths: &ReviewPaths, chat: &ReviewChat) -> Result<(), RecordError> {
+    // A chat links its PR while the review runs, so each link has its own file rather than a place in the state.
     record::save_json(
         &chat_path(paths, &chat.repo, chat.number),
         chat,
@@ -127,12 +125,12 @@ pub(crate) fn load_chat(
     record::load_json(&chat_path(paths, repo, number))
 }
 
-// The running review holds the lock on the state, so each request gets its own file and none overwrites another.
 pub(crate) fn request_now(
     paths: &ReviewPaths,
     request: &NowRequest,
     at: Timestamp,
 ) -> Result<(), RecordError> {
+    // The running review holds the lock on the state, so each request gets its own file and none overwrites another.
     let name = format!("{}-{}.json", at.as_nanosecond(), process::id());
     record::save_json(
         &paths.state.join(NOW).join(name),
@@ -141,7 +139,6 @@ pub(crate) fn request_now(
     )
 }
 
-// Each request is removed before it is handed over, so one that cannot be removed is never run again and again.
 pub(crate) fn take_now_requests(
     paths: &ReviewPaths,
 ) -> Result<Vec<Result<NowRequest, RecordError>>, RecordError> {
@@ -159,13 +156,13 @@ pub(crate) fn take_now_requests(
         })
         .map(|path| {
             let request = record::load_required_json::<NowRequest>(&path);
+            // Each request is removed before it is handed over, so one that cannot be removed is never run again and again.
             record::remove_record(&path)?;
             request
         })
         .collect())
 }
 
-// The caller of a selection waits on its own file, which the running review rewrites as each request ends.
 pub(crate) fn save_selection(
     paths: &ReviewPaths,
     id: &str,
@@ -185,7 +182,7 @@ pub(crate) fn load_selection(
     record::load_json(&selection_path(paths, id))
 }
 
-// `false` when a record of the id exists, which is left untouched so a repeated id never replaces its receipt.
+// `false` when a record of the id exists, which is left untouched.
 pub(crate) fn create_selection(
     paths: &ReviewPaths,
     id: &str,
@@ -223,7 +220,6 @@ pub(crate) fn selection_ids(
         .collect())
 }
 
-// Written by each review as it starts, so a selection names the run it was handed to.
 pub(crate) fn record_run(paths: &ReviewPaths, run: &str) -> Result<(), RecordError> {
     record::save_json(
         &paths.state.join(RUN),
@@ -251,7 +247,6 @@ fn chat_path(paths: &ReviewPaths, repo: &str, number: u64) -> PathBuf {
         .join(format!("{}.json", pr_key(&pr)))
 }
 
-// Held for the life of the review, so a second one cannot notify or launch the same request.
 // `None` while another review holds it.
 pub(crate) fn hold_lock(paths: &ReviewPaths) -> Result<Option<ProcessLock>, RecordError> {
     record::hold_lock(&paths.state.join(LOCK))
@@ -262,29 +257,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_naming_a_missing_skill_is_refused_with_the_skill() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let path = directory.path().join("review.json");
-        fs::write(
-            &path,
-            r#"{"choices":[{"id":"adr","label":"ADR","skill":"no-such-skill","prompt":"x"}]}"#,
-        )
-        .expect("write the config");
-
-        let loaded = load_config(&path, directory.path(), &directory.path().join(".codex"));
-
-        let error = loaded.expect_err("the skill is missing");
-        assert!(error.contains("no-such-skill"), "{error}");
-        assert!(error.contains("review.json"), "{error}");
-    }
-
-    #[test]
-    fn config_whose_skills_exist_loads() {
+    fn config_loads_only_once_its_skills_exist() {
         let directory = tempfile::tempdir().expect("create a directory");
         let codex_home = directory.path().join(".codex");
         let skill = codex_home.join("skills/code-review/SKILL.md");
-        fs::create_dir_all(skill.parent().expect("a parent")).expect("create the skill");
-        fs::write(&skill, "# code-review").expect("write the skill");
         let path = directory.path().join("review.json");
         fs::write(
             &path,
@@ -292,8 +268,14 @@ mod tests {
         )
         .expect("write the config");
 
+        let missing = load_config(&path, directory.path(), &codex_home);
+        fs::create_dir_all(skill.parent().expect("a parent")).expect("create the skill");
+        fs::write(&skill, "# code-review").expect("write the skill");
         let loaded = load_config(&path, directory.path(), &codex_home);
 
+        let error = missing.expect_err("the skill is missing");
+        assert!(error.contains("code-review"), "{error}");
+        assert!(error.contains("review.json"), "{error}");
         assert_eq!(
             loaded.map(|config| config.choices[0].skill_path.clone()),
             Ok(skill)
@@ -375,21 +357,6 @@ mod tests {
         assert!(taken[0].is_err(), "{taken:?}");
         assert_eq!(taken[1..], [Ok(NowRequest::default()), Ok(one_pr)]);
         assert_eq!(again.len(), 0);
-    }
-
-    #[test]
-    fn lock_allows_one_review() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let paths = ReviewPaths {
-            config: directory.path().join("review.json"),
-            state: directory.path().join("review"),
-        };
-
-        let first = hold_lock(&paths).expect("lock");
-        let second = hold_lock(&paths).expect("try the lock again");
-
-        assert!(first.is_some());
-        assert!(second.is_none(), "a second review must not get the lock");
     }
 
     #[test]

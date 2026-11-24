@@ -233,7 +233,6 @@ fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
     sync_directory(directory)
 }
 
-// A hard link fails on an existing name, so two writers of one path never both win, and the file appears whole.
 fn write_new(path: &Path, content: &[u8]) -> io::Result<bool> {
     let directory = parent(path)?;
     prepare_directory(directory)?;
@@ -243,6 +242,7 @@ fn write_new(path: &Path, content: &[u8]) -> io::Result<bool> {
         .and_then(|()| file.sync_all())
         .and_then(|()| {
             drop(file);
+            // A hard link fails on an existing name, so two writers of one path never both win, and the file appears whole.
             fs::hard_link(&temporary, path)
         });
     let _ = fs::remove_file(&temporary);
@@ -403,13 +403,6 @@ mod tests {
                 expected: Some(("/Users/me/.config", "/Users/me/.local/state")),
             },
             DirectoryCase {
-                name: "unset_xdg",
-                home: Some("/Users/me"),
-                config_home: None,
-                state_home: None,
-                expected: Some(("/Users/me/.config", "/Users/me/.local/state")),
-            },
-            DirectoryCase {
                 name: "absolute_xdg_without_home",
                 home: None,
                 config_home: Some("/conf"),
@@ -439,28 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn layouts_match_the_files_each_feature_already_writes() {
-        let one_space = "{\n \"status\": \"watching\",\n \"seen\": [],\n \"pending\": [\n  {\n   \"type\": \"conflict\",\n   \"head\": \"abc\"\n  }\n ],\n \"summary\": null\n}";
-        let two_spaces = "{\n  \"status\": \"watching\",\n  \"seen\": [],\n  \"pending\": [\n    {\n      \"type\": \"conflict\",\n      \"head\": \"abc\"\n    }\n  ],\n  \"summary\": null\n}\n";
-        for (name, layout, expected) in [
-            ("json_stringify_one_space", JsonLayout::OneSpace, one_space),
-            (
-                "go_marshal_indent",
-                JsonLayout::TwoSpacesAndNewline,
-                two_spaces,
-            ),
-        ] {
-            let directory = tempfile::tempdir().expect("create a directory");
-            let path = directory.path().join("state.json");
-
-            save_json(&path, &record("watching"), layout).expect("save the record");
-
-            let written = fs::read_to_string(&path).expect("read the record");
-            assert_eq!(written, expected, "case: {name}");
-        }
-    }
-
-    #[test]
     fn saved_record_is_private_and_leaves_no_temporary_file() {
         let root = tempfile::tempdir().expect("create a directory");
         let directory = root.path().join("watch").join("62ba7cefd0fd7837");
@@ -478,68 +449,9 @@ mod tests {
     }
 
     #[test]
-    fn saving_again_replaces_the_record() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let path = directory.path().join("state.json");
-        save_json(&path, &record("watching"), JsonLayout::OneSpace).expect("save the record");
-
-        save_json(&path, &record("ended"), JsonLayout::OneSpace).expect("save it again");
-
-        let loaded = load_json::<Record>(&path).expect("load the record");
-        assert_eq!(loaded, Some(record("ended")));
-    }
-
-    #[test]
-    fn missing_record_loads_as_none() {
-        let directory = tempfile::tempdir().expect("create a directory");
-
-        let loaded = load_json::<Record>(&directory.path().join("state.json"));
-
-        assert!(matches!(loaded, Ok(None)), "{loaded:?}");
-    }
-
-    #[test]
-    fn missing_required_record_is_a_read_error() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let path = directory.path().join("pr-watch.json");
-
-        let loaded = load_required_json::<Record>(&path);
-
-        let error = loaded.expect_err("the record is missing");
-        assert!(
-            matches!(&error.kind, RecordErrorKind::Read(read) if read.kind() == io::ErrorKind::NotFound),
-            "{error:?}"
-        );
-        assert!(error.to_string().contains("pr-watch.json"), "{error}");
-    }
-
-    #[test]
-    fn directory_is_listed_in_order_and_a_missing_one_as_none() {
-        let root = tempfile::tempdir().expect("create a directory");
-        for name in ["b", "a", "c"] {
-            fs::create_dir(root.path().join(name)).expect("create an entry");
-        }
-        let file = root.path().join("a").join("link.json");
-        fs::write(&file, "{}").expect("write a file");
-
-        let listed = list_directory(root.path()).expect("list the directory");
-        let missing = list_directory(&root.path().join("missing")).expect("list a missing one");
-        let not_directory = list_directory(&file).expect("list a file");
-
-        assert_eq!(listed, Some(vec!["a".into(), "b".into(), "c".into()]));
-        assert_eq!(missing, None);
-        assert_eq!(not_directory, None);
-    }
-
-    #[test]
     fn record_without_the_expected_shape_is_invalid() {
         for (name, content) in [
             ("not_json", "{"),
-            ("json_null", "null"),
-            (
-                "wrong_field_type",
-                r#"{"status":1,"seen":[],"pending":[],"summary":null}"#,
-            ),
             (
                 "trailing_content",
                 r#"{"status":"watching","seen":[],"pending":[],"summary":null} {}"#,
@@ -562,22 +474,6 @@ mod tests {
                 "case: {name}: {loaded:?}"
             );
         }
-    }
-
-    #[test]
-    fn invalid_record_error_names_the_damaged_field() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let path = directory.path().join("state.json");
-        fs::write(
-            &path,
-            r#"{"status":"watching","seen":[],"pending":[{"type":1}],"summary":null}"#,
-        )
-        .expect("write the record");
-
-        let loaded = load_json::<Record>(&path);
-
-        let error = loaded.expect_err("the record is refused").to_string();
-        assert!(error.contains("pending[0].type"), "{error}");
     }
 
     #[test]

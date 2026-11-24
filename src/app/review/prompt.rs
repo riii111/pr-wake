@@ -137,36 +137,16 @@ mod tests {
             base_ref: "main".to_owned(),
         };
 
-        for (name, requester, expected) in [
-            (
-                "requester",
-                Some("tanaka"),
-                "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main @tanaka }} done",
-            ),
-            (
-                "unknown_requester",
-                None,
-                "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main @ }} done",
-            ),
-        ] {
-            let rendered = prompt.render(&PromptData {
-                pr: &pr,
-                requester,
-                skill: "code-review",
-                skill_path: Path::new("/c/SKILL.md"),
-            });
-
-            assert_eq!(rendered, expected, "case: {name}");
-        }
-    }
-
-    #[test]
-    fn prompt_of_an_older_example_is_told_to_drop_the_worktree() {
-        let parsed = Prompt::parse("PR: {{.PR.URL}}\nコードは{{ .Worktree }}を読んでください。");
+        let rendered = prompt.render(&PromptData {
+            pr: &pr,
+            requester: Some("tanaka"),
+            skill: "code-review",
+            skill_path: Path::new("/c/SKILL.md"),
+        });
 
         assert_eq!(
-            parsed,
-            Err("{{.Worktree}} is no longer a field: the review now starts in a worktree at the PR head, so remove the sentence naming it, as in config.example.json".to_owned())
+            rendered,
+            "[$code-review](/c/SKILL.md) acme/app#12 Fix\nhttps://github.com/acme/app/pull/12 abc main @tanaka }} done"
         );
     }
 

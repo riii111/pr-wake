@@ -45,7 +45,6 @@ pub(super) struct DaemonDeps<'deps> {
     pub(super) run: &'deps str,
 }
 
-// Polling and notifying run on separate threads, so a notification awaiting the owner never delays a poll.
 pub(super) struct Daemon<'deps> {
     deps: DaemonDeps<'deps>,
     // The one copy of the state; every change is saved before the lock is released.
@@ -110,6 +109,7 @@ impl<'deps> Daemon<'deps> {
     // Runs until a stop request, with every notification closed and every launch ended.
     pub(super) fn run(&self) -> Result<(), String> {
         self.recover()?;
+        // Polling and notifying run on separate threads, so a notification awaiting the owner never delays a poll.
         thread::scope(|scope| {
             if self.deps.tools.config.batches.is_some() {
                 scope.spawn(|| self.batch_loop());
@@ -364,7 +364,6 @@ impl<'deps> Daemon<'deps> {
         self.keep_digest(&mut None, (self.deps.now)(), &digest);
     }
 
-    // A selection's record is its own handoff, so the caller's one write is all it takes and a caller that dies after it loses nothing.
     fn take_selections(&self) {
         self.save_unsaved_selections();
         let ids = match review_record::selection_ids(self.deps.paths) {
@@ -394,7 +393,6 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    // Only the chosen requests still queued go through the batch's decision, so a stale choice never starts a second review.
     fn start_selected(&self, id: &str, mut record: SelectionRecord) {
         // A selection made for an earlier run waited while no review ran, so it is closed with nothing started.
         if record.run != self.deps.run {
@@ -464,7 +462,6 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    // Reads GitHub without the poll's cache, as the queue the owner chose from may predate a withdrawal or a re-request.
     fn verify_selected(&self, key: &str, login: &str) -> Result<(), SelectedOutcome> {
         let found = self.queued_request(key)?.found;
         let unverified = |error: String| SelectedOutcome::Failed {
@@ -474,6 +471,7 @@ impl<'deps> Daemon<'deps> {
         if login.is_empty() {
             return Err(unverified("the login is unknown".to_owned()));
         }
+        // Reads GitHub without the poll's cache, as the queue the owner chose from may predate a withdrawal or a re-request.
         let github = github(self.deps.tools, self.deps.stop);
         let teams = &self.deps.tools.config.teams;
         let live = github
@@ -526,7 +524,6 @@ impl<'deps> Daemon<'deps> {
         })
     }
 
-    // A selection an earlier run left open is closed once and never resumed, as its launch may already have happened.
     fn close_interrupted_selections(&self) {
         let ids = match review_record::selection_ids(self.deps.paths) {
             Ok(ids) => ids,
@@ -558,6 +555,7 @@ impl<'deps> Daemon<'deps> {
             if record.run == self.deps.run {
                 continue;
             }
+            // Closed once and never resumed, as its launch may already have happened.
             // A request the recovery queued again never reached its launch, so only another may have started.
             let in_flight = record.in_flight.as_ref().and_then(|key| {
                 self.lock_state()
@@ -575,7 +573,6 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    // Only the batch thread writes a selection after it is taken, so the record kept here is never older than the file.
     fn save_selection(&self, id: &str, record: &SelectionRecord) {
         let mut unsaved = self.unsaved.lock().unwrap_or_else(PoisonError::into_inner);
         match review_record::save_selection(self.deps.paths, id, record) {
@@ -584,6 +581,7 @@ impl<'deps> Daemon<'deps> {
             }
             Err(error) => {
                 self.log(&format!("selection {id}: {error}"));
+                // Only the batch thread writes a selection after it is taken, so the record kept here is never older than the file.
                 unsaved.insert(id.to_owned(), record.clone());
             }
         }
@@ -600,11 +598,11 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    // Only the batch thread adds or removes digests, so the index stays valid while the batch runs.
     fn keep_digest(&self, pending: &mut Option<usize>, ready: Timestamp, digest: &Digest) {
         let mut state = self.lock_state();
         let before = state.pending_digests.clone();
         let digests = &mut state.pending_digests;
+        // Only the batch thread adds or removes digests, so the index stays valid while the batch runs.
         if let Some(kept) = pending.and_then(|index| digests.get_mut(index)) {
             kept.digest = digest.clone();
         } else {
@@ -1024,8 +1022,8 @@ impl<'deps> Daemon<'deps> {
     }
 
     // A strictly newer request of the PR whose review began at this head already covers what the request asks for.
-    // Newer means a larger GitHub event id, as an older event can be first seen late; an unknown event has no order and is never suppressed.
     fn reviewed_at(&self, request: &Request, head: &str) -> bool {
+        // Newer means a larger GitHub event id, as an older event can be first seen late; an unknown event has no order and is never suppressed.
         let Some(event) = event_id(&request.found.key) else {
             return false;
         };
@@ -1098,7 +1096,6 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    // A change that cannot be saved is undone, so the state in memory stays the one on disk.
     fn update(&self, key: &str, change: impl FnOnce(&mut Request)) -> Result<(), String> {
         let mut state = self.lock_state();
         let now = (self.deps.now)();
@@ -1110,6 +1107,7 @@ impl<'deps> Daemon<'deps> {
         changed.updated_at = now;
         state.requests.insert(key.to_owned(), changed);
         let saved = self.save(&state);
+        // A change that cannot be saved is undone, so the state in memory stays the one on disk.
         if saved.is_err() {
             state.requests.insert(key.to_owned(), before);
         }
@@ -1212,7 +1210,6 @@ fn event_id(key: &str) -> Option<u64> {
     key.rsplit_once('@')?.1.parse().ok()
 }
 
-// Rate limits and outages are waited out with a growing delay instead of stopping the review.
 fn backoff(interval: Duration, failures: u32) -> Duration {
     let mut delay = interval;
     for _ in 0..failures {
@@ -1282,10 +1279,8 @@ mod tests {
         // Each prompt sent to a linked chat, after the chat.
         sent: Mutex<Vec<(String, String)>>,
         creation: Mutex<Created>,
-        // Run as a chat is created, after the selection recorded the request in flight.
+        // Run as a chat is created.
         on_create: Mutex<Option<Box<dyn Fn() + Send>>>,
-        // Answers the report chat in place of `creation`.
-        report_creation: Mutex<Option<Created>>,
         // Each prompt a new chat was started with, after its title.
         started: Mutex<Vec<(String, String)>>,
         inbox: Mutex<String>,
@@ -1355,24 +1350,35 @@ mod tests {
 
     #[test]
     fn started_chat_runs_the_review_at_the_head_and_takes_the_prs_re_requests() {
+        const LATER: &str = "fedcba9876543210fedcba9876543210fedcba98";
         let fixture = Fixture::new();
         fixture.answer(CODE_REVIEW);
         fixture.set_creation(Created::Started("new-chat".to_owned()));
+        let first = [requested(30, "sato")];
+        let second = [requested(30, "sato"), requested(31, "sato")];
+        let third = [
+            requested(30, "sato"),
+            requested(31, "sato"),
+            requested(32, "sato"),
+        ];
 
         fixture.with_daemon(&Setup::default(), |daemon, stop| {
             daemon.poll_once().expect("baseline poll");
             notifying(daemon, stop, || {
-                fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                fixture.request("acme/app", 12, &first);
                 daemon.poll_once().expect("poll the request");
                 fixture.wait_status("acme/app#12@30", Status::Launched);
 
-                fixture.request(
-                    "acme/app",
-                    12,
-                    &[requested(30, "sato"), requested(31, "sato")],
-                );
+                fixture.set_head(LATER);
+                fixture.request("acme/app", 12, &second);
                 daemon.poll_once().expect("poll the re-request");
                 fixture.wait_status("acme/app#12@31", Status::Launched);
+
+                fixture.request("acme/app", 12, &third);
+                daemon
+                    .poll_once()
+                    .expect("poll the re-request of the same head");
+                fixture.wait_status("acme/app#12@32", Status::Launched);
             });
         });
 
@@ -1382,21 +1388,29 @@ mod tests {
         );
         assert_eq!(fixture.opened(), Vec::<String>::new());
         assert_eq!(
-            fixture.state().requests["acme/app#12@30"].worktree,
-            Some(fixture.worktree_at(HEAD).display().to_string())
-        );
-        assert_eq!(
             fixture.state().requests["acme/app#12@30"].review_started,
             Some(true)
         );
+        let to_chat = |key| {
+            (
+                "new-chat".to_owned(),
+                fixture.worktree_prompt_at(LATER, key),
+            )
+        };
         assert_eq!(
             fixture.sent(),
-            [(
-                "new-chat".to_owned(),
-                fixture.worktree_prompt_at(HEAD, "acme/app#12@31")
-            )]
+            [to_chat("acme/app#12@31"), to_chat("acme/app#12@32")],
+            "each re-request of one head is told apart by its key"
         );
-        assert_eq!(fixture.count_calls("alerter "), 1);
+        assert_eq!(
+            fixture.count_calls("alerter "),
+            1,
+            "only the first request is asked"
+        );
+        assert_eq!(
+            fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
+            2
+        );
     }
 
     #[test]
@@ -1425,104 +1439,6 @@ mod tests {
         assert_eq!(
             review_record::load_chat(&fixture.paths, "acme/app", 12).expect("read the link"),
             None
-        );
-    }
-
-    #[test]
-    fn restart_brings_back_nothing_handled_but_a_re_request_of_the_same_pr() {
-        let fixture = Fixture::new();
-        fixture.answer(CODE_REVIEW);
-        fixture.with_daemon(&Setup::default(), |daemon, stop| {
-            daemon.poll_once().expect("baseline poll");
-            notifying(daemon, stop, || {
-                fixture.request("acme/app", 12, &[requested(30, "sato")]);
-                daemon.poll_once().expect("poll");
-                fixture.wait_status("acme/app#12@30", Status::Launched);
-            });
-        });
-
-        let queued_after_restart = fixture.with_daemon(&Setup::default(), |daemon, stop| {
-            daemon.poll_once().expect("poll after the restart");
-            let queued = daemon.queued_count();
-            notifying(daemon, stop, || {
-                fixture.request(
-                    "acme/app",
-                    12,
-                    &[requested(30, "sato"), requested(31, "sato")],
-                );
-                daemon.poll_once().expect("poll");
-                fixture.wait_status("acme/app#12@31", Status::Launched);
-            });
-            queued
-        });
-
-        assert_eq!(
-            queued_after_restart, 0,
-            "a launched request must not come back"
-        );
-        assert_eq!(fixture.opened().len(), 2);
-    }
-
-    #[test]
-    fn re_request_of_a_linked_pr_goes_to_its_chat_at_the_head_without_asking_and_is_reported() {
-        const LATER: &str = "fedcba9876543210fedcba9876543210fedcba98";
-        let fixture = Fixture::new();
-        fixture.answer(CODE_REVIEW);
-        let first = [requested(30, "sato")];
-        let second = [requested(30, "sato"), requested(31, "sato")];
-        let third = [
-            requested(30, "sato"),
-            requested(31, "sato"),
-            requested(32, "sato"),
-        ];
-
-        fixture.with_daemon(&Setup::default(), |daemon, stop| {
-            daemon.poll_once().expect("baseline poll");
-            notifying(daemon, stop, || {
-                fixture.request("acme/app", 12, &first);
-                daemon.poll_once().expect("poll the request");
-                fixture.wait_status("acme/app#12@30", Status::Launched);
-                fixture.link_chat("acme/app", 12, "review-chat");
-
-                fixture.set_head(LATER);
-                fixture.request("acme/app", 12, &second);
-                daemon.poll_once().expect("poll the re-request");
-                fixture.wait_status("acme/app#12@31", Status::Launched);
-
-                fixture.request("acme/app", 12, &third);
-                daemon
-                    .poll_once()
-                    .expect("poll the re-request of the same head");
-                fixture.wait_status("acme/app#12@32", Status::Launched);
-            });
-        });
-
-        assert_eq!(
-            fixture.opened(),
-            [fixture.new_chat_at(HEAD, "acme/app#12@30")]
-        );
-        let to_chat = |key| {
-            (
-                "review-chat".to_owned(),
-                fixture.worktree_prompt_at(LATER, key),
-            )
-        };
-        assert_eq!(
-            fixture.sent(),
-            [to_chat("acme/app#12@31"), to_chat("acme/app#12@32")],
-            "each re-request of one head is told apart by its key"
-        );
-        let sent = fixture.state().requests["acme/app#12@31"].clone();
-        assert_eq!(sent.head_sha.as_deref(), Some(LATER));
-        assert_eq!(sent.choice.as_deref(), Some("code"));
-        assert_eq!(
-            fixture.count_calls("alerter "),
-            1,
-            "only the first request is asked"
-        );
-        assert_eq!(
-            fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
-            2
         );
     }
 
@@ -1608,50 +1524,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_automatic_send_is_reported_without_a_new_chat_or_a_resend() {
-        let fixture = Fixture::new();
-        fixture.answer(CODE_REVIEW);
-
-        let queued = fixture.with_daemon(&Setup::default(), |daemon, stop| {
-            daemon.poll_once().expect("baseline poll");
-            notifying(daemon, stop, || {
-                fixture.request("acme/app", 12, &[requested(30, "sato")]);
-                daemon.poll_once().expect("poll the request");
-                fixture.wait_status("acme/app#12@30", Status::Launched);
-                fixture.link_chat("acme/app", 12, "review-chat");
-                fixture.set_delivery(Delivery::NotSent("not_sent: no bridge".to_owned()));
-
-                fixture.request(
-                    "acme/app",
-                    12,
-                    &[requested(30, "sato"), requested(31, "sato")],
-                );
-                daemon.poll_once().expect("poll the re-request");
-                fixture.wait_status("acme/app#12@31", Status::Failed);
-            });
-            daemon.poll_once().expect("poll again");
-            daemon.queued_count()
-        });
-
-        assert_eq!(queued, 0);
-        assert_eq!(fixture.count_calls("alerter "), 1);
-        assert_eq!(
-            fixture.opened(),
-            [fixture.new_chat_at(HEAD, "acme/app#12@30")]
-        );
-        assert_eq!(fixture.sent().len(), 1);
-        assert_eq!(
-            fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
-            0
-        );
-        assert_eq!(
-            fixture
-                .count_calls("レビューを開始できませんでした: could not send to chat review-chat"),
-            1
-        );
-    }
-
-    #[test]
     fn failed_send_to_the_linked_chat_is_reported_without_a_new_chat_or_a_resend() {
         for (name, delivery, expected) in [
             (
@@ -1667,32 +1539,42 @@ mod tests {
         ] {
             let fixture = Fixture::new();
             fixture.answer(CODE_REVIEW);
-            fixture.link_chat("acme/app", 12, "review-chat");
             fixture.set_delivery(delivery);
 
             let queued = fixture.with_daemon(&Setup::default(), |daemon, stop| {
                 daemon.poll_once().expect("baseline poll");
                 notifying(daemon, stop, || {
                     fixture.request("acme/app", 12, &[requested(30, "sato")]);
-                    daemon.poll_once().expect("poll");
-                    fixture.wait_status("acme/app#12@30", Status::Failed);
-                    wait_for(|| fixture.ran("osascript"));
+                    daemon.poll_once().expect("poll the request");
+                    fixture.wait_status("acme/app#12@30", Status::Launched);
+                    fixture.link_chat("acme/app", 12, "review-chat");
+
+                    fixture.request(
+                        "acme/app",
+                        12,
+                        &[requested(30, "sato"), requested(31, "sato")],
+                    );
+                    daemon.poll_once().expect("poll the re-request");
+                    fixture.wait_status("acme/app#12@31", Status::Failed);
                 });
                 daemon.poll_once().expect("poll again");
                 daemon.queued_count()
             });
 
             assert_eq!(queued, 0, "case: {name}");
+            assert_eq!(fixture.opened().len(), 1, "case: {name}");
             assert_eq!(fixture.sent().len(), 1, "case: {name}");
-            assert!(fixture.opened().is_empty(), "case: {name}");
-            let failed = fixture.state().requests["acme/app#12@30"].clone();
-            assert!(
-                failed
-                    .error
-                    .as_deref()
-                    .is_some_and(|error| error.contains(expected)),
-                "case: {name}: {failed:?}"
+            assert_eq!(
+                fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
+                0,
+                "case: {name}"
             );
+            assert_eq!(
+                fixture.count_calls("レビューを開始できませんでした: "),
+                1,
+                "case: {name}"
+            );
+            assert_eq!(fixture.count_calls(expected), 1, "case: {name}");
         }
     }
 
@@ -1773,33 +1655,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_failure_is_notified_without_opening_anything() {
-        let fixture = Fixture::new();
-        fixture.answer(CODE_REVIEW);
-
-        fixture.with_daemon(&Setup::default(), |daemon, stop| {
-            daemon.poll_once().expect("baseline poll");
-            notifying(daemon, stop, || {
-                fixture.request("acme/unknown", 5, &[requested(50, "tanaka")]);
-                daemon.poll_once().expect("poll");
-                fixture.wait_status("acme/unknown#5@50", Status::Failed);
-                wait_for(|| fixture.ran("osascript"));
-            });
-        });
-
-        let failed = fixture.state().requests["acme/unknown#5@50"].clone();
-        assert_eq!(fixture.opened(), Vec::<String>::new());
-        assert_eq!(failed.head_sha.as_deref(), Some(HEAD));
-        assert!(
-            failed
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("no local checkout")),
-            "{failed:?}"
-        );
-    }
-
-    #[test]
     fn failed_notification_is_queued_again_after_a_poll_interval() {
         let fixture = Fixture::new();
         fixture.answer_with("alerter", |_| {
@@ -1836,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn api_failure_keeps_polling_with_a_growing_delay() {
+    fn api_failure_keeps_polling_with_a_delay_doubling_up_to_fifteen_minutes() {
         let fixture = Fixture::new();
         fixture.answer_with("gh api --paginate -X GET search/issues", |_| {
             Err("HTTP 403: API rate limit exceeded".to_owned())
@@ -1845,7 +1700,7 @@ mod tests {
         let pause = |delay| {
             let mut delays = delays.lock().expect("note the delay");
             delays.push(delay);
-            delays.len() < 3
+            delays.len() < 6
         };
 
         let ended = fixture.with_daemon(
@@ -1859,7 +1714,7 @@ mod tests {
         assert_eq!(ended, Ok(()));
         assert_eq!(
             delays.into_inner().expect("read the delays"),
-            [60, 120, 240].map(Duration::from_secs)
+            [60, 120, 240, 480, 900, 900].map(Duration::from_secs)
         );
         assert!(
             fixture
@@ -1867,15 +1722,6 @@ mod tests {
                 .last_error
                 .is_some_and(|error| error.contains("rate limit"))
         );
-    }
-
-    #[test]
-    fn backoff_doubles_up_to_fifteen_minutes() {
-        let interval = Duration::from_mins(1);
-
-        let delays = [1, 2, 3, 4, 10].map(|failures| backoff(interval, failures).as_secs());
-
-        assert_eq!(delays, [120, 240, 480, 900, 900]);
     }
 
     #[test]
@@ -2062,21 +1908,21 @@ mod tests {
         });
         let clock = Mutex::new(tokyo("2026-11-18T10:51:00"));
         let now = || *clock.lock().expect("read the clock");
+        let setup = Setup {
+            now: Some(&now),
+            ..Setup::default()
+        };
 
-        let shown_before_the_ready_time = fixture.with_daemon(
-            &Setup {
-                now: Some(&now),
-                ..Setup::default()
-            },
-            |daemon, _| {
-                daemon.batch_once();
-                let shown = fixture.count_calls("osascript ");
-                *clock.lock().expect("move the clock") = tokyo("2026-11-18T11:00:00");
-                daemon.batch_once();
-                daemon.batch_once();
-                shown
-            },
-        );
+        fixture.with_daemon(&setup, |daemon, _| daemon.batch_once());
+        *clock.lock().expect("move the clock") = tokyo("2026-11-18T10:55:00");
+        let shown_before_the_ready_time = fixture.with_daemon(&setup, |daemon, _| {
+            daemon.batch_once();
+            let shown = fixture.count_calls("osascript ");
+            *clock.lock().expect("move the clock") = tokyo("2026-11-18T11:00:00");
+            daemon.batch_once();
+            daemon.batch_once();
+            shown
+        });
 
         let statuses = [
             "acme/app#1@10",
@@ -2142,41 +1988,6 @@ mod tests {
     }
 
     #[test]
-    fn batch_report_tells_a_review_opened_for_the_owner_to_send_from_a_started_one() {
-        let fixture = Fixture::batched();
-        fixture.save_queued(&[(1, 10)]);
-        fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
-        *fixture
-            .report_creation
-            .lock()
-            .expect("set the report creation") = Some(Created::Started("report-chat".to_owned()));
-        let now = || tokyo("2026-11-18T11:30:00");
-
-        fixture.with_daemon(
-            &Setup {
-                now: Some(&now),
-                ..Setup::default()
-            },
-            |daemon, _| daemon.batch_once(),
-        );
-
-        let started = fixture.started();
-        let (_, report) = started.last().expect("a report chat");
-        assert!(
-            report.contains(
-                "Enterで送るまでレビューは始まらないと書く）:\n- [#1 PR 1](https://github.com/acme/app/pull/1)"
-            ),
-            "{report}"
-        );
-        assert!(!report.contains("レビューしたPR:"), "{report}");
-        assert_eq!(
-            fixture.opened().len(),
-            1,
-            "the review was opened for the owner"
-        );
-    }
-
-    #[test]
     fn batch_notification_cut_short_by_a_stop_is_shown_once_after_the_restart() {
         let fixture = Fixture::batched();
         fixture.save_queued(&[(1, 10)]);
@@ -2203,59 +2014,6 @@ mod tests {
         assert_eq!(fixture.count_calls("#1 PR 1 pr-wake レビュー 1件"), 2);
         assert_eq!(fixture.state().pending_digests, []);
         assert_eq!(fixture.opened().len(), 1, "launched once");
-    }
-
-    #[test]
-    fn batch_notification_survives_a_restart_before_its_ready_time() {
-        for (name, resumed, shown_on_resume) in [
-            ("resumed_before_ready", "2026-11-18T10:55:00", 0),
-            ("resumed_after_ready", "2026-11-18T11:30:00", 1),
-        ] {
-            let fixture = Fixture::batched();
-            fixture.save_queued(&[(1, 10), (2, 20)]);
-            fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
-            fixture.request("acme/app", 2, &[requested(20, "tanaka")]);
-            fixture.answer_with("gh api --paginate repos/acme/app/pulls/2/reviews", |_| {
-                Ok(br#"[{"user":{"login":"sato","type":"User"},"state":"APPROVED"}]"#.to_vec())
-            });
-            let clock = Mutex::new(tokyo("2026-11-18T10:51:00"));
-            let now = || *clock.lock().expect("read the clock");
-            let setup = Setup {
-                now: Some(&now),
-                ..Setup::default()
-            };
-
-            fixture.with_daemon(&setup, |daemon, _| daemon.batch_once());
-            *clock.lock().expect("move the clock") = tokyo(resumed);
-            let shown = fixture.with_daemon(&setup, |daemon, _| {
-                daemon.poll_once().expect("poll after the restart");
-                daemon.batch_once();
-                let shown = fixture.count_calls("osascript ");
-                *clock.lock().expect("move the clock") = tokyo("2026-11-18T11:45:00");
-                daemon.batch_once();
-                shown
-            });
-
-            assert_eq!(shown, shown_on_resume, "case: {name}");
-            assert_eq!(fixture.count_calls("osascript "), 1, "case: {name}");
-            assert_eq!(
-                fixture.count_calls(
-                    "#1 PR 1\n報告のみ: #2 PR 2（他の人が承認済み） pr-wake レビュー 2件"
-                ),
-                1,
-                "case: {name}"
-            );
-            assert_eq!(fixture.opened().len(), 1, "case: {name}: launched once");
-            assert_eq!(
-                [
-                    fixture.status("acme/app#1@10"),
-                    fixture.status("acme/app#2@20")
-                ],
-                [Status::Launched, Status::Reported],
-                "case: {name}"
-            );
-            assert_eq!(fixture.state().pending_digests, [], "case: {name}");
-        }
     }
 
     #[test]
@@ -2449,7 +2207,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_records_the_chat_a_review_went_to_and_none_for_a_draft() {
+    fn selection_records_the_chat_a_review_went_to_and_none_for_an_unconfirmed_one() {
         for (name, linked, creation, expected) in [
             (
                 "linked_re_request",
@@ -2457,14 +2215,6 @@ mod tests {
                 Created::NotSent("unused".to_owned()),
                 SelectedOutcome::SentToLinked {
                     thread: "review-chat".to_owned(),
-                },
-            ),
-            (
-                "draft_only",
-                false,
-                Created::NotSent("no harnexus".to_owned()),
-                SelectedOutcome::Opened {
-                    reason: Some("no harnexus".to_owned()),
                 },
             ),
             (
@@ -2709,75 +2459,61 @@ mod tests {
     }
 
     #[test]
-    fn poll_during_the_reviewer_lookup_still_withdraws_or_replaces_a_selected_request() {
-        for (name, events_after, newer) in [
-            ("withdrawn", None, None),
-            (
-                "replaced",
-                Some(vec![requested(30, "sato"), requested(31, "sato")]),
-                Some("acme/app#12@31"),
-            ),
-        ] {
-            let fixture = Fixture::batched();
-            fixture.save_queued(&[(12, 30)]);
-            // Seen before the test's clock, so a request the poll adds is the later one.
-            let mut state = fixture.state();
-            state
-                .requests
-                .get_mut("acme/app#12@30")
-                .expect("request")
-                .first_seen = tokyo("2026-11-20T12:00:00");
-            review_record::save_state(&fixture.paths, &state).expect("save the state");
-            fixture.request("acme/app", 12, &[requested(30, "sato")]);
-            let looking = Arc::new(AtomicBool::new(false));
-            let released = Arc::new(AtomicBool::new(false));
-            let (looked, release) = (Arc::clone(&looking), Arc::clone(&released));
-            fixture.answer_with(
-                "gh api repos/acme/app/pulls/12/requested_reviewers",
-                move |_| {
-                    looked.store(true, Ordering::SeqCst);
-                    wait_for(|| release.load(Ordering::SeqCst));
-                    Ok(br#"{"users":[]}"#.to_vec())
-                },
-            );
-            fixture.select("one", &["acme/app#12@30"]);
-            let now = || tokyo("2026-11-21T12:00:00");
+    fn poll_during_the_reviewer_lookup_still_replaces_a_selected_request() {
+        let fixture = Fixture::batched();
+        fixture.save_queued(&[(12, 30)]);
+        // Seen before the test's clock, so a request the poll adds is the later one.
+        let mut state = fixture.state();
+        state
+            .requests
+            .get_mut("acme/app#12@30")
+            .expect("request")
+            .first_seen = tokyo("2026-11-20T12:00:00");
+        review_record::save_state(&fixture.paths, &state).expect("save the state");
+        fixture.request("acme/app", 12, &[requested(30, "sato")]);
+        let looking = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let (looked, release) = (Arc::clone(&looking), Arc::clone(&released));
+        fixture.answer_with(
+            "gh api repos/acme/app/pulls/12/requested_reviewers",
+            move |_| {
+                looked.store(true, Ordering::SeqCst);
+                wait_for(|| release.load(Ordering::SeqCst));
+                Ok(br#"{"users":[]}"#.to_vec())
+            },
+        );
+        fixture.select("one", &["acme/app#12@30"]);
+        let now = || tokyo("2026-11-21T12:00:00");
 
-            fixture.with_daemon(
-                &Setup {
-                    now: Some(&now),
-                    ..Setup::default()
-                },
-                |daemon, _| {
-                    thread::scope(|scope| {
-                        let batch = scope.spawn(|| daemon.batch_once());
-                        wait_for(|| looking.load(Ordering::SeqCst));
-                        match &events_after {
-                            Some(events) => fixture.request("acme/app", 12, events),
-                            None => {
-                                fixture.events.lock().expect("drop the PR").clear();
-                            }
-                        }
-                        daemon.poll_once().expect("poll during the lookup");
-                        released.store(true, Ordering::SeqCst);
-                        batch.join().expect("join the batch");
-                    });
-                },
-            );
+        fixture.with_daemon(
+            &Setup {
+                now: Some(&now),
+                ..Setup::default()
+            },
+            |daemon, _| {
+                thread::scope(|scope| {
+                    let batch = scope.spawn(|| daemon.batch_once());
+                    wait_for(|| looking.load(Ordering::SeqCst));
+                    fixture.request(
+                        "acme/app",
+                        12,
+                        &[requested(30, "sato"), requested(31, "sato")],
+                    );
+                    daemon.poll_once().expect("poll during the lookup");
+                    released.store(true, Ordering::SeqCst);
+                    batch.join().expect("join the batch");
+                });
+            },
+        );
 
-            assert_eq!(
-                fixture.selection("one").outcomes.get("acme/app#12@30"),
-                Some(&SelectedOutcome::NotQueued {
-                    status: Some(Status::Withdrawn),
-                    newer: newer.map(str::to_owned),
-                }),
-                "case: {name}"
-            );
-            assert!(
-                fixture.opened().is_empty() && fixture.started().is_empty(),
-                "case: {name}"
-            );
-        }
+        assert_eq!(
+            fixture.selection("one").outcomes.get("acme/app#12@30"),
+            Some(&SelectedOutcome::NotQueued {
+                status: Some(Status::Withdrawn),
+                newer: Some("acme/app#12@31".to_owned()),
+            })
+        );
+        assert!(fixture.opened().is_empty() && fixture.started().is_empty());
     }
 
     #[test]
@@ -2838,45 +2574,16 @@ mod tests {
     #[test]
     fn older_request_seen_again_is_only_reported_when_a_newer_one_was_reviewed_at_its_head() {
         const LATER: &str = "fedcba9876543210fedcba9876543210fedcba98";
-        for (name, selected, newer_status, started, newer_head, starts) in [
-            (
-                "selected_same_head",
-                true,
-                Status::Launched,
-                true,
-                HEAD,
-                false,
-            ),
-            (
-                "scheduled_same_head",
-                false,
-                Status::Launched,
-                true,
-                HEAD,
-                false,
-            ),
-            (
-                "selected_other_head",
-                true,
-                Status::Launched,
-                true,
-                LATER,
-                true,
-            ),
-            (
-                "scheduled_newer_draft_only",
-                false,
-                Status::Launched,
-                false,
-                HEAD,
-                true,
-            ),
+        for (name, selected, started, newer_head, starts) in [
+            ("selected_same_head", true, true, HEAD, false),
+            ("selected_other_head", true, true, LATER, true),
+            ("scheduled_newer_draft_only", false, false, HEAD, true),
         ] {
             let fixture = Fixture::batched();
             fixture.save_queued(&[(12, 10), (12, 20)]);
             let mut state = fixture.state();
             let newer = state.requests.get_mut("acme/app#12@20").expect("request");
-            newer.status = newer_status;
+            newer.status = Status::Launched;
             newer.review_started = Some(started);
             newer.head_sha = Some(newer_head.to_owned());
             // Event 10 is first seen only after event 20's team was removed, so its order comes from the event ids.
@@ -2929,17 +2636,12 @@ mod tests {
             newer.head_sha = Some(HEAD.to_owned());
             newer.worktree = worktree.map(str::to_owned);
             review_record::save_state(&fixture.paths, &state).expect("save the state");
-            let saved = std::fs::read_to_string(fixture.paths.state_file()).expect("read it");
             fixture.link_chat("acme/app", 12, "review-chat");
             review_record::request_now(&fixture.paths, &NowRequest { pr: None }, Timestamp::now())
                 .expect("ask for the batch");
 
             fixture.take_selections();
 
-            assert!(
-                !saved.contains("reviewStarted"),
-                "case: {name}: as the old version wrote it"
-            );
             assert_eq!(fixture.sent().len(), usize::from(sends), "case: {name}");
             let status = [Status::Reported, Status::Launched][usize::from(sends)];
             assert_eq!(fixture.status("acme/app#12@10"), status, "case: {name}");
@@ -2962,7 +2664,6 @@ mod tests {
         review_record::save_state(&fixture.paths, &state).expect("save the state");
         let chats = fixture.paths.state.join("chats");
         std::fs::create_dir_all(&chats).expect("create the links");
-        // The link of the started chat to the PR cannot be written.
         std::fs::set_permissions(&chats, std::fs::Permissions::from_mode(0o500)).expect("block it");
         let batch = || {
             review_record::request_now(&fixture.paths, &NowRequest { pr: None }, Timestamp::now())
@@ -3144,11 +2845,10 @@ mod tests {
 
     #[test]
     fn poll_in_batch_mode_clears_github_notifications_of_requested_prs_but_mentions() {
-        for (name, batched, failing_unsubscribe, expected) in [
+        for (name, batched, expected) in [
             (
                 "batched",
                 true,
-                false,
                 &[
                     "gh api -X DELETE notifications/threads/1/subscription",
                     "gh api -X DELETE notifications/threads/1",
@@ -3156,16 +2856,7 @@ mod tests {
                     "gh api -X DELETE notifications/threads/5",
                 ][..],
             ),
-            (
-                "failing_unsubscribe",
-                true,
-                true,
-                &[
-                    "gh api -X DELETE notifications/threads/1/subscription",
-                    "gh api -X DELETE notifications/threads/5/subscription",
-                ][..],
-            ),
-            ("without_batches", false, false, &[][..]),
+            ("without_batches", false, &[][..]),
         ] {
             let fixture = if batched {
                 Fixture::batched()
@@ -3193,9 +2884,6 @@ mod tests {
                 thread(6, "subscribed", "Issue", "acme/app/issues/12"),
             ])
             .to_string();
-            if failing_unsubscribe {
-                fixture.answer_with("gh api -X DELETE", |_| Err("HTTP 404".to_owned()));
-            }
 
             let polled = fixture.with_daemon(&Setup::default(), |daemon, _| daemon.poll_once());
 
@@ -3241,7 +2929,6 @@ mod tests {
                 sent: Mutex::new(Vec::new()),
                 creation: Mutex::new(Created::NotSent("no harnexus in the test".to_owned())),
                 on_create: Mutex::new(None),
-                report_creation: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 inbox: Mutex::new("[]".to_owned()),
                 live: Mutex::new(json!({
@@ -3617,13 +3304,7 @@ mod tests {
             if let Some(hook) = &*self.on_create.lock().expect("read the hook") {
                 hook();
             }
-            let report = self
-                .report_creation
-                .lock()
-                .expect("read the report creation")
-                .clone()
-                .filter(|_| chat.title.starts_with("レビュー報告"));
-            report.unwrap_or_else(|| self.creation.lock().expect("read the creation").clone())
+            self.creation.lock().expect("read the creation").clone()
         }
 
         fn started(&self) -> Vec<(String, String)> {

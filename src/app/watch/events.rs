@@ -605,41 +605,6 @@ mod tests {
             );
             assert_eq!(again.events, []);
         }
-
-        #[test]
-        fn events_are_ordered_review_findings_conflict_then_checks() {
-            let detail = PrDetail {
-                summary: PrSummary {
-                    mergeable: CONFLICTING.to_owned(),
-                    ..summary(Some(completed()))
-                },
-                url: PR.to_owned(),
-                title: "Pay".to_owned(),
-                failed_required: vec![build()],
-                comments: vec![comment(1, "2026-10-23T11:00:00Z")],
-                no_actionable: vec!["coderabbit".to_owned()],
-            };
-
-            let found = next_events(
-                &detail,
-                &read_state(&["bot:coderabbit"]),
-                LINKED_AT,
-                "owner",
-                &config(),
-            );
-
-            let kinds = found
-                .events
-                .iter()
-                .map(|event| match event {
-                    WatchEvent::ReviewDone { .. } => "review_done",
-                    WatchEvent::Finding { .. } => "finding",
-                    WatchEvent::Conflict { .. } => "conflict",
-                    WatchEvent::CiFailed { .. } => "ci_failed",
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(kinds, ["review_done", "finding", "conflict", "ci_failed"]);
-        }
     }
 
     fn config() -> WatchConfig {

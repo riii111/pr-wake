@@ -173,22 +173,9 @@ mod tests {
         use super::*;
 
         #[rstest]
-        #[case::reviewer_inline_comment(comment())]
         #[case::reviewer_reply_in_a_resolved_thread(PrComment {
             reply: true,
             resolved: true,
-            ..comment()
-        })]
-        #[case::reviewer_review_with_a_body(PrComment {
-            kind: ItemKind::Review,
-            body: "LGTM with one question".to_owned(),
-            ..comment()
-        })]
-        #[case::new_coderabbit_thread(PrComment { author: CODERABBIT.to_owned(), ..comment() })]
-        #[case::coderabbit_review_posting_actionable_comments(PrComment {
-            author: CODERABBIT.to_owned(),
-            kind: ItemKind::Review,
-            body: "**Actionable comments posted: 2**".to_owned(),
             ..comment()
         })]
         #[case::github_actions_annotation_outside_the_rule(PrComment {

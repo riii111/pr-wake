@@ -33,13 +33,13 @@ pub(crate) fn open_link(
     .map(drop)
 }
 
-// A decoder may keep "+" as a literal plus, so a space is escaped as %20.
 fn query_escape(text: &str) -> String {
     text.bytes()
         .fold(String::with_capacity(text.len()), |mut escaped, byte| {
             if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
                 escaped.push(char::from(byte));
             } else {
+                // A decoder may keep "+" as a literal plus, so a space is escaped as %20.
                 let _ = write!(escaped, "%{byte:02X}");
             }
             escaped

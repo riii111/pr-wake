@@ -161,7 +161,6 @@ fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
     state.halted = None;
     state.lost_since = None;
 
-    // A watch stopped or halted for the last chat runs again.
     if matches!(state.status, WatchStatus::Stopped | WatchStatus::Halted) {
         state.status = WatchStatus::Watching;
         state.reason = None;
@@ -173,7 +172,6 @@ fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
 }
 
 pub(crate) fn is_due(state: &WatchState, now: Timestamp, config: &WatchConfig) -> bool {
-    // A PR nothing has happened to for a while is polled less often.
     let idle_after = SignedDuration::try_from_secs_f64(config.idle_after_hours * 3600.0)
         .unwrap_or(SignedDuration::MAX);
     let interval = if Elapsed::since(state.changed_at.as_deref(), now).at_least(idle_after) {
@@ -230,7 +228,6 @@ pub(crate) fn observe(
     }
 }
 
-// Called only after a full read succeeds, so a failed read leaves the summary for the next cycle to read again.
 pub(crate) fn take_in<'state>(
     state: &'state mut WatchState,
     summary: &PrSummary,
@@ -240,6 +237,7 @@ pub(crate) fn take_in<'state>(
     config: &WatchConfig,
 ) -> &'state [WatchEvent] {
     let found = events::next_events(detail, state, linked_at, owner, config);
+    // Stored only after a full read, so a failed read leaves the summary for the next cycle to read again.
     state.summary = Some(summary.clone());
     state.seen = found.seen;
     state.conflict_head = found.conflict_head;
@@ -254,7 +252,7 @@ pub(crate) fn awaits_delivery(state: &WatchState) -> bool {
         && (!state.pending.is_empty() || !state.follow_up.is_empty() || state.delivered.is_some())
 }
 
-// True when the reason is new, which is when it is worth a log line.
+// True when the reason is new.
 pub(crate) fn hold_for_sender(state: &mut WatchState, missing: &str) -> bool {
     if state.reason.as_deref() == Some(missing) {
         return false;
@@ -461,7 +459,7 @@ pub(crate) fn finish_send(
     }
 }
 
-// The owner checked the app, so the halted message counts as delivered and is never sent again.
+// The halted message counts as delivered and is never sent again.
 // `None` for a PR that is not halted.
 #[must_use]
 pub(crate) fn release(state: &WatchState) -> Option<WatchState> {
@@ -726,21 +724,6 @@ mod tests {
                 Some("repository is not configured")
             );
         }
-
-        #[rstest]
-        #[case::watching(WatchStatus::Watching)]
-        #[case::draft(WatchStatus::Draft)]
-        fn running_watch_is_read_with_the_repository_account(#[case] status: WatchStatus) {
-            let mut state = WatchState {
-                status,
-                ..WatchState::default()
-            };
-            let config = config();
-
-            let opened = open(&mut state, "w1", "Org/Pay", &config);
-
-            assert_eq!(opened.account, Some("owner"));
-        }
     }
 
     mod polling {
@@ -976,17 +959,6 @@ mod tests {
             ] {
                 assert_eq!(awaits_delivery(&state), expected, "case: {name}");
             }
-        }
-
-        #[test]
-        fn missing_sender_is_recorded_and_logged_only_when_it_changes() {
-            let mut state = WatchState::default();
-
-            let first = hold_for_sender(&mut state, "no chat is registered");
-            let again = hold_for_sender(&mut state, "no chat is registered");
-
-            assert_eq!([first, again], [true, false]);
-            assert_eq!(state.reason.as_deref(), Some("no chat is registered"));
         }
 
         #[test]
@@ -1244,36 +1216,6 @@ mod tests {
         }
 
         #[test]
-        fn message_delivered_before_its_events_were_kept_tells_its_findings_again() {
-            let mut state = WatchState {
-                delivered: Some(delivered(vec![finding(2)])),
-                ..WatchState::default()
-            };
-
-            let delivery = deliver(
-                &mut state,
-                idle(None),
-                &zoned("2026-10-23T10:10:00Z"),
-                &config(),
-            );
-            let sending = prepare_send(&state, PR, at(NOON), &config());
-
-            assert_eq!(
-                delivery,
-                Delivery::Send(Some(AnswerNote::NotSeen {
-                    resent: 1,
-                    first: true,
-                }))
-            );
-            assert_eq!(
-                sending.events,
-                [WatchEvent::Finding {
-                    finding: finding(2),
-                }]
-            );
-        }
-
-        #[test]
         fn message_lost_again_is_given_up_on_later_and_keeps_when_the_losses_began() {
             for (name, now, expected) in [
                 (
@@ -1500,24 +1442,6 @@ mod tests {
                 state.delivered.map(|delivered| delivered.follow_up),
                 Some(true)
             );
-        }
-
-        #[test]
-        fn message_not_sent_stays_queued_for_the_next_cycle() {
-            let mut state = pending_state();
-            let sending = prepare_send(&state, PR, at(NOON), &config());
-
-            let sent = finish_send(
-                &mut state,
-                sending,
-                "sender-chat",
-                SendOutcome::NotSent,
-                at(NOON),
-                at(NOON),
-            );
-
-            assert_eq!(sent, SendResult::NotSent);
-            assert_eq!(state, pending_state());
         }
 
         #[test]

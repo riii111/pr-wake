@@ -50,7 +50,6 @@ pub(crate) fn parse_pr_ref(text: &str) -> Result<(String, u64), String> {
     checked_ref(repo, number)
 }
 
-// Worktrees of one PR head share this path, numbered when an earlier one has changes.
 #[must_use]
 pub(crate) fn worktree_path(root: &Path, pr: &PullRequest) -> PathBuf {
     let (owner, name) = pr.repo.split_once('/').unwrap_or((&pr.repo, ""));
@@ -69,9 +68,9 @@ pub(crate) fn with_worktree(prompt: &str, worktree: &Path, pr: &PullRequest) -> 
     )
 }
 
-// One chat holds a PR's every review, so the report finds this request's turn by the key, put first to survive a cut-short read.
 #[must_use]
 pub(crate) fn with_request(prompt: &str, key: &str) -> String {
+    // One chat holds a PR's every review, so the report finds this request's turn by the key, put first to survive a cut-short read.
     format!("pr-wakeの依頼ID: {key}\n\n{prompt}")
 }
 

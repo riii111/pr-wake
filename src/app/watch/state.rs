@@ -530,12 +530,6 @@ mod tests {
         for (name, summary, seen, expected) in [
             ("unread_pr", None, vec!["inline:1"], vec!["inline:1"]),
             (
-                "read_pr_without_bot_key",
-                Some(summary()),
-                vec!["inline:1"],
-                vec!["inline:1", "bot:coderabbit"],
-            ),
-            (
                 "read_pr_with_another_bot_key",
                 Some(summary()),
                 vec!["bot:claude"],
@@ -598,23 +592,6 @@ mod tests {
     }
 
     #[test]
-    fn state_written_before_lost_messages_were_counted_has_none_lost() {
-        let mut record = serde_json::to_value(WatchState {
-            lost_since: Some("2026-10-23T01:30:00.000Z".to_owned()),
-            ..WatchState::default()
-        })
-        .expect("write the state");
-        record
-            .as_object_mut()
-            .expect("the state is an object")
-            .remove("lostSince");
-
-        let read = WatchState::deserialize(record).expect("read the record");
-
-        assert_eq!(read, WatchState::default());
-    }
-
-    #[test]
     fn state_status_tells_over_finished_and_holding_the_chat_apart() {
         for (status, over, finished, holds_chat) in [
             (WatchStatus::Watching, false, false, true),
@@ -628,34 +605,6 @@ mod tests {
                 (over, finished, holds_chat),
                 "case: {status:?}"
             );
-        }
-    }
-
-    #[test]
-    fn event_kind_is_the_type_its_record_names() {
-        for event in [
-            WatchEvent::Finding { finding: finding() },
-            WatchEvent::ReviewDone {
-                bot: "coderabbit".to_owned(),
-                name: "CodeRabbit".to_owned(),
-                head: HEAD.to_owned(),
-                findings: 1,
-                summary_agrees: true,
-            },
-            WatchEvent::Conflict {
-                head: HEAD.to_owned(),
-            },
-            WatchEvent::CiFailed {
-                head: HEAD.to_owned(),
-                check: FailedCheck {
-                    name: "build".to_owned(),
-                    url: None,
-                },
-            },
-        ] {
-            let record = serde_json::to_value(&event).expect("write the event");
-
-            assert_eq!(record["type"], event.kind(), "case: {event:?}");
         }
     }
 

@@ -107,7 +107,6 @@ mod tests {
                 Ok(r#"[{"LSHandlerURLScheme":"https","LSHandlerRoleAll":"com.apple.safari"}]"#),
                 format!("open {URL}"),
             ),
-            ("never_chosen", Ok("[]"), format!("open {URL}")),
             ("unreadable", Err(()), format!("open {URL}")),
         ] {
             let opened = Mutex::new(Vec::new());

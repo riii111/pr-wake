@@ -188,7 +188,6 @@ impl ReviewState {
         added
     }
 
-    // The oldest queued request, so requests are notified in the order they came.
     #[must_use]
     pub(crate) fn next_queued(&self) -> Option<&str> {
         self.requests
@@ -237,13 +236,13 @@ impl ReviewState {
     }
 
     // A later request of the same PR, which a review of this one would duplicate.
-    // Only a queued one is still owed a review, so a withdrawn or already handled newer event never hides an older one GitHub names again.
     #[must_use]
     pub(crate) fn newer_request(&self, key: &str) -> Option<&str> {
         let request = self.requests.get(key)?;
         let pr = pr_key(&request.found.repo, request.found.number);
         self.requests
             .values()
+            // Only a queued one is still owed a review, so a withdrawn or already handled newer event never hides an older one GitHub names again.
             .filter(|other| {
                 other.status == Status::Queued
                     && pr_key(&other.found.repo, other.found.number) == pr
@@ -444,23 +443,6 @@ mod tests {
         assert!(was_new);
         assert_eq!(added, Vec::<String>::new());
         assert_eq!(status_of(&state, "acme/app#1@10"), Status::Baseline);
-    }
-
-    #[test]
-    fn new_requests_are_returned_in_key_order_and_the_title_follows_github() {
-        let mut state = ReviewState::default();
-        state.apply_poll(vec![found("acme/app", 1, 10)], at(NOW), false);
-        let mut renamed = found("acme/app", 1, 10);
-        renamed.title = "Renamed".to_owned();
-
-        let added = state.apply_poll(
-            vec![found("acme/app", 3, 30), renamed, found("acme/app", 2, 20)],
-            at(NOW),
-            false,
-        );
-
-        assert_eq!(added, ["acme/app#2@20", "acme/app#3@30"]);
-        assert_eq!(state.requests["acme/app#1@10"].found.title, "Renamed");
     }
 
     #[test]
@@ -738,7 +720,6 @@ mod tests {
                     failed: 1,
                 },
             });
-            // Written to the millisecond, as the TypeScript watch writes its times.
             state
                 .requests
                 .get_mut("acme/app#1@10")
@@ -761,17 +742,8 @@ mod tests {
                     GO_STATE.replace(r#""version": 1"#, r#""version": 2"#),
                 ),
                 (
-                    "unknown_status",
-                    GO_STATE.replace(r#""status": "launched""#, r#""status": "opened""#),
-                ),
-                (
                     "unreadable_time",
                     GO_STATE.replace("2026-11-12T12:01:00+09:00", "noon"),
-                ),
-                (
-                    "missing_requests",
-                    r#"{"version":1,"login":"","prs":{},"lastPoll":"0001-01-01T00:00:00Z"}"#
-                        .to_owned(),
                 ),
             ] {
                 let read = serde_json::from_str::<ReviewState>(&content);

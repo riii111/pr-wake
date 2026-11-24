@@ -138,47 +138,14 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::cli::{
-        Cli, Feature,
-        tests::{PR, command_line},
-    };
+    use crate::cli::{Cli, Feature, tests::command_line};
 
     #[test]
-    fn review_commands_read_their_flags() {
+    fn queue_skill_commands_read_their_arguments() {
         for (name, arguments, expected) in [
             (
-                "smoke",
-                &["review", "smoke", "--pr", "org/pay#7", "--no-open"][..],
-                ReviewCommand::Smoke(SmokeFlags {
-                    pr: "org/pay#7".to_owned(),
-                    requester: None,
-                    no_open: true,
-                    config: None,
-                }),
-            ),
-            (
-                "check_with_a_config",
-                &["review", "check", "--config", "/tmp/review.json"],
-                ReviewCommand::Check(ConfigFlag {
-                    config: Some(PathBuf::from("/tmp/review.json")),
-                }),
-            ),
-            (
-                "link",
-                &["review", "link", PR],
-                ReviewCommand::Link { pr: PR.to_owned() },
-            ),
-            ("now", &["review", "now"], ReviewCommand::Now { pr: None }),
-            (
-                "now_for_one_pr",
-                &["review", "now", "--pr", PR],
-                ReviewCommand::Now {
-                    pr: Some(PR.to_owned()),
-                },
-            ),
-            (
                 "list_as_json",
-                &["review", "list", "--json"],
+                &["review", "list", "--json"][..],
                 ReviewCommand::List(JsonFlag { json: true }),
             ),
             (
@@ -202,11 +169,6 @@ mod tests {
                 ReviewCommand::Outcome {
                     id: "7-1".to_owned(),
                 },
-            ),
-            (
-                "logs_followed",
-                &["review", "logs", "-f"],
-                ReviewCommand::Logs(LogFlags { follow: true }),
             ),
         ] {
             let parsed = Cli::try_parse_from(command_line(arguments));

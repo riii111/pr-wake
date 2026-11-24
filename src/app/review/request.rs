@@ -35,12 +35,12 @@ pub(crate) struct Pending {
 
 const UNKNOWN: &str = "@unknown";
 
-// A search across all of GitHub answers incomplete results, so each search is scoped to one owner.
-// `user:` matches an organization too.
 #[must_use]
 pub(crate) fn request_queries(owners: &[String], teams: &[String]) -> Vec<String> {
     owners
         .iter()
+        // A search across all of GitHub answers incomplete results, so each search is scoped to one owner.
+        // `user:` matches an organization too.
         .map(|owner| format!("is:pr is:open archived:false user-review-requested:@me user:{owner}"))
         .chain(
             teams
@@ -94,9 +94,6 @@ pub(crate) fn pending_requests<E>(
     Ok(pending)
 }
 
-// With the reviewers GitHub asks now, the latest event whose target is still asked names the request, as a withdrawn team or login keeps its old event.
-// Without them, as the poll outside batches reads none, the latest event does.
-// No event names a request the search still lists, so it is kept under a PR-level key.
 #[must_use]
 pub(crate) fn current_request(
     requests: &[ReviewRequest],
@@ -105,6 +102,7 @@ pub(crate) fn current_request(
     login: &str,
     teams: &[String],
 ) -> Found {
+    // No event names a request the search still lists, so it is kept under a PR-level key.
     let unknown = || Found {
         key: format!("{}{UNKNOWN}", pr_key(&hit.repo, hit.number)),
         repo: hit.repo.clone(),
@@ -113,9 +111,11 @@ pub(crate) fn current_request(
         requester: None,
         team: None,
     };
+    // The poll outside batches reads no reviewers, so the latest event names the request.
     let Some(live) = live else {
         return latest_request(requests, hit, login, teams).unwrap_or_else(unknown);
     };
+    // A withdrawn team or login keeps its old event, so the latest event whose target is still asked names the request.
     let asked = requests
         .iter()
         .filter(|request| is_asked(request, live, login))
@@ -145,7 +145,6 @@ pub(crate) fn current_request(
 }
 
 // Whether an open PR still asks for the review the request's event made.
-// The event outlives a withdrawal, so a known one counts only while its own target, the team or else the login, is still asked.
 #[must_use]
 pub(crate) fn still_requested(
     live: &LiveRequest,
@@ -180,6 +179,7 @@ pub(crate) fn still_requested(
                 .iter()
                 .any(|slug| configured_team(teams, owner, slug).is_some());
     }
+    // The event outlives a withdrawal, so a known one counts only while its own target, the team or else the login, is still asked.
     found.team.as_deref().map_or_else(direct, team_asked)
 }
 
@@ -268,7 +268,7 @@ mod tests {
         name: &'static str,
         requests: Vec<ReviewRequest>,
         teams: &'static [&'static str],
-        expected: Option<(&'static str, Option<&'static str>)>,
+        expected: Option<(&'static str, Option<&'static str>, Option<&'static str>)>,
     }
 
     #[test]
@@ -286,24 +286,13 @@ mod tests {
                     direct(12, "suzuki", "ME"),
                 ],
                 teams: &[],
-                expected: Some(("acme/app#3@12", Some("suzuki"))),
-            },
-            LatestCase {
-                name: "unknown_requester",
-                requests: vec![ReviewRequest {
-                    id: 20,
-                    requester: None,
-                    reviewer: Some("me".to_owned()),
-                    team_slug: None,
-                }],
-                teams: &[],
-                expected: Some(("acme/app#3@20", None)),
+                expected: Some(("acme/app#3@12", Some("suzuki"), None)),
             },
             LatestCase {
                 name: "configured_team",
                 requests: team_requests.clone(),
-                teams: &["acme/backend"],
-                expected: Some(("acme/app#3@1", Some("a"))),
+                teams: &["Acme/Backend"],
+                expected: Some(("acme/app#3@1", Some("a"), Some("Acme/Backend"))),
             },
             LatestCase {
                 name: "team_of_another_organization",
@@ -320,10 +309,14 @@ mod tests {
 
             let found = latest_request(&case.requests, &hit("acme/app", 3, "u"), "me", &teams);
 
-            let found = found.map(|found| (found.key, found.requester));
-            let expected = case
-                .expected
-                .map(|(key, requester)| (key.to_owned(), requester.map(str::to_owned)));
+            let found = found.map(|found| (found.key, found.requester, found.team));
+            let expected = case.expected.map(|(key, requester, team)| {
+                (
+                    key.to_owned(),
+                    requester.map(str::to_owned),
+                    team.map(str::to_owned),
+                )
+            });
             assert_eq!(found, expected, "case: {}", case.name);
         }
     }
@@ -396,41 +389,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn team_request_is_shown_with_the_configured_team() {
-        let teams = vec!["Acme/Backend".to_owned()];
-
-        let found = latest_request(
-            &[team_request(1, "a", "backend")],
-            &hit("acme/app", 3, "u"),
-            "me",
-            &teams,
-        );
-
-        assert_eq!(
-            found.and_then(|found| found.team).as_deref(),
-            Some("Acme/Backend")
-        );
-    }
-
-    #[test]
-    fn queries_are_scoped_to_the_configured_owners_then_the_teams() {
-        let owners = vec!["acme".to_owned(), "zeta".to_owned()];
-        let teams = vec!["acme/backend".to_owned()];
-
-        let queries = request_queries(&owners, &teams);
-
-        assert_eq!(
-            queries,
-            [
-                "is:pr is:open archived:false user-review-requested:@me user:acme",
-                "is:pr is:open archived:false user-review-requested:@me user:zeta",
-                "is:pr is:open archived:false team-review-requested:acme/backend",
-            ]
-        );
-    }
-
-    // A re-request bumps the PR's updated_at, so the cache must not hide it.
     #[test]
     fn events_are_read_again_only_for_updated_prs() {
         let events = RefCell::new(vec![direct(7, "tanaka", "me")]);

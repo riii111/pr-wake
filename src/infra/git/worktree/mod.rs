@@ -73,8 +73,8 @@ pub(crate) fn prepare_worktree(
     Ok(path)
 }
 
-// The configured URL, before any url.<base>.insteadOf rewriting, names the repository.
 fn check_origin(checkout: &Checkout<'_>, pr: &PullRequest) -> Result<(), String> {
+    // The configured URL, before any url.<base>.insteadOf rewriting, names the repository.
     let remote = checkout.git_at(checkout.path, ["config", "--get", "remote.origin.url"])?;
     let remote = String::from_utf8_lossy(&remote);
     if remote_repo(&remote).is_some_and(|repo| repo.eq_ignore_ascii_case(&pr.repo)) {
@@ -124,9 +124,9 @@ impl Checkout<'_> {
     }
 }
 
-// The pull ref also serves heads from forks.
-// The SHA itself covers a PR that moved on since it was read.
 fn fetch_head(checkout: &Checkout<'_>, pr: &PullRequest) -> Result<(), String> {
+    // The pull ref also serves heads from forks.
+    // The SHA itself covers a PR that moved on since it was read.
     for reference in [format!("refs/pull/{}/head", pr.number), pr.head_sha.clone()] {
         let fetched = checkout.git_at(
             checkout.path,
@@ -398,9 +398,9 @@ mod tests {
             command
         }
 
-        // The owner's git config would otherwise reach the test, as hooks or signing.
         fn environment(&self) -> [(&'static str, OsString); 6] {
             [
+                // The owner's git config would otherwise reach the test, as hooks or signing.
                 (
                     "GIT_CONFIG_GLOBAL",
                     self.directory.path().join("gitconfig").into_os_string(),

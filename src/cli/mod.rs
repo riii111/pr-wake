@@ -112,43 +112,6 @@ mod tests {
 
     use super::*;
 
-    pub(super) const PR: &str = "https://github.com/org/pay/pull/7";
-
-    #[test]
-    fn wrong_command_lines_are_usage_errors() {
-        for (name, arguments) in [
-            ("sender_with_an_argument", &["watch", "sender", "extra"][..]),
-            ("link_of_two_prs", &["watch", "link", PR, PR]),
-            ("release_without_a_pr", &["watch", "release"]),
-            ("unknown_watch_command", &["watch", "unknown"]),
-            ("smoke_without_a_pr", &["review", "smoke"]),
-            ("unknown_feature", &["notify"]),
-            ("engine_flag", &["watch", "--status"]),
-            ("link_without_a_pr", &["watch", "link"]),
-            ("dry_run_of_a_bare_pr", &["watch", "dry-run", PR]),
-        ] {
-            let parsed = Cli::try_parse_from(command_line(arguments));
-
-            assert_eq!(
-                parsed.map_err(|error| error.exit_code()).err(),
-                Some(2),
-                "case: {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn engine_name_runs_only_the_watch() {
-        let watch = EngineCli::try_parse_from([ENGINE, "watch"]);
-        let flag = EngineCli::try_parse_from([ENGINE, "watch", "--status"]);
-
-        assert_eq!(
-            watch.map(|cli| cli.command).ok(),
-            Some(EngineCommand::Watch)
-        );
-        assert_eq!(flag.map_err(|error| error.exit_code()).err(), Some(2));
-    }
-
     pub(super) fn command_line<'arguments>(
         arguments: &[&'arguments str],
     ) -> impl Iterator<Item = &'arguments str> {

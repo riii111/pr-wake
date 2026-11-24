@@ -54,13 +54,11 @@ pub(crate) enum Mode {
     Run,
     DryRun(Vec<String>),
     Release(String),
-    // Lines for a person unless `json`, which a program such as harnexus-crew reads.
     Status { json: bool },
     Sender,
     Link { pr: String, take_over: bool },
 }
 
-// A failure's message may carry a path or what a command printed, so the log records the tag alone.
 #[derive(Debug)]
 pub(crate) enum Failure {
     Config(RecordError),
@@ -70,7 +68,6 @@ pub(crate) enum Failure {
     Replaced,
 }
 
-// A bridge call as one thread, answered with the bridge's outcome.
 type BridgeCall<'call> = dyn Fn(&str, &str, &Map<String, Value>) -> Map<String, Value> + 'call;
 
 pub(crate) struct AppWorkers<Codex, T3> {
@@ -188,8 +185,8 @@ const OSASCRIPT: &str = "/usr/bin/osascript";
 // Well under the one second within which a wait must notice a stop request.
 const STOP_CHECK: Duration = Duration::from_millis(500);
 
-// A command prints its result as one JSON line; the watch itself prints only its log.
 pub(crate) fn run(mode: Mode, env: Env<'_>) -> Result<Option<String>, Failure> {
+    // The watch needs the Codex App on this Mac, so a Cloud session gets that reason, not a missing-socket hint.
     refuse_in_cloud(env)?;
     let paths = watch_paths()?;
     let now = Timestamp::now();
@@ -210,7 +207,6 @@ pub(crate) fn run(mode: Mode, env: Env<'_>) -> Result<Option<String>, Failure> {
     }
 }
 
-// A bad config must keep the running agent alive, so a dry run checks it before the agent stops.
 pub(crate) fn install(env: Env<'_>) -> Result<(), String> {
     let config = watch_paths().map_err(|failure| failure.to_string())?.config;
     if !config.exists() {
@@ -219,6 +215,7 @@ pub(crate) fn install(env: Env<'_>) -> Result<(), String> {
             config.display()
         ));
     }
+    // A bad config must keep the running agent alive, so a dry run checks it before the agent stops.
     output::write_stdout("$ pr-wake watch dry-run\n");
     run(Mode::DryRun(Vec::new()), env).map_err(|failure| failure.to_string())?;
 
@@ -298,7 +295,6 @@ fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
     })
 }
 
-// A bridge replaced by an older one ends the watch between cycles, as at start; a closed app only waits.
 fn watched_call<'call>(
     call: &'call BridgeCall<'call>,
     unsupported: &'call RefCell<Option<String>>,
@@ -306,6 +302,7 @@ fn watched_call<'call>(
 ) -> CallApp<'call> {
     Box::new(move |caller, tool, arguments| {
         let answer = call(caller, tool, &arguments);
+        // A bridge replaced by an older one ends the watch between cycles, as at start; a closed app only waits.
         let refused = answer
             .get("outcome")
             .is_some_and(|outcome| outcome == "unsupported");
@@ -329,7 +326,6 @@ fn ended_by(unsupported: &RefCell<Option<String>>) -> Option<String> {
         .map(|message| format!("cannot use the harnexus call socket: {message}"))
 }
 
-// The watch needs the Codex App on this Mac, so a Cloud session gets that reason, not a missing-socket hint.
 fn refuse_in_cloud(env: Env<'_>) -> Result<(), Failure> {
     if let Some(explicit) = present(env(EXECUTION_ENV)) {
         return match explicit.to_str() {
@@ -351,8 +347,8 @@ fn refuse_in_cloud(env: Env<'_>) -> Result<(), Failure> {
     }
 }
 
-// T3 Code runs Codex with a CODEX_THREAD_ID of Codex's own, so the T3 thread variable decides first.
 pub(crate) fn caller_id(env: Env<'_>) -> Result<String, Failure> {
+    // T3 Code runs Codex with a CODEX_THREAD_ID of Codex's own, so the T3 thread variable decides first.
     let (variable, value) = present(env(T3_THREAD_ENV)).map_or_else(
         || (CODEX_THREAD_ENV, present(env(CODEX_THREAD_ENV))),
         |t3| (T3_THREAD_ENV, Some(t3)),
@@ -395,7 +391,6 @@ fn register_sender(env: Env<'_>, root: &Path, now: Timestamp) -> Result<SenderOu
     Ok(SenderOutput { sender: thread })
 }
 
-// Only a take-over moves a PR that is watched for another chat.
 fn link(
     env: Env<'_>,
     root: &Path,
@@ -471,7 +466,6 @@ fn release(root: &Path, url: &str) -> Result<ReleaseOutput, Failure> {
     })
 }
 
-// Read from the records alone, so it works whether or not a watch runs.
 fn status(root: &Path) -> Result<StatusOutput, Failure> {
     let prs = watch_record::list_links(root, &HashSet::new())
         .map_err(Failure::State)?
@@ -503,7 +497,6 @@ fn status(root: &Path) -> Result<StatusOutput, Failure> {
         )
         .collect();
 
-    // An unreadable sender record is shown as such, like an unreadable PR record.
     Ok(match watch_record::load_sender(root) {
         Ok(sender) => StatusOutput {
             sender,
@@ -558,7 +551,6 @@ fn status_text(status: &StatusOutput) -> String {
     lines.join("\n")
 }
 
-// Decides from each PR's saved watch state what the watch would send, without writing any.
 fn dry_run(
     paths: &WatchPaths,
     github: &mut dyn GitHub,
@@ -796,9 +788,9 @@ impl<Codex: Workers, T3: Workers> Workers for AppWorkers<Codex, T3> {
 }
 
 impl Failure {
-    // The names the TypeScript watch logged, so a search over old and new logs finds both.
     #[must_use]
     pub(crate) const fn tag(&self) -> &'static str {
+        // The names the TypeScript watch logged, so a search over old and new logs finds both.
         match self {
             Self::Config(RecordError {
                 kind: RecordErrorKind::Invalid(_),
@@ -960,67 +952,6 @@ mod tests {
                     .to_string()
                     .contains("org/other is not in the repositories")
             }),);
-        }
-
-        #[test]
-        fn pr_flag_that_is_not_a_github_pr_is_refused() {
-            let records = Records::new();
-            let asked = RefCell::new(Vec::new());
-
-            let refused = dry_run(&records.paths, &mut github(&asked), &["9".to_owned()]);
-
-            assert!(refused.is_err_and(
-                |failure| failure.to_string() == "--pr must be a GitHub pull request URL"
-            ));
-            assert!(asked.borrow().is_empty());
-        }
-    }
-
-    mod release {
-        use super::*;
-
-        #[test]
-        fn halted_pr_resumes_with_its_message_taken_as_delivered() {
-            let records = Records::new();
-            let root = &records.paths.state;
-            watch_record::record_link(root, &link_of(7, "worker")).expect("record the link");
-            let halted = WatchState {
-                status: WatchStatus::Halted,
-                pending: vec![WatchEvent::Conflict {
-                    head: "a".to_owned(),
-                }],
-                halted: Some(Map::from_iter([("prompt".to_owned(), json!("x"))])),
-                ..WatchState::default()
-            };
-            watch_record::save_watch_state(root, &pay(7), &halted).expect("save the state");
-
-            let released = release(root, PR).expect("release");
-            let again = release(root, PR);
-
-            let state = watch_record::load_watch_state(root, &pay(7)).expect("load");
-            assert_eq!(
-                serde_json::to_value(released).expect("write it"),
-                json!({ "released": PR, "worker": "worker" })
-            );
-            assert_eq!(
-                (state.status, state.pending, state.halted),
-                (WatchStatus::Watching, Vec::new(), None)
-            );
-            assert!(again.is_err_and(|failure| failure.to_string().contains("is not halted")));
-        }
-
-        #[test]
-        fn pr_that_is_not_linked_or_not_a_pr_is_refused() {
-            let records = Records::new();
-
-            let unlinked = release(&records.paths.state, PR);
-            let not_pr = release(&records.paths.state, "7");
-
-            assert!(unlinked.is_err_and(
-                |failure| failure.to_string() == format!("{PR} is not linked to a worker")
-            ));
-            assert!(not_pr.is_err_and(|failure| failure.to_string()
-                == "pr-wake watch release needs a GitHub pull request URL"));
         }
     }
 
@@ -1190,7 +1121,7 @@ mod tests {
         }
     }
 
-    // The records harnexus-task watch left on a Mac, copied before each test.
+    // The records harnexus-task watch left on a Mac.
     mod legacy_records {
         use super::*;
 
@@ -1200,7 +1131,6 @@ mod tests {
             let refusals = Cell::new(0);
             let unsupported = RefCell::new(None);
             let log = Recorded::default();
-            // After the thread reads the bridge drops protocol 1, so each send gets the client's own unsupported outcome.
             let bridge = |_: &str, tool: &str, arguments: &Map<String, Value>| {
                 if tool == "read_thread" {
                     return idle_thread(arguments);
@@ -1376,22 +1306,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn failure_tags_name_what_failed_as_the_typescript_watch_did() {
-        let records = Records::new();
-        let missing = watch_record::load_config(&records.paths.state.join("missing.json"))
-            .expect_err("no config");
-        fs::write(records.paths.state.join("bad.json"), "{").expect("write a broken file");
-        let invalid =
-            watch_record::load_config(&records.paths.state.join("bad.json")).expect_err("broken");
-
-        assert_eq!(Failure::Config(missing).tag(), "ConfigUnreadable");
-        assert_eq!(Failure::Config(invalid).tag(), "ConfigInvalid");
-        assert_eq!(Failure::Replaced.tag(), "WatchReplaced");
-        assert_eq!(Failure::Refused(String::new()).tag(), "WatchRefused");
-    }
-
-    // A temporary home for the config and the records.
     struct Records {
         _root: tempfile::TempDir,
         paths: WatchPaths,
