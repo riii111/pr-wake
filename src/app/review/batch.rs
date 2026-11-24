@@ -35,6 +35,8 @@ pub(crate) enum Plan {
 pub(crate) enum ReportReason {
     ManyReviewers,
     ApprovedByOther,
+    // A newer request of the PR was already reviewed at the same head.
+    AlreadyReviewed,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +117,7 @@ impl ReportReason {
         match self {
             Self::ManyReviewers => "3人以上を指名",
             Self::ApprovedByOther => "他の人が承認済み",
+            Self::AlreadyReviewed => "同じheadをレビュー済み",
         }
     }
 }

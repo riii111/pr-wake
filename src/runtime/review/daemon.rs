@@ -10,7 +10,8 @@ use jiff::{Timestamp, tz::TimeZone};
 use super::{Route, STOP_CHECK, Tools, ask_owner, github, launch};
 use crate::{
     app::review::{
-        batch::{Digest, Listed, NowRequest, Plan, due_slot, plan},
+        PullRequest,
+        batch::{Digest, Listed, NowRequest, Plan, ReportReason, due_slot, plan},
         config::Choice,
         inbox::threads_to_clear,
         notice::Selection,
@@ -52,6 +53,8 @@ pub(super) struct Daemon<'deps> {
     wake: Wake,
     // Worktrees of one checkout are added one at a time.
     launching: Mutex<()>,
+    // The latest record of each selection whose save failed, written again on later ticks so its known outcomes are not lost.
+    unsaved: Mutex<HashMap<String, SelectionRecord>>,
 }
 
 #[derive(Default)]
@@ -75,6 +78,7 @@ enum Outcome {
     Opened(Option<String>),
     // The chat is kept when the review went to one, as a started chat exists even if its link failed.
     Failed { error: String, chat: Option<String> },
+    AlreadyReviewed,
 }
 
 // A wake-up that is kept until the notify loop takes it, as a channel of one would be.
@@ -98,6 +102,7 @@ impl<'deps> Daemon<'deps> {
             shown: Mutex::new(Shown::default()),
             wake: Wake::default(),
             launching: Mutex::new(()),
+            unsaved: Mutex::new(HashMap::new()),
         }
     }
 
@@ -348,12 +353,14 @@ impl<'deps> Daemon<'deps> {
             return;
         };
         let mut digest = Digest::default();
-        self.start_listed(&request, &mut digest);
+        // `review now --pr` starts the PR whatever was reviewed before.
+        self.start_listed(&request, &mut digest, false);
         self.keep_digest(&mut None, (self.deps.now)(), &digest);
     }
 
     // A selection's record is its own handoff, so the caller's one write is all it takes and a caller that dies after it loses nothing.
     fn take_selections(&self) {
+        self.save_unsaved_selections();
         let ids = match review_record::selection_ids(self.deps.paths) {
             Ok(ids) => ids,
             Err(error) => {
@@ -370,6 +377,11 @@ impl<'deps> Daemon<'deps> {
                 && !record.accepted
                 && !record.complete
                 && is_selection_id(&id)
+                && !self
+                    .unsaved
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains_key(&id)
             {
                 self.start_selected(&id, record);
             }
@@ -562,9 +574,28 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
+    // Only the batch thread writes a selection after it is taken, so the record kept here is never older than the file.
     fn save_selection(&self, id: &str, record: &SelectionRecord) {
-        if let Err(error) = review_record::save_selection(self.deps.paths, id, record) {
-            self.log(&format!("selection {id}: {error}"));
+        let mut unsaved = self.unsaved.lock().unwrap_or_else(PoisonError::into_inner);
+        match review_record::save_selection(self.deps.paths, id, record) {
+            Ok(()) => {
+                unsaved.remove(id);
+            }
+            Err(error) => {
+                self.log(&format!("selection {id}: {error}"));
+                unsaved.insert(id.to_owned(), record.clone());
+            }
+        }
+    }
+
+    fn save_unsaved_selections(&self) {
+        let unsaved = self
+            .unsaved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for (id, record) in unsaved {
+            self.save_selection(&id, &record);
         }
     }
 
@@ -655,10 +686,13 @@ impl<'deps> Daemon<'deps> {
                 digest.reported.push((Listed::of(&request.found), reason));
                 SelectedOutcome::Reported { reason }
             }
-            Plan::Start => match self.start_listed(request, digest) {
+            Plan::Start => match self.start_listed(request, digest, true) {
                 Outcome::Started(thread) => SelectedOutcome::Started { thread },
                 Outcome::SentToLinked(thread) => SelectedOutcome::SentToLinked { thread },
                 Outcome::Opened(reason) => SelectedOutcome::Opened { reason },
+                Outcome::AlreadyReviewed => SelectedOutcome::Reported {
+                    reason: ReportReason::AlreadyReviewed,
+                },
                 Outcome::Failed { error, chat } => SelectedOutcome::Failed {
                     error,
                     thread: chat,
@@ -667,13 +701,16 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    fn start_listed(&self, request: &Request, digest: &mut Digest) -> Outcome {
+    fn start_listed(&self, request: &Request, digest: &mut Digest, skip_reviewed: bool) -> Outcome {
         let choices = &self.deps.tools.config.choices;
         // No notification asks for a choice in a batch, so a linked PR keeps its earlier one and any other takes the first, which the config always has.
         let choice = self.linked_choice(request).unwrap_or(&choices[0]);
-        let outcome = self.start(request, choice);
+        let outcome = self.start(request, choice, skip_reviewed);
         match outcome {
             Outcome::Failed { .. } => digest.failed += 1,
+            Outcome::AlreadyReviewed => digest
+                .reported
+                .push((Listed::of(&request.found), ReportReason::AlreadyReviewed)),
             Outcome::SentToLinked(_) | Outcome::Started(_) | Outcome::Opened(_) => {
                 digest.started.push(Listed::of(&request.found));
             }
@@ -753,7 +790,7 @@ impl<'deps> Daemon<'deps> {
         self.lock_shown().notices.remove(&request.found.key);
         self.wake.signal();
         if let Some(choice) = chosen {
-            self.start(request, choice);
+            self.start(request, choice, false);
         }
     }
 
@@ -846,12 +883,13 @@ impl<'deps> Daemon<'deps> {
             "{}: re-request of a linked PR, sent with {} without asking",
             request.found.key, choice.id
         ));
-        if matches!(self.start(request, choice), Outcome::SentToLinked(_)) {
+        if matches!(self.start(request, choice, false), Outcome::SentToLinked(_)) {
             self.report(request, "再レビューを紐づけ済みのチャットへ送りました");
         }
     }
 
-    fn start(&self, request: &Request, choice: &Choice) -> Outcome {
+    // `skip_reviewed` reports a head a newer launched request already reviewed instead of starting it again.
+    fn start(&self, request: &Request, choice: &Choice, skip_reviewed: bool) -> Outcome {
         let found = &request.found;
         let key = &found.key;
         // Saved before the App opens, so a restart never opens a second chat.
@@ -872,12 +910,13 @@ impl<'deps> Daemon<'deps> {
                 .launching
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            let reviewed =
+                |pr: &PullRequest| skip_reviewed && self.reviewed_at(request, &pr.head_sha);
             launch(
                 self.deps.tools,
                 choice,
-                &found.repo,
-                found.number,
-                found.requester.as_deref(),
+                (&found.repo, found.number, found.requester.as_deref()),
+                &reviewed,
                 self.deps.stop,
             )
         };
@@ -886,10 +925,16 @@ impl<'deps> Daemon<'deps> {
         let worktree = launched
             .worktree
             .map(|worktree| worktree.to_string_lossy().into_owned());
+        let already_reviewed = launched.route == Some(Route::AlreadyReviewed);
+        let review_started = launched.result.is_ok()
+            && matches!(launched.route, Some(Route::Started(_) | Route::Linked(_)));
         self.log_saved(self.update(key, |request| {
             request.head_sha.clone_from(&head);
             request.worktree.clone_from(&worktree);
+            request.review_started = review_started;
             match &launched.result {
+                // Handled rather than left queued, so the next batch does not find it again.
+                Ok(()) if already_reviewed => request.status = Status::Reported,
                 Ok(()) => request.status = Status::Launched,
                 Err(error) => {
                     request.status = Status::Failed;
@@ -916,6 +961,12 @@ impl<'deps> Daemon<'deps> {
                 ));
                 Outcome::Opened(Some(reason))
             }
+            (Ok(()), Some(Route::AlreadyReviewed)) => {
+                self.log(&format!(
+                    "{key}: only reported, as a newer request was reviewed at {head}"
+                ));
+                Outcome::AlreadyReviewed
+            }
             (Ok(()), None) => {
                 self.log(&format!("{key}: opened {worktree} at {head}"));
                 Outcome::Opened(None)
@@ -925,11 +976,27 @@ impl<'deps> Daemon<'deps> {
                 self.report_failure(request, &error);
                 let chat = match route {
                     Some(Route::Linked(chat) | Route::Started(chat)) => Some(chat),
-                    Some(Route::Opened(_)) | None => None,
+                    Some(Route::Opened(_) | Route::AlreadyReviewed) | None => None,
                 };
                 Outcome::Failed { error, chat }
             }
         }
+    }
+
+    // A strictly newer request of the PR launched at this head already covers what the request asks for.
+    // Newer means a larger GitHub event id, as an older event can be first seen late; an unknown event has no order and is never suppressed.
+    fn reviewed_at(&self, request: &Request, head: &str) -> bool {
+        let Some(event) = event_id(&request.found.key) else {
+            return false;
+        };
+        let pr = pr_key(&request.found.repo, request.found.number);
+        self.lock_state().requests.values().any(|other| {
+            other.status == Status::Launched
+                && other.review_started
+                && other.head_sha.as_deref() == Some(head)
+                && pr_key(&other.found.repo, other.found.number) == pr
+                && event_id(&other.found.key).is_some_and(|other| other > event)
+        })
     }
 
     // The oldest queued request becomes notifying, saved before it is shown.
@@ -1085,6 +1152,11 @@ impl Wake {
     }
 }
 
+// The review_requested event a key names, which an unknown request lacks.
+fn event_id(key: &str) -> Option<u64> {
+    key.rsplit_once('@')?.1.parse().ok()
+}
+
 // Rate limits and outages are waited out with a growing delay instead of stopping the review.
 fn backoff(interval: Duration, failures: u32) -> Duration {
     let mut delay = interval;
@@ -1118,10 +1190,8 @@ mod tests {
     use super::*;
     use crate::{
         app::review::{
-            PullRequest,
-            batch::ReportReason,
             config::{Batches, ConfigFile, ReviewConfig},
-            selection::queue,
+            selection::{queue, report},
             state::Found,
             with_worktree,
         },
@@ -1158,6 +1228,8 @@ mod tests {
         // Each prompt sent to a linked chat, after the chat.
         sent: Mutex<Vec<(String, String)>>,
         creation: Mutex<Created>,
+        // Run as a chat is created, after the selection recorded the request in flight.
+        on_create: Mutex<Option<Box<dyn Fn() + Send>>>,
         // Each prompt a new chat was started with, after the head its worktree starts at.
         started: Mutex<Vec<(String, String)>>,
         inbox: Mutex<String>,
@@ -1215,6 +1287,10 @@ mod tests {
         assert_eq!(launched.choice.as_deref(), Some("code"));
         assert_eq!(launched.head_sha.as_deref(), Some(HEAD));
         assert_eq!(launched.worktree, Some(worktree.display().to_string()));
+        assert!(
+            !launched.review_started,
+            "a draft in a composer has not started"
+        );
     }
 
     #[test]
@@ -1246,6 +1322,7 @@ mod tests {
         );
         assert_eq!(fixture.opened(), Vec::<String>::new());
         assert_eq!(fixture.state().requests["acme/app#12@30"].worktree, None);
+        assert!(fixture.state().requests["acme/app#12@30"].review_started);
         assert_eq!(
             fixture.sent(),
             [("new-chat".to_owned(), fixture.worktree_prompt_at(HEAD))]
@@ -2589,6 +2666,141 @@ mod tests {
     }
 
     #[test]
+    fn older_request_seen_again_is_only_reported_when_a_newer_one_was_reviewed_at_its_head() {
+        const LATER: &str = "fedcba9876543210fedcba9876543210fedcba98";
+        for (name, selected, newer_status, started, newer_head, starts) in [
+            (
+                "selected_same_head",
+                true,
+                Status::Launched,
+                true,
+                HEAD,
+                false,
+            ),
+            (
+                "scheduled_same_head",
+                false,
+                Status::Launched,
+                true,
+                HEAD,
+                false,
+            ),
+            (
+                "selected_other_head",
+                true,
+                Status::Launched,
+                true,
+                LATER,
+                true,
+            ),
+            (
+                "scheduled_newer_draft_only",
+                false,
+                Status::Launched,
+                false,
+                HEAD,
+                true,
+            ),
+            (
+                "scheduled_newer_withdrawn",
+                false,
+                Status::Withdrawn,
+                true,
+                HEAD,
+                true,
+            ),
+        ] {
+            let fixture = Fixture::batched();
+            fixture.save_queued(&[(12, 10), (12, 20)]);
+            let mut state = fixture.state();
+            let newer = state.requests.get_mut("acme/app#12@20").expect("request");
+            newer.status = newer_status;
+            newer.review_started = started;
+            newer.head_sha = Some(newer_head.to_owned());
+            // Event 10 is first seen only after event 20's team was removed, so its order comes from the event ids.
+            let older = state.requests.get_mut("acme/app#12@10").expect("request");
+            older.first_seen = older
+                .first_seen
+                .checked_add(SignedDuration::from_hours(1))
+                .expect("a later time");
+            review_record::save_state(&fixture.paths, &state).expect("save the state");
+            fixture.request("acme/app", 12, &[requested(10, "tanaka")]);
+            if selected {
+                fixture.select("one", &["acme/app#12@10"]);
+            } else {
+                review_record::request_now(
+                    &fixture.paths,
+                    &NowRequest { pr: None },
+                    Timestamp::now(),
+                )
+                .expect("ask for the batch");
+            }
+
+            fixture.take_selections();
+
+            assert_eq!(!fixture.opened().is_empty(), starts, "case: {name}");
+            let status = [Status::Reported, Status::Launched][usize::from(starts)];
+            assert_eq!(fixture.status("acme/app#12@10"), status, "case: {name}");
+            if selected && !starts {
+                assert_eq!(
+                    fixture.selection("one").outcomes.get("acme/app#12@10"),
+                    Some(&SelectedOutcome::Reported {
+                        reason: ReportReason::AlreadyReviewed
+                    }),
+                    "case: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selection_result_lost_to_failed_writes_is_saved_later_without_a_second_launch() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = Fixture::batched();
+        fixture.save_queued(&[(12, 30)]);
+        fixture.request("acme/app", 12, &[requested(30, "sato")]);
+        fixture.set_creation(Created::Started("chat-1".to_owned()));
+        let selections = fixture.paths.state.join("selections");
+        let mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .expect("set the mode");
+        };
+        let blocked = selections.clone();
+        // Every write of the selection after the chat starts fails until the directory is writable again.
+        *fixture.on_create.lock().expect("set the hook") = Some(Box::new(move || {
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o500))
+                .expect("block the selection");
+        }));
+        fixture.select("one", &["acme/app#12@30"]);
+        let now = || tokyo("2026-11-21T12:00:00");
+
+        let (lost, saved) = fixture.with_daemon(
+            &Setup {
+                now: Some(&now),
+                ..Setup::default()
+            },
+            |daemon, _| {
+                daemon.batch_once();
+                let lost = fixture.selection("one");
+                mode(&selections, 0o700);
+                daemon.batch_once();
+                (lost, fixture.selection("one"))
+            },
+        );
+
+        assert!(lost.accepted && !lost.complete, "{lost:?}");
+        assert_eq!(lost.in_flight.as_deref(), Some("acme/app#12@30"));
+        assert!(saved.complete && saved.in_flight.is_none(), "{saved:?}");
+        let report = report("one", &saved, &fixture.state());
+        assert_eq!(
+            report.requests[0].link.as_deref(),
+            Some("codex://threads/chat-1")
+        );
+        assert_eq!(fixture.started().len(), 1, "launched once");
+    }
+
+    #[test]
     fn selection_made_for_an_earlier_run_is_closed_unstarted() {
         let fixture = Fixture::batched();
         fixture.save_queued(&[(12, 30)]);
@@ -2759,6 +2971,7 @@ mod tests {
                 delivery: Mutex::new(Delivery::Sent),
                 sent: Mutex::new(Vec::new()),
                 creation: Mutex::new(Created::NotSent("no harnexus in the test".to_owned())),
+                on_create: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 inbox: Mutex::new("[]".to_owned()),
                 live: Mutex::new(json!({
@@ -3131,6 +3344,9 @@ mod tests {
                 .lock()
                 .expect("note the new chat")
                 .push((chat.head_sha.to_owned(), chat.prompt.to_owned()));
+            if let Some(hook) = &*self.on_create.lock().expect("read the hook") {
+                hook();
+            }
             self.creation.lock().expect("read the creation").clone()
         }
 

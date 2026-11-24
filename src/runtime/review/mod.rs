@@ -123,6 +123,8 @@ enum Route {
     Linked(String),
     // A new chat with the prompt in its composer, for the reason no chat could be started.
     Opened(String),
+    // A newer request of the PR was reviewed at this head, so nothing was started or sent.
+    AlreadyReviewed,
 }
 
 // Well under the one second within which a wait must notice a stop request.
@@ -318,7 +320,13 @@ pub(crate) fn smoke(
         }
         return Ok(());
     }
-    let launched = launch(&tools, choice, &pr.repo, pr.number, smoke.requester, stop);
+    let launched = launch(
+        &tools,
+        choice,
+        (&pr.repo, pr.number, smoke.requester),
+        &|_| false,
+        stop,
+    );
     if let Some(worktree) = &launched.worktree {
         out(&format!("worktree: {}", worktree.display()));
     }
@@ -332,7 +340,7 @@ pub(crate) fn smoke(
         Some(Route::Opened(reason)) => out(&format!(
             "opened: send the prompt in the new Codex chat to start the review ({reason})"
         )),
-        None => {}
+        Some(Route::AlreadyReviewed) | None => {}
     }
     Ok(())
 }
@@ -696,14 +704,15 @@ fn ask_owner(
 }
 
 // Reads the PR again, so the review is pinned to the head at the time the owner chose.
+// `reviewed` tells a head already reviewed for the request, which then starts nothing.
 fn launch(
     tools: &Tools<'_>,
     choice: &Choice,
-    repo: &str,
-    number: u64,
-    requester: Option<&str>,
+    request: (&str, u64, Option<&str>),
+    reviewed: &dyn Fn(&PullRequest) -> bool,
     stop: &StopRequest,
 ) -> Launched {
+    let (repo, number, requester) = request;
     let pr = match github(tools, stop).pull_request(repo, number) {
         Ok(pr) => pr,
         Err(error) => {
@@ -721,6 +730,9 @@ fn launch(
         route,
         result,
     };
+    if reviewed(&pr) {
+        return ended(Some(Route::AlreadyReviewed), None, Ok(()));
+    }
     let prompt = choice.render(&pr, requester);
 
     let linked = match linked_chat(tools, &pr) {

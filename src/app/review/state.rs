@@ -55,6 +55,10 @@ pub(crate) struct Request {
     pub(crate) worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    // Set only when a chat confirmed the review started or the linked chat took it, so a draft left in a composer proves nothing.
+    // Records written before it read as unproven.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) review_started: bool,
 }
 
 // The key names the review_requested event, so only a re-request is notified again.
@@ -162,6 +166,7 @@ impl ReviewState {
                     head_sha: None,
                     worktree: None,
                     error: None,
+                    review_started: false,
                 },
             );
         }
