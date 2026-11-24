@@ -26,7 +26,7 @@ pub(crate) struct WatchState {
     pub(crate) worker: Option<String>,
     // The message whose delivery is unconfirmed; nothing more is sent for the PR until it is released.
     pub(crate) halted: Option<Map<String, Value>>,
-    // When the first of the messages the worker never received in a row was found lost.
+    // When the worker began missing messages in a row.
     pub(crate) lost_since: Option<String>,
 }
 
@@ -131,10 +131,10 @@ pub(crate) struct Delivered {
     pub(crate) prompt: String,
     pub(crate) findings: Vec<Finding>,
     pub(crate) follow_up: bool,
-    // A message delivered before its events were kept has none, so only its findings are told again.
+    // An older record has no events, so only its findings are told again.
     #[serde(default)]
     pub(crate) events: Vec<WatchEvent>,
-    // A loss is logged once, so the message keeps that it was found never to have reached the worker.
+    // A loss is logged and notified once, so the message records that it was found lost.
     #[serde(default)]
     pub(crate) lost: bool,
 }
@@ -218,7 +218,6 @@ struct StoredWatchState {
     worker: Option<String>,
     #[serde(deserialize_with = "field::nullable")]
     halted: Option<Map<String, Value>>,
-    // A state written before lost messages were counted has lost none.
     #[serde(default)]
     lost_since: Option<String>,
 }

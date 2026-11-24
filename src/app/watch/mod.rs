@@ -369,7 +369,6 @@ fn finding_events(findings: Vec<Finding>) -> Vec<WatchEvent> {
         .collect()
 }
 
-// What was told came before what is queued, so it goes first.
 fn told_ahead_of(told: Vec<WatchEvent>, pending: &[WatchEvent]) -> Vec<WatchEvent> {
     told.into_iter()
         .filter(|event| !is_queued(pending, event))
@@ -393,7 +392,6 @@ pub(crate) fn prepare_send(
             finding_events(state.follow_up.clone()),
         )
     } else {
-        // A lost message goes again in the next one, which then stands for both.
         let events = told_ahead_of(lost_events(state), &state.pending);
         (
             message_of(pr, &events, instructions),
