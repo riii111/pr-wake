@@ -65,9 +65,16 @@ struct ShownNotice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
-    SentToLinked(String),
-    Started(Option<String>),
+    SentToLinked(Chat),
+    Started(Chat),
+    Opened,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Chat {
+    thread: String,
+    head: String,
 }
 
 // A wake-up that is kept until the notify loop takes it, as a channel of one would be.
@@ -415,18 +422,17 @@ impl<'deps> Daemon<'deps> {
         let choices = &self.deps.tools.config.choices;
         // No notification asks for a choice in a batch, so a linked PR keeps its earlier one and any other takes the first, which the config always has.
         let choice = self.linked_choice(request).unwrap_or(&choices[0]);
-        let chat = match self.start(request, choice) {
-            Outcome::Failed => {
-                digest.failed += 1;
-                return;
+        match self.start(request, choice) {
+            Outcome::Failed => digest.failed += 1,
+            Outcome::Opened => digest.opened.push(Listed::of(&request.found)),
+            Outcome::SentToLinked(chat) | Outcome::Started(chat) => {
+                digest.started.push(Listed {
+                    chat: Some(chat.thread),
+                    head: Some(chat.head),
+                    ..Listed::of(&request.found)
+                });
             }
-            Outcome::SentToLinked(chat) => Some(chat),
-            Outcome::Started(chat) => chat,
-        };
-        digest.started.push(Listed {
-            chat,
-            ..Listed::of(&request.found)
-        });
+        }
     }
 
     fn report_digest(&self, pending: &PendingDigest) -> Result<(), String> {
@@ -679,11 +685,11 @@ impl<'deps> Daemon<'deps> {
                 self.log(&format!(
                     "{key}: sent to chat {chat} for {worktree} at {head}"
                 ));
-                return Outcome::SentToLinked(chat);
+                return Outcome::SentToLinked(Chat { thread: chat, head });
             }
             (Ok(()), Some(Route::Started(chat))) => {
                 self.log(&format!("{key}: started chat {chat} at {head}"));
-                return Outcome::Started(Some(chat));
+                return Outcome::Started(Chat { thread: chat, head });
             }
             (Ok(()), Some(Route::Opened(reason))) => self.log(&format!(
                 "{key}: opened {worktree} at {head}, as no chat could be started: {reason}"
@@ -695,7 +701,7 @@ impl<'deps> Daemon<'deps> {
                 return Outcome::Failed;
             }
         }
-        Outcome::Started(None)
+        Outcome::Opened
     }
 
     // The oldest queued request becomes notifying, saved before it is shown.
@@ -921,6 +927,8 @@ mod tests {
         // Each prompt sent to a linked chat, after the chat.
         sent: Mutex<Vec<(String, String)>>,
         creation: Mutex<Created>,
+        // Answers the report chat in place of `creation`.
+        report_creation: Mutex<Option<Created>>,
         // Each prompt a new chat was started with, after its title.
         started: Mutex<Vec<(String, String)>>,
         inbox: Mutex<String>,
@@ -1699,7 +1707,7 @@ mod tests {
         assert_eq!(fixture.count_calls("osascript "), 1, "the slot runs once");
         assert_eq!(
             fixture.count_calls(
-                "#1 PR 1\n#4 PR 4\n報告のみ: #2 PR 2（他の人が承認済み）\n報告のみ: #3 PR 3（3人以上を指名） pr-wake レビュー 4件"
+                "送信待ち: #1 PR 1\n送信待ち: #4 PR 4\n報告のみ: #2 PR 2（他の人が承認済み）\n報告のみ: #3 PR 3（3人以上を指名） pr-wake レビュー 4件"
             ),
             1
         );
@@ -1730,12 +1738,48 @@ mod tests {
         assert_eq!(titles, ["Review｜T PR#1", "レビュー報告｜11/18 11:00"]);
         let (_, report) = &started[1];
         assert!(
-            report
-                .contains("- [#1 PR 1](https://github.com/acme/app/pull/1) スレッドID review-chat"),
+            report.contains(&format!(
+                "- [#1 PR 1](https://github.com/acme/app/pull/1) スレッドID review-chat、head {HEAD}"
+            )),
             "{report}"
         );
         assert_eq!(fixture.count_calls("osascript "), 0);
         assert_eq!(fixture.state().pending_digests, []);
+    }
+
+    #[test]
+    fn batch_report_tells_a_review_opened_for_the_owner_to_send_from_a_started_one() {
+        let fixture = Fixture::batched();
+        fixture.save_queued(&[(1, 10)]);
+        fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
+        *fixture
+            .report_creation
+            .lock()
+            .expect("set the report creation") = Some(Created::Started("report-chat".to_owned()));
+        let now = || tokyo("2026-11-18T11:30:00");
+
+        fixture.with_daemon(
+            &Setup {
+                now: Some(&now),
+                ..Setup::default()
+            },
+            |daemon, _| daemon.batch_once(),
+        );
+
+        let started = fixture.started();
+        let (_, report) = started.last().expect("a report chat");
+        assert!(
+            report.contains(
+                "Enterで送るまでレビューは始まらないと書く）:\n- [#1 PR 1](https://github.com/acme/app/pull/1)"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("レビューしたPR:"), "{report}");
+        assert_eq!(
+            fixture.opened().len(),
+            1,
+            "the review was opened for the owner"
+        );
     }
 
     #[test]
@@ -2004,6 +2048,7 @@ mod tests {
                 delivery: Mutex::new(Delivery::Sent),
                 sent: Mutex::new(Vec::new()),
                 creation: Mutex::new(Created::NotSent("no harnexus in the test".to_owned())),
+                report_creation: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 inbox: Mutex::new("[]".to_owned()),
             }
@@ -2318,7 +2363,13 @@ mod tests {
                 .lock()
                 .expect("note the new chat")
                 .push((chat.title.to_owned(), chat.prompt.to_owned()));
-            self.creation.lock().expect("read the creation").clone()
+            let report = self
+                .report_creation
+                .lock()
+                .expect("read the report creation")
+                .clone()
+                .filter(|_| chat.title.starts_with("レビュー報告"));
+            report.unwrap_or_else(|| self.creation.lock().expect("read the creation").clone())
         }
 
         fn started(&self) -> Vec<(String, String)> {

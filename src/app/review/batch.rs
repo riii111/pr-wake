@@ -40,6 +40,9 @@ pub(crate) enum ReportReason {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Digest {
     pub(crate) started: Vec<Listed>,
+    // Opened in Codex App with the prompt, which runs only once the owner sends it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) opened: Vec<Listed>,
     pub(crate) reported: Vec<(Listed, ReportReason)>,
     pub(crate) failed: usize,
 }
@@ -51,9 +54,12 @@ pub(crate) struct Listed {
     pub(crate) repo: String,
     pub(crate) number: u64,
     pub(crate) title: String,
-    // The review chat, which a review opened without one lacks.
+    // A digest saved by an older pr-wake has none, so the report says the chat is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) chat: Option<String>,
+    // A linked chat keeps earlier reviews, so the report finds this one by the head its request names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) head: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,18 +136,27 @@ impl Digest {
     pub(crate) fn subtitle(&self) -> String {
         format!(
             "レビュー {}件",
-            self.started.len() + self.reported.len() + self.failed
+            self.started.len() + self.opened.len() + self.reported.len() + self.failed
         )
     }
 
     // A notification shows a few lines, so the PRs past them are only counted.
     #[must_use]
     pub(crate) fn message(&self) -> String {
-        let mut listed = self.started.iter().map(Listed::line).chain(
-            self.reported
-                .iter()
-                .map(|(pr, reason)| format!("報告のみ: {}（{}）", pr.line(), reason.text())),
-        );
+        let mut listed = self
+            .started
+            .iter()
+            .map(Listed::line)
+            .chain(
+                self.opened
+                    .iter()
+                    .map(|pr| format!("送信待ち: {}", pr.line())),
+            )
+            .chain(
+                self.reported
+                    .iter()
+                    .map(|(pr, reason)| format!("報告のみ: {}（{}）", pr.line(), reason.text())),
+            );
         let mut lines = listed.by_ref().take(MAX_LISTED).collect::<Vec<_>>();
         let rest = listed.count();
         if rest > 0 {
@@ -159,8 +174,9 @@ impl Digest {
         let mut lines = vec![
             "pr-wakeがまとめて始めたPRレビューの結果を報告してください。".to_owned(),
             String::new(),
-            "レビューのスレッドをcodex_appのread_threadで読み、最終回答から判定と要点を取り出してください。".to_owned(),
-            "終わっていないスレッドは、wait_threadsで終わるまで待ってください。".to_owned(),
+            "レビューのスレッドをcodex_appのread_threadで読み、今回の依頼のターンの最終回答から判定と要点を取り出してください。".to_owned(),
+            "スレッドには前回のレビューや別の会話も残るため、依頼文に下記のheadのSHAを含む最新のターンを今回の依頼とします。".to_owned(),
+            "そのターンが終わっていなければ、wait_threadsで終わるまで待ってください。".to_owned(),
             "PRへの投稿や、レビューのスレッドへの送信はしないでください。".to_owned(),
             String::new(),
             "PRごとに、PRへのリンク、判定（LGTM・修正必要など）、1〜2行の要点、`[スレッド](codex://threads/<スレッドID>)`の形のリンクを書いてください。".to_owned(),
@@ -170,11 +186,23 @@ impl Digest {
             lines.push("レビューしたPR:".to_owned());
             lines.extend(self.started.iter().map(|pr| {
                 let chat = pr.chat.as_deref().map_or_else(
-                    || "スレッドなし（Codex Appで開いたプロンプトから始める）".to_owned(),
+                    || "スレッドID不明（判定は読まずに、スレッドが分からないと書く）".to_owned(),
                     |chat| format!("スレッドID {chat}"),
                 );
-                format!("- {} {chat}", pr.link())
+                let head = pr
+                    .head
+                    .as_deref()
+                    .map_or_else(String::new, |head| format!("、head {head}"));
+                format!("- {} {chat}{head}", pr.link())
             }));
+        }
+        if !self.opened.is_empty() {
+            lines.push(String::new());
+            lines.push(
+                "スレッドを作れず、Codex Appに入力済みの新規スレッドを開いただけのPR（Enterで送るまでレビューは始まらないと書く）:"
+                    .to_owned(),
+            );
+            lines.extend(self.opened.iter().map(|pr| format!("- {}", pr.link())));
         }
         if !self.reported.is_empty() {
             lines.push(String::new());
@@ -204,6 +232,7 @@ impl Listed {
             number: found.number,
             title: found.title.clone(),
             chat: None,
+            head: None,
         }
     }
 
@@ -397,21 +426,22 @@ mod tests {
                 "started_and_reported",
                 Digest {
                     started: vec![listed(12, "Fix\nthe bug")],
+                    opened: vec![listed(13, "Opened")],
                     reported: vec![
                         (listed(33344, "Add a job"), ReportReason::ManyReviewers),
                         (listed(7, "Rename"), ReportReason::ApprovedByOther),
                     ],
                     failed: 0,
                 },
-                "レビュー 3件",
-                "#12 Fix the bug\n報告のみ: #33344 Add a job（3人以上を指名）\n報告のみ: #7 Rename（他の人が承認済み）",
+                "レビュー 4件",
+                "#12 Fix the bug\n送信待ち: #13 Opened\n報告のみ: #33344 Add a job（3人以上を指名）\n報告のみ: #7 Rename（他の人が承認済み）",
             ),
             (
                 "long_title_and_failures",
                 Digest {
                     started: vec![listed(1, &"a".repeat(31))],
-                    reported: Vec::new(),
                     failed: 2,
+                    ..Digest::default()
                 },
                 "レビュー 3件",
                 &format!("#1 {}…\n開始できず: 2件", "a".repeat(29)),
@@ -420,8 +450,7 @@ mod tests {
                 "more_than_fit",
                 Digest {
                     started: (1..=7).map(|number| listed(number, "T")).collect(),
-                    reported: Vec::new(),
-                    failed: 0,
+                    ..Digest::default()
                 },
                 "レビュー 7件",
                 "#1 T\n#2 T\n#3 T\n#4 T\n#5 T\nほか2件",
@@ -438,10 +467,12 @@ mod tests {
             started: vec![
                 Listed {
                     chat: Some("chat-12".to_owned()),
+                    head: Some("abc".to_owned()),
                     ..listed(12, "Fix\nthe bug")
                 },
-                listed(13, "Opened"),
+                listed(14, "Saved before"),
             ],
+            opened: vec![listed(13, "Opened")],
             reported: vec![(listed(7, "Rename"), ReportReason::ApprovedByOther)],
             failed: 1,
         };
@@ -449,8 +480,9 @@ mod tests {
         let prompt = digest.report_prompt();
 
         for expected in [
-            "- [#12 Fix the bug](https://github.com/acme/app/pull/12) スレッドID chat-12",
-            "- [#13 Opened](https://github.com/acme/app/pull/13) スレッドなし（Codex Appで開いたプロンプトから始める）",
+            "- [#12 Fix the bug](https://github.com/acme/app/pull/12) スレッドID chat-12、head abc",
+            "- [#14 Saved before](https://github.com/acme/app/pull/14) スレッドID不明",
+            "Enterで送るまでレビューは始まらないと書く）:\n- [#13 Opened](https://github.com/acme/app/pull/13)",
             "- [#7 Rename](https://github.com/acme/app/pull/7)（他の人が承認済み）",
             "開始できなかった依頼が1件あります。",
         ] {
@@ -461,14 +493,14 @@ mod tests {
     #[test]
     fn report_prompt_omits_the_empty_groups() {
         let digest = Digest {
-            started: Vec::new(),
             reported: vec![(listed(7, "Rename"), ReportReason::ManyReviewers)],
-            failed: 0,
+            ..Digest::default()
         };
 
         let prompt = digest.report_prompt();
 
         assert!(!prompt.contains("レビューしたPR:"), "{prompt}");
+        assert!(!prompt.contains("Enterで送る"), "{prompt}");
         assert!(!prompt.contains("開始できなかった"), "{prompt}");
         assert!(
             prompt.contains("- [#7 Rename](https://github.com/acme/app/pull/7)（3人以上を指名）")
@@ -495,6 +527,7 @@ mod tests {
             number,
             title: title.to_owned(),
             chat: None,
+            head: None,
         }
     }
 }

@@ -691,6 +691,14 @@ mod tests {
                         number: 1,
                         title: "T".to_owned(),
                         chat: Some("review-chat".to_owned()),
+                        head: Some("0123456789ab".to_owned()),
+                    }],
+                    opened: vec![Listed {
+                        repo: "acme/app".to_owned(),
+                        number: 3,
+                        title: "V".to_owned(),
+                        chat: None,
+                        head: None,
                     }],
                     reported: vec![(
                         Listed {
@@ -698,6 +706,7 @@ mod tests {
                             number: 2,
                             title: "U".to_owned(),
                             chat: None,
+                            head: None,
                         },
                         ReportReason::ApprovedByOther,
                     )],
