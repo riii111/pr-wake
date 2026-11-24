@@ -134,6 +134,9 @@ pub(crate) struct Delivered {
     // A message delivered before its events were kept has none, so only its findings are told again.
     #[serde(default)]
     pub(crate) events: Vec<WatchEvent>,
+    // A loss is logged once, so the message keeps that it was found never to have reached the worker.
+    #[serde(default)]
+    pub(crate) lost: bool,
 }
 
 // Marks a bot whose reviews the watch has taken in.
@@ -463,6 +466,7 @@ mod tests {
                     findings: vec![finding()],
                     follow_up: false,
                     events: Vec::new(),
+                    lost: false,
                 }),
                 ..WatchState::default()
             }

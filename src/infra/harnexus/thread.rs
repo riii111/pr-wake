@@ -717,6 +717,7 @@ mod tests {
             findings: Vec::new(),
             follow_up: false,
             events: Vec::new(),
+            lost: false,
         }
     }
 
