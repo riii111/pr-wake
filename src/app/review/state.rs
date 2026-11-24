@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::{batch::Digest, request::pr_key};
 
-// Saved in the layout the Go review wrote, so either version reads the other's state.
+// Existing state files must keep loading, so the layout keeps their version and fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewState {
@@ -56,9 +56,8 @@ pub(crate) struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     // Whether a chat confirmed the review started or the linked chat took it, so a draft left in a composer proves nothing.
-    // `None` on a record written before it, whose proof is inferred from what that version saved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) review_started: Option<bool>,
+    #[serde(default, skip_serializing_if = "<&bool as std::ops::Not>::not")]
+    pub(crate) review_started: bool,
 }
 
 // The key names the review_requested event, so only a re-request is notified again.
@@ -166,7 +165,7 @@ impl ReviewState {
                     head_sha: None,
                     worktree: None,
                     error: None,
-                    review_started: None,
+                    review_started: false,
                 },
             );
         }
@@ -193,9 +192,7 @@ impl ReviewState {
         self.requests
             .values()
             .filter(|request| request.status == Status::Queued)
-            .min_by(|left, right| {
-                (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
-            })
+            .min_by(|left, right| left.order().cmp(&right.order()))
             .map(|request| request.found.key.as_str())
     }
 
@@ -207,9 +204,7 @@ impl ReviewState {
             .filter(|request| request.status == Status::Queued)
             .cloned()
             .collect::<Vec<_>>();
-        queued.sort_by(|left, right| {
-            (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
-        });
+        queued.sort_by(|left, right| left.order().cmp(&right.order()));
         queued
     }
 
@@ -230,9 +225,7 @@ impl ReviewState {
                 matches!(request.status, Status::Queued | Status::Reported)
                     && pr_key(&request.found.repo, request.found.number) == pr
             })
-            .max_by(|left, right| {
-                (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
-            })
+            .max_by(|left, right| left.order().cmp(&right.order()))
     }
 
     // A later request of the same PR, which a review of this one would duplicate.
@@ -246,13 +239,30 @@ impl ReviewState {
             .filter(|other| {
                 other.status == Status::Queued
                     && pr_key(&other.found.repo, other.found.number) == pr
-                    && (other.first_seen, &other.found.key)
-                        > (request.first_seen, &request.found.key)
+                    && other.order() > request.order()
             })
-            .max_by(|left, right| {
-                (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
-            })
+            .max_by(|left, right| left.order().cmp(&right.order()))
             .map(|other| other.found.key.as_str())
+    }
+
+    // Whether a strictly newer request of the PR began its review at `head`, which covers what this request asks for.
+    #[must_use]
+    pub(crate) fn reviewed_at(&self, key: &str, head: &str) -> bool {
+        // Newer means a larger GitHub event id, as an older event can be first seen late; an unknown event has no order and is never suppressed.
+        let Some((request, event)) = self
+            .requests
+            .get(key)
+            .and_then(|request| Some((request, event_id(&request.found.key)?)))
+        else {
+            return false;
+        };
+        let pr = pr_key(&request.found.repo, request.found.number);
+        self.requests.values().any(|other| {
+            other.review_started
+                && other.head_sha.as_deref() == Some(head)
+                && pr_key(&other.found.repo, other.found.number) == pr
+                && event_id(&other.found.key).is_some_and(|other| other > event)
+        })
     }
 
     #[must_use]
@@ -283,6 +293,13 @@ impl ReviewState {
                 _ => {}
             }
         }
+    }
+}
+
+impl Request {
+    // Requests are taken in the order they were first seen, by key among those seen at once.
+    fn order(&self) -> (Timestamp, &str) {
+        (self.first_seen, &self.found.key)
     }
 }
 
@@ -321,7 +338,11 @@ impl<'de> Deserialize<'de> for Version {
     }
 }
 
-// Read in any offset, as the Go review wrote its local one, and written in UTC.
+// The review_requested event a key names, which an unknown request lacks.
+fn event_id(key: &str) -> Option<u64> {
+    key.rsplit_once('@')?.1.parse().ok()
+}
+
 mod stamp {
     use jiff::Timestamp;
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
@@ -366,12 +387,12 @@ mod optional_stamp {
     }
 }
 
-// Go wrote a time never set as its zero time, which the state keeps as `None`.
+// Existing state files write a time never set as the zero time, so it stands for `None` both ways.
 mod poll_time {
     use jiff::Timestamp;
     use serde::{Deserializer, Serializer};
 
-    const GO_ZERO: &str = "0001-01-01T00:00:00Z";
+    const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 
     #[expect(clippy::ref_option, reason = "serde passes the field by reference")]
     pub(super) fn serialize<S: Serializer>(
@@ -380,7 +401,7 @@ mod poll_time {
     ) -> Result<S::Ok, S::Error> {
         match at {
             Some(at) => super::stamp::serialize(at, serializer),
-            None => serializer.serialize_str(GO_ZERO),
+            None => serializer.serialize_str(ZERO_TIME),
         }
     }
 
@@ -388,12 +409,12 @@ mod poll_time {
         deserializer: D,
     ) -> Result<Option<Timestamp>, D::Error> {
         let at = super::stamp::deserialize(deserializer)?;
-        let zero = GO_ZERO.parse::<Timestamp>().ok();
+        let zero = ZERO_TIME.parse::<Timestamp>().ok();
         Ok((Some(at) != zero).then_some(at))
     }
 }
 
-// Go wrote an unknown login or requester as an empty string, which the state keeps as `None`.
+// Existing state files write an unknown login or requester as an empty string, so it stands for `None` both ways.
 mod blank {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -418,6 +439,8 @@ mod tests {
     use super::*;
 
     const NOW: &str = "2026-11-12T03:00:00Z";
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+    const LATER: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
     #[test]
     fn search_that_missed_a_pr_once_leaves_its_request_queued() {
@@ -596,12 +619,56 @@ mod tests {
         assert_eq!(tracked, HashSet::from(["acme/app#2".to_owned()]));
     }
 
+    #[test]
+    fn newer_request_started_at_the_head_covers_an_older_one() {
+        for (name, started, newer_head, older_key, expected) in [
+            ("started_at_the_head", true, HEAD, "acme/app#12@10", true),
+            (
+                "started_at_another_head",
+                true,
+                LATER,
+                "acme/app#12@10",
+                false,
+            ),
+            ("only_a_draft", false, HEAD, "acme/app#12@10", false),
+            ("unknown_event", true, HEAD, "acme/app#12@unknown", false),
+        ] {
+            let mut state = ReviewState::default();
+            state.apply_poll(
+                vec![
+                    keyed(older_key),
+                    keyed("acme/app#12@20"),
+                    keyed("acme/app#13@30"),
+                ],
+                at(NOW),
+                false,
+            );
+            for key in ["acme/app#12@20", "acme/app#13@30"] {
+                let other = state.requests.get_mut(key).expect("request");
+                other.review_started = started;
+                other.head_sha = Some(newer_head.to_owned());
+            }
+            // Seen after the newer event, as after the newer one's team was removed, so the order comes from the event ids.
+            state
+                .requests
+                .get_mut(older_key)
+                .expect("request")
+                .first_seen = at("2026-11-12T04:00:00Z");
+
+            assert_eq!(state.reviewed_at(older_key, HEAD), expected, "case: {name}");
+            assert!(
+                !state.reviewed_at("acme/app#12@20", HEAD),
+                "case: {name}: an older request never covers a newer one"
+            );
+        }
+    }
+
     mod record {
         use super::*;
         use crate::app::review::batch::{Listed, ReportReason};
 
-        // As the Go review wrote it: nanoseconds with the local offset, an empty requester and no team.
-        const GO_STATE: &str = r#"{
+        // As the current version writes it: millisecond UTC times, an empty requester, no team, and the zero time for a poll never made.
+        const SAVED_STATE: &str = r#"{
   "version": 1,
   "login": "me",
   "requests": {
@@ -612,12 +679,22 @@ mod tests {
       "title": "T",
       "requester": "",
       "status": "launched",
-      "firstSeen": "2026-11-12T12:00:00.123456789+09:00",
-      "updatedAt": "2026-11-12T12:01:00+09:00",
+      "firstSeen": "2026-11-12T03:00:00.123Z",
+      "updatedAt": "2026-11-12T03:01:00.000Z",
       "choice": "code",
       "headSha": "0123456789abcdef0123456789abcdef01234567",
       "worktree": "/w/acme/app/pr-1-0123456789ab",
-      "unknownField": true
+      "reviewStarted": true
+    },
+    "acme/app#2@20": {
+      "key": "acme/app#2@20",
+      "repo": "acme/app",
+      "number": 2,
+      "title": "U",
+      "requester": "sato",
+      "status": "queued",
+      "firstSeen": "2026-11-12T03:00:00.000Z",
+      "updatedAt": "2026-11-12T03:00:00.000Z"
     }
   },
   "prs": {
@@ -638,8 +715,8 @@ mod tests {
 "#;
 
         #[test]
-        fn go_state_is_read_with_unset_values_as_none() {
-            let state = serde_json::from_str::<ReviewState>(GO_STATE).expect("read the state");
+        fn saved_state_is_read_with_unset_values_as_none() {
+            let state = serde_json::from_str::<ReviewState>(SAVED_STATE).expect("read the state");
 
             let request = &state.requests["acme/app#1@10"];
             assert_eq!(state.login.as_deref(), Some("me"));
@@ -648,14 +725,15 @@ mod tests {
             assert_eq!(state.pending_digests, []);
             assert_eq!(request.found.requester, None);
             assert_eq!(request.status, Status::Launched);
-            assert_eq!(request.first_seen, at("2026-11-12T03:00:00.123456789Z"));
-            assert_eq!(request.error, None);
+            assert_eq!(request.first_seen, at("2026-11-12T03:00:00.123Z"));
+            assert!(request.review_started);
+            assert!(!state.requests["acme/app#2@20"].review_started);
             let cached = state.prs["acme/app#1"].found.as_ref().expect("cached");
             assert_eq!(cached.team.as_deref(), Some("acme/backend"));
         }
 
         #[test]
-        fn state_is_written_with_go_keys_and_millisecond_utc_times() {
+        fn state_is_written_with_its_keys_and_millisecond_utc_times() {
             let mut state = ReviewState::default();
             state.apply_poll(vec![found("acme/app", 1, 10)], at(NOW), false);
 
@@ -686,7 +764,8 @@ mod tests {
 
         #[test]
         fn written_state_reads_back_the_same() {
-            let mut state = serde_json::from_str::<ReviewState>(GO_STATE).expect("read the state");
+            let mut state =
+                serde_json::from_str::<ReviewState>(SAVED_STATE).expect("read the state");
             state.last_poll = Some(at(NOW));
             state.last_error = Some("HTTP 403".to_owned());
             state.last_batch = Some(at("2026-11-12T01:50:00Z"));
@@ -720,11 +799,6 @@ mod tests {
                     failed: 1,
                 },
             });
-            state
-                .requests
-                .get_mut("acme/app#1@10")
-                .expect("request")
-                .first_seen = at("2026-11-12T03:00:00.123Z");
 
             let again = serde_json::from_str::<ReviewState>(
                 &serde_json::to_string(&state).expect("write the state"),
@@ -735,15 +809,15 @@ mod tests {
         }
 
         #[test]
-        fn state_that_go_would_not_have_written_is_refused() {
+        fn state_of_another_version_or_with_an_unreadable_time_is_refused() {
             for (name, content) in [
                 (
                     "other_version",
-                    GO_STATE.replace(r#""version": 1"#, r#""version": 2"#),
+                    SAVED_STATE.replace(r#""version": 1"#, r#""version": 2"#),
                 ),
                 (
                     "unreadable_time",
-                    GO_STATE.replace("2026-11-12T12:01:00+09:00", "noon"),
+                    SAVED_STATE.replace("2026-11-12T03:01:00.000Z", "noon"),
                 ),
             ] {
                 let read = serde_json::from_str::<ReviewState>(&content);
@@ -761,6 +835,19 @@ mod tests {
             title: "T".to_owned(),
             requester: None,
             team: None,
+        }
+    }
+
+    // A request of acme/app under `key`, whose number the key names.
+    fn keyed(key: &str) -> Found {
+        let number = key
+            .split_once('#')
+            .and_then(|(_, rest)| rest.split_once('@'))
+            .and_then(|(number, _)| number.parse().ok())
+            .expect("a key acme/app#number@event");
+        Found {
+            key: key.to_owned(),
+            ..found("acme/app", number, 0)
         }
     }
 

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::{Timestamp, ZonedDateTime, civil::Weekday};
 use serde::{Deserialize, Serialize};
 
-use super::{config::Batches, one_line, state::Found};
+use super::{config::Batches, one_line, selection::SelectedOutcome, state::Found};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slot {
@@ -138,6 +138,26 @@ impl ReportReason {
 }
 
 impl Digest {
+    pub(crate) fn add(&mut self, found: &Found, outcome: &SelectedOutcome) {
+        match outcome {
+            SelectedOutcome::Started { thread } | SelectedOutcome::SentToLinked { thread } => {
+                self.started.push(Listed {
+                    chat: Some(thread.clone()),
+                    request: Some(found.key.clone()),
+                    ..Listed::of(found)
+                });
+            }
+            SelectedOutcome::Opened { .. } => self.opened.push(Listed::of(found)),
+            SelectedOutcome::Reported { reason } => {
+                self.reported.push((Listed::of(found), *reason));
+            }
+            SelectedOutcome::Failed { .. } => self.failed += 1,
+            SelectedOutcome::NotQueued { .. }
+            | SelectedOutcome::Stopped
+            | SelectedOutcome::Unconfirmed => {}
+        }
+    }
+
     #[must_use]
     pub(crate) fn subtitle(&self) -> String {
         format!(
@@ -481,6 +501,66 @@ mod tests {
         ] {
             assert!(prompt.contains(expected), "{expected} in {prompt}");
         }
+    }
+
+    #[test]
+    fn digest_lists_each_outcome_under_what_the_owner_does_next() {
+        let mut digest = Digest::default();
+        let found = |number: u64| Found {
+            key: format!("acme/app#{number}@{number}0"),
+            repo: "acme/app".to_owned(),
+            number,
+            title: "T".to_owned(),
+            requester: None,
+            team: None,
+        };
+
+        for (number, outcome) in [
+            (
+                1,
+                SelectedOutcome::Started {
+                    thread: "chat-1".to_owned(),
+                },
+            ),
+            (
+                2,
+                SelectedOutcome::SentToLinked {
+                    thread: "chat-2".to_owned(),
+                },
+            ),
+            (3, SelectedOutcome::Opened { reason: None }),
+            (
+                4,
+                SelectedOutcome::Reported {
+                    reason: ReportReason::AlreadyReviewed,
+                },
+            ),
+            (
+                5,
+                SelectedOutcome::Failed {
+                    error: "no checkout".to_owned(),
+                    thread: Some("chat-5".to_owned()),
+                },
+            ),
+            (6, SelectedOutcome::Stopped),
+        ] {
+            digest.add(&found(number), &outcome);
+        }
+
+        let in_chat = |number: u64, chat: &str| Listed {
+            chat: Some(chat.to_owned()),
+            request: Some(format!("acme/app#{number}@{number}0")),
+            ..listed(number, "T")
+        };
+        assert_eq!(
+            digest,
+            Digest {
+                started: vec![in_chat(1, "chat-1"), in_chat(2, "chat-2")],
+                opened: vec![listed(3, "T")],
+                reported: vec![(listed(4, "T"), ReportReason::AlreadyReviewed)],
+                failed: 1,
+            }
+        );
     }
 
     fn batches() -> Batches {

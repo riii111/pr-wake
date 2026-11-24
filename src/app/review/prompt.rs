@@ -32,8 +32,6 @@ enum Field {
     BaseRef,
 }
 
-const REMOVED_WORKTREE: &str = ".Worktree";
-
 const FIELDS: [(&str, Field); 9] = [
     (".Requester", Field::Requester),
     (".Skill", Field::Skill),
@@ -58,14 +56,8 @@ impl Prompt {
             let Some(close) = action.find("}}") else {
                 return Err(format!("{{{{ at {:?} has no closing }}}}", &rest[open..]));
             };
-            // Prompts written for Go templates put spaces inside the braces or not, so both are allowed.
+            // Existing prompts put spaces inside the braces or not, so both are allowed.
             let name = action[..close].trim_matches(' ');
-            // A config copied from an older example names it, so the error tells how to update the config.
-            if name == REMOVED_WORKTREE {
-                return Err(format!(
-                    "{{{{{REMOVED_WORKTREE}}}}} is no longer a field: the review now starts in a worktree at the PR head, so remove the sentence naming it, as in config.example.json"
-                ));
-            }
             let Some((_, field)) = FIELDS.iter().find(|(known, _)| *known == name) else {
                 return Err(format!(
                     "{{{{{}}}}} is not a field; a prompt can name only {}",
