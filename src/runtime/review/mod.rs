@@ -311,6 +311,8 @@ pub(crate) fn smoke(
         }
         return Ok(());
     }
+    // Read again after the choice, so the review is pinned to the head at the time the owner chose.
+    let pr = github(&tools, stop).pull_request(&repo, number)?.pr;
     let launched = launch(&tools, choice, &request, &pr, stop);
     if let Some(worktree) = &launched.worktree {
         out(&format!("worktree: {}", worktree.display()));
