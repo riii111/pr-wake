@@ -634,6 +634,8 @@ mod tests {
             prompt: PROMPT.to_owned(),
             findings: Vec::new(),
             follow_up: false,
+            events: Vec::new(),
+            lost: false,
         }
     }
 

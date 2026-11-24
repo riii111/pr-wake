@@ -27,6 +27,8 @@ pub(crate) struct CycleDeps<'deps> {
     pub(crate) workers: &'deps mut dyn Workers,
     pub(crate) now: &'deps dyn Fn() -> Zoned,
     pub(crate) log: &'deps dyn Log,
+    // Shows the owner a notification with a subtitle and a message, without waiting.
+    pub(crate) notify: &'deps dyn Fn(&str, &str) -> Result<(), String>,
 }
 
 pub(crate) struct Watch<'deps> {
@@ -331,18 +333,44 @@ fn deliver(deps: &mut CycleDeps<'_>, config: &WatchConfig, entry: &mut Tracked, 
                 .with("pr", entry.link.url.as_str())
                 .with("reason", entry.state.reason.clone()),
         ),
-        Delivery::Hold(note) => log_answer(deps.log, &entry.link.url, note),
+        Delivery::Hold(note) => tell_answer(deps, entry, note),
         Delivery::Send(note) => {
-            log_answer(deps.log, &entry.link.url, note);
+            tell_answer(deps, entry, note);
             send(deps, config, entry, &sender, now.timestamp());
         }
     }
 }
 
-fn log_answer(log: &dyn Log, pr: &str, note: Option<AnswerNote>) {
+const LOST_NOTICE: &str = "ワーカーが通知を受け取れていません";
+const RESEND_NOTICE: &str = "ワーカーが通知を受け取れていません。送り直します";
+
+fn tell_answer(deps: &CycleDeps<'_>, entry: &Tracked, note: Option<AnswerNote>) {
+    let (log, pr) = (deps.log, entry.link.url.as_str());
     match note {
         None => {}
-        Some(AnswerNote::NotSeen) => log.write(Entry::new("answer_not_seen").with("pr", pr)),
+        Some(AnswerNote::NotSeen { resent, first }) => {
+            log.write(
+                Entry::new("answer_not_seen")
+                    .with("pr", pr)
+                    .with("resent", resent),
+            );
+            // Later losses in a row only repeat what the owner was told, so only the first is shown.
+            if first {
+                let subtitle = format!("{} #{}", entry.link.pr.repo, entry.link.pr.number);
+                let message = if resent == 0 {
+                    LOST_NOTICE
+                } else {
+                    RESEND_NOTICE
+                };
+                if let Err(error) = (deps.notify)(&subtitle, message) {
+                    log.write(
+                        Entry::new("notify_failed")
+                            .with("pr", pr)
+                            .with("error", error),
+                    );
+                }
+            }
+        }
         Some(AnswerNote::Incomplete { missing }) => log.write(
             Entry::new("answer_incomplete")
                 .with("pr", pr)
@@ -429,7 +457,7 @@ mod tests {
             harnexus::{CallApp, CodexWorkers},
             t3::{T3Ran, T3Workers},
         },
-        runtime::watch::AppWorkers,
+        runtime::watch::{AppWorkers, status as watch_status},
     };
 
     const PR: &str = "https://github.com/org/pay/pull/7";
@@ -478,6 +506,7 @@ mod tests {
         world: RefCell<World>,
         calls: RefCell<Calls>,
         logs: Recorded,
+        notices: RefCell<Vec<(String, String)>>,
     }
 
     #[derive(Default)]
@@ -1441,6 +1470,232 @@ mod tests {
         }
     }
 
+    mod lost_message {
+        use super::*;
+
+        #[test]
+        fn message_an_idle_worker_never_started_goes_again_and_the_owner_is_told_once() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            fixture.later(9);
+            fixture.cycle();
+            let waited = fixture.sent().len();
+
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(waited, 1);
+            assert_eq!(fixture.sent().len(), 2);
+            assert!(fixture.prompt(1).contains("discussion_r1"));
+            assert!(
+                fixture.logged("answer_not_seen")[0]
+                    .fields
+                    .contains(&("resent", json!(2)))
+            );
+            assert_eq!(
+                *fixture.notices.borrow(),
+                [("org/pay #7".to_owned(), RESEND_NOTICE.to_owned())]
+            );
+            assert_eq!(
+                fixture.state().lost_since.as_deref(),
+                Some("2026-10-23T12:10:00.000Z")
+            );
+        }
+
+        #[test]
+        fn worker_that_keeps_missing_messages_is_tried_less_often_until_it_answers() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            fixture.later(10);
+            fixture.cycle();
+            fixture.later(29);
+            fixture.cycle();
+            let waited = fixture.sent().len();
+
+            fixture.later(1);
+            fixture.cycle();
+            let third = fixture.prompt(2);
+            fixture.update(|world| {
+                world.turns = vec![delegated_turn(
+                    world.now,
+                    &third,
+                    &format!("{PR}#discussion_r1 直す"),
+                    "reviewer",
+                )];
+            });
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(waited, 2);
+            assert_eq!(fixture.sent().len(), 3);
+            assert_eq!(fixture.notices.borrow().len(), 1);
+            let after = fixture.state();
+            assert_eq!((after.delivered, after.lost_since), (None, None));
+        }
+
+        #[test]
+        fn worker_busy_for_a_day_is_told_lost_and_its_late_answer_still_taken() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            let first = fixture.prompt(0);
+
+            fixture.update(|world| world.active = true);
+            fixture.later(25 * 60);
+            fixture.cycle();
+            fixture.later(1);
+            fixture.cycle();
+            let shown = serde_json::to_value(watch_status(&fixture.paths.state).expect("status"))
+                .expect("write the status");
+            fixture.update(|world| {
+                world.active = false;
+                world.turns = vec![delegated_turn(
+                    at(NOON),
+                    &first,
+                    &format!("{PR}#discussion_r1 直す"),
+                    "reviewer",
+                )];
+            });
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(fixture.logged("answer_not_seen").len(), 1);
+            assert_eq!(fixture.notices.borrow().len(), 1);
+            assert_eq!(
+                shown["prs"][0]["undeliveredSince"],
+                "2026-10-24T13:00:00.000Z"
+            );
+            assert_eq!(fixture.sent().len(), 1);
+            let after = fixture.state();
+            assert_eq!((after.delivered, after.lost_since), (None, None));
+        }
+
+        #[test]
+        fn message_lost_while_the_worker_was_busy_goes_once_it_is_idle() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            fixture.update(|world| world.active = true);
+            fixture.later(25 * 60);
+            fixture.cycle();
+            let held = fixture.sent().len();
+
+            fixture.update(|world| world.active = false);
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(held, 1);
+            assert_eq!(fixture.sent().len(), 2);
+            assert!(fixture.prompt(1).contains("discussion_r1"));
+        }
+
+        #[test]
+        fn loss_found_in_quiet_hours_is_told_at_once_and_resent_when_they_end() {
+            let fixture = Fixture::new(
+                json!({ "quietHours": { "start": "12:05", "end": "13:00" } }),
+                Read::Again,
+                "worker",
+            );
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            fixture.later(10);
+            fixture.cycle();
+            let (held, told) = (fixture.sent().len(), fixture.notices.borrow().len());
+
+            fixture.later(50);
+            fixture.cycle();
+
+            assert_eq!((held, told), (1, 1));
+            assert_eq!(fixture.sent().len(), 2);
+            assert_eq!(fixture.logged("answer_not_seen").len(), 1);
+        }
+
+        #[test]
+        fn resend_not_sent_leaves_the_lost_message_to_take_its_late_answer() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            let first = fixture.prompt(0);
+            fixture.update(|world| world.send_outcome = "not_sent");
+            fixture.later(10);
+            fixture.cycle();
+            let tried = fixture.sent().len();
+
+            fixture.update(|world| {
+                world.send_outcome = "done";
+                world.turns = vec![delegated_turn(
+                    at(NOON),
+                    &first,
+                    &format!("{PR}#discussion_r1 直す"),
+                    "reviewer",
+                )];
+            });
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(tried, 2);
+            assert_eq!(fixture.sent().len(), 2);
+            let after = fixture.state();
+            assert_eq!((after.delivered, after.lost_since), (None, None));
+            assert_eq!(after.pending, []);
+        }
+
+        #[test]
+        fn whole_lost_message_goes_again_with_what_it_told_besides_findings() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| {
+                world.comments = vec![comment()];
+                world.summary = PrSummary {
+                    rollup: Some("FAILURE".to_owned()),
+                    ..summary()
+                };
+                world.failed_required = vec![build()];
+            });
+            fixture.cycle();
+
+            fixture.later(10);
+            fixture.cycle();
+
+            let again = fixture.prompt(1);
+            assert!(again.contains("discussion_r1"), "{again}");
+            assert!(again.contains("[必須CIの失敗] build"), "{again}");
+        }
+
+        #[test]
+        fn turn_started_while_the_worker_was_busy_past_the_limit_is_still_its_answer() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            fixture.later(10);
+            fixture.cycle();
+            let second = fixture.prompt(1);
+
+            fixture.update(|world| world.active = true);
+            fixture.later(40);
+            fixture.cycle();
+            let waited = fixture.sent().len();
+            fixture.update(|world| {
+                world.active = false;
+                world.turns = vec![delegated_turn(
+                    at("2026-10-23T12:10:00Z"),
+                    &second,
+                    &format!("{PR}#discussion_r1 直す"),
+                    "reviewer",
+                )];
+            });
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(waited, 2);
+            assert_eq!(fixture.sent().len(), 2);
+            assert_eq!(fixture.notices.borrow().len(), 1);
+            let after = fixture.state();
+            assert_eq!((after.delivered, after.lost_since), (None, None));
+        }
+    }
+
     mod hand_over {
         use super::*;
 
@@ -1750,6 +2005,7 @@ mod tests {
                 }),
                 calls: RefCell::new(Calls::default()),
                 logs: Recorded::default(),
+                notices: RefCell::default(),
             };
 
             fixture.link_to(worker);
@@ -1801,6 +2057,10 @@ mod tests {
                 workers: &mut workers,
                 now: &now,
                 log: &self.logs,
+                notify: &|subtitle, message| {
+                    self.notify(subtitle, message);
+                    Ok(())
+                },
             };
 
             run_cycle(&mut deps, over).expect("the cycle runs");
@@ -1822,12 +2082,22 @@ mod tests {
                     workers: &mut workers,
                     now: &now,
                     log: &self.logs,
+                    notify: &|subtitle, message| {
+                        self.notify(subtitle, message);
+                        Ok(())
+                    },
                 },
                 stop,
                 pause,
                 replaced,
                 ended: &|| None,
             })
+        }
+
+        fn notify(&self, subtitle: &str, message: &str) {
+            self.notices
+                .borrow_mut()
+                .push((subtitle.to_owned(), message.to_owned()));
         }
 
         // The real workers of both apps, with the app and the t3 CLI answering from the world.

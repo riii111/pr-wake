@@ -716,6 +716,8 @@ mod tests {
             prompt: prompt.to_owned(),
             findings: Vec::new(),
             follow_up: false,
+            events: Vec::new(),
+            lost: false,
         }
     }
 

@@ -26,6 +26,8 @@ pub(crate) struct WatchState {
     pub(crate) worker: Option<String>,
     // The message whose delivery is unconfirmed; nothing more is sent for the PR until it is released.
     pub(crate) halted: Option<Map<String, Value>>,
+    // When the worker began missing messages in a row.
+    pub(crate) lost_since: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +131,12 @@ pub(crate) struct Delivered {
     pub(crate) prompt: String,
     pub(crate) findings: Vec<Finding>,
     pub(crate) follow_up: bool,
+    // An older record has no events, so only its findings are told again.
+    #[serde(default)]
+    pub(crate) events: Vec<WatchEvent>,
+    // A loss is logged and notified once, so the message records that it was found lost.
+    #[serde(default)]
+    pub(crate) lost: bool,
 }
 
 // Marks a bot whose reviews the watch has taken in.
@@ -210,6 +218,8 @@ struct StoredWatchState {
     worker: Option<String>,
     #[serde(deserialize_with = "field::nullable")]
     halted: Option<Map<String, Value>>,
+    #[serde(default)]
+    lost_since: Option<String>,
 }
 
 // Records from before bots were configurable hold CodeRabbit in its own fields, read as the coderabbit preset.
@@ -302,6 +312,7 @@ impl From<StoredWatchState> for WatchState {
             delivered: stored.delivered,
             worker: stored.worker,
             halted: stored.halted,
+            lost_since: stored.lost_since,
         }
     }
 }
@@ -453,6 +464,8 @@ mod tests {
                     prompt: "go".to_owned(),
                     findings: vec![finding()],
                     follow_up: false,
+                    events: Vec::new(),
+                    lost: false,
                 }),
                 ..WatchState::default()
             }
@@ -571,6 +584,7 @@ mod tests {
             halted: json!({ "at": "2026-10-23T02:00:00.000Z", "prompt": "go", "answer": null })
                 .as_object()
                 .cloned(),
+            lost_since: Some("2026-10-23T01:30:00.000Z".to_owned()),
         };
         let mut record = serde_json::to_value(&state).expect("write the state");
         record
@@ -581,6 +595,23 @@ mod tests {
         let read = WatchState::deserialize(record).expect("read the record");
 
         assert_eq!(read, state);
+    }
+
+    #[test]
+    fn state_written_before_lost_messages_were_counted_has_none_lost() {
+        let mut record = serde_json::to_value(WatchState {
+            lost_since: Some("2026-10-23T01:30:00.000Z".to_owned()),
+            ..WatchState::default()
+        })
+        .expect("write the state");
+        record
+            .as_object_mut()
+            .expect("the state is an object")
+            .remove("lostSince");
+
+        let read = WatchState::deserialize(record).expect("read the record");
+
+        assert_eq!(read, WatchState::default());
     }
 
     #[test]
