@@ -122,6 +122,8 @@ impl<'deps> Daemon<'deps> {
     pub(super) fn recover(&self) -> Result<(), String> {
         let mut state = self.lock_state();
         state.recover((self.deps.now)());
+        // The cache names each PR's request as the previous config resolved it, so the first poll reads them all again.
+        state.prs.clear();
         let saved = self.save(&state);
         drop(state);
         saved?;
@@ -2895,6 +2897,26 @@ mod tests {
             fixture.calls_starting("gh api repos/acme/app/pulls/12"),
             Vec::<String>::new()
         );
+
+        // Restarted with batches while the PR is unchanged, so only the restart makes the cached event 20 be read again.
+        fixture.config.batches = Fixture::batched().config.batches;
+        fixture.with_daemon(&Setup::default(), |daemon, _| {
+            daemon.recover().expect("recover on the restart");
+            daemon.poll_once().expect("poll after the restart");
+        });
+        let queued = queue(&fixture.state())
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect::<Vec<_>>();
+        fixture.select("chosen", &["acme/app#12@10"]);
+        fixture.take_selections();
+
+        assert_eq!(queued, ["acme/app#12@10"]);
+        assert_eq!(fixture.status("acme/app#12@20"), Status::Withdrawn);
+        assert!(matches!(
+            fixture.selection("chosen").outcomes.get("acme/app#12@10"),
+            Some(SelectedOutcome::Opened { .. })
+        ));
     }
 
     #[test]
