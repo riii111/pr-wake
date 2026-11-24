@@ -83,6 +83,7 @@ pub(crate) enum AnswerNote {
 pub(crate) struct Sending {
     pub(crate) prompt: String,
     findings: Vec<Finding>,
+    events: Vec<WatchEvent>,
     follow_up: bool,
     // Saved before the call, so a watch stopped mid-send never sends the message again.
     pub(crate) marked: WatchState,
@@ -111,9 +112,6 @@ const LOST_AFTER: SignedDuration = SignedDuration::from_mins(10);
 
 // A worker that keeps failing, as when its login has lapsed, is tried again less often.
 const LOST_AGAIN_AFTER: SignedDuration = SignedDuration::from_mins(30);
-
-// A busy worker may still start the message's turn after its own, so the answer is given up on only this late.
-const ANSWER_WAIT: SignedDuration = SignedDuration::from_hours(24);
 
 const OPEN: &str = "OPEN";
 
@@ -152,10 +150,10 @@ fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
     let told = state
         .delivered
         .take()
-        .map_or_default(|delivered| delivered.findings)
+        .map_or_default(told_events)
         .into_iter()
-        .chain(std::mem::take(&mut state.follow_up))
-        .collect::<Vec<_>>();
+        .chain(finding_events(std::mem::take(&mut state.follow_up)))
+        .collect();
     requeue(state, told);
     state.halted = None;
     state.lost_since = None;
@@ -275,13 +273,11 @@ pub(crate) fn deliver(
     };
     state.reason = None;
 
-    let Awaited::Taken(note) = take_answer(state, answer.as_ref(), busy, now.timestamp()) else {
+    let ready = !busy && !in_quiet_hours(now, config.quiet_hours);
+    let Awaited::Taken(note) = take_answer(state, answer.as_ref(), ready, now.timestamp()) else {
         return Delivery::Hold(None);
     };
-    if (state.pending.is_empty() && state.follow_up.is_empty())
-        || in_quiet_hours(now, config.quiet_hours)
-        || busy
-    {
+    if !ready || (state.pending.is_empty() && state.follow_up.is_empty()) {
         return Delivery::Hold(note);
     }
     Delivery::Send(note)
@@ -290,14 +286,15 @@ pub(crate) fn deliver(
 fn take_answer(
     state: &mut WatchState,
     answer: Option<&Answer>,
-    busy: bool,
+    ready: bool,
     now: Timestamp,
 ) -> Awaited {
     let Some(delivered) = &state.delivered else {
         return Awaited::Taken(None);
     };
     let note = match answer {
-        None if is_lost(delivered, state.lost_since.is_some(), busy, now) => {
+        // A message kept until it can go again at once still matches a turn that starts late, so it is never sent twice.
+        None if ready && is_lost(delivered, state.lost_since.is_some(), now) => {
             return Awaited::Taken(Some(requeue_lost(state, now)));
         }
         None => return Awaited::Coming,
@@ -324,22 +321,13 @@ fn take_answer(
     Awaited::Taken(note)
 }
 
-fn is_lost(delivered: &Delivered, losing: bool, busy: bool, now: Timestamp) -> bool {
-    let wait = if busy {
-        ANSWER_WAIT
-    } else if losing {
-        LOST_AGAIN_AFTER
-    } else {
-        LOST_AFTER
-    };
+fn is_lost(delivered: &Delivered, losing: bool, now: Timestamp) -> bool {
+    let wait = if losing { LOST_AGAIN_AFTER } else { LOST_AFTER };
     !Elapsed::since(Some(delivered.at.as_str()), now).less_than(wait)
 }
 
 fn requeue_lost(state: &mut WatchState, now: Timestamp) -> AnswerNote {
-    let told = state
-        .delivered
-        .take()
-        .map_or_default(|delivered| delivered.findings);
+    let told = state.delivered.take().map_or_default(told_events);
     let requeued = requeue(state, told);
     let first = state.lost_since.is_none();
     if first {
@@ -348,12 +336,26 @@ fn requeue_lost(state: &mut WatchState, now: Timestamp) -> AnswerNote {
     AnswerNote::NotSeen { requeued, first }
 }
 
-// What was told came before what is queued, so it goes first.
-fn requeue(state: &mut WatchState, findings: Vec<Finding>) -> usize {
-    let told = findings
+fn told_events(delivered: Delivered) -> Vec<WatchEvent> {
+    if delivered.events.is_empty() {
+        finding_events(delivered.findings)
+    } else {
+        delivered.events
+    }
+}
+
+fn finding_events(findings: Vec<Finding>) -> Vec<WatchEvent> {
+    findings
         .into_iter()
-        .filter(|finding| !is_queued(&state.pending, finding))
         .map(|finding| WatchEvent::Finding { finding })
+        .collect()
+}
+
+// What was told came before what is queued, so it goes first.
+fn requeue(state: &mut WatchState, events: Vec<WatchEvent>) -> usize {
+    let told = events
+        .into_iter()
+        .filter(|event| !is_queued(&state.pending, event))
         .collect::<Vec<_>>();
     let requeued = told.len();
     state.pending.splice(0..0, told);
@@ -369,10 +371,11 @@ pub(crate) fn prepare_send(
     let instructions = config.instructions.as_deref();
     // The follow-up goes alone and first, so it asks only about what the last answer left out.
     let follow_up = !state.follow_up.is_empty();
-    let (prompt, findings) = if follow_up {
+    let (prompt, findings, events) = if follow_up {
         (
             follow_up_of(pr, &state.follow_up, instructions),
             state.follow_up.clone(),
+            finding_events(state.follow_up.clone()),
         )
     } else {
         (
@@ -385,6 +388,7 @@ pub(crate) fn prepare_send(
                     _ => None,
                 })
                 .collect(),
+            state.pending.clone(),
         )
     };
 
@@ -396,6 +400,7 @@ pub(crate) fn prepare_send(
     Sending {
         prompt,
         findings,
+        events,
         follow_up,
         marked,
     }
@@ -424,6 +429,7 @@ pub(crate) fn finish_send(
                 prompt: sending.prompt,
                 findings: sending.findings,
                 follow_up: sending.follow_up,
+                events: sending.events,
             });
             SendResult::Delivered {
                 follow_up: sending.follow_up,
@@ -456,9 +462,12 @@ pub(crate) fn release(state: &WatchState) -> Option<WatchState> {
     })
 }
 
-fn is_queued(pending: &[WatchEvent], finding: &Finding) -> bool {
+fn is_queued(pending: &[WatchEvent], event: &WatchEvent) -> bool {
+    let WatchEvent::Finding { finding } = event else {
+        return pending.contains(event);
+    };
     pending.iter().any(
-        |event| matches!(event, WatchEvent::Finding { finding: queued } if queued.id == finding.id),
+        |queued| matches!(queued, WatchEvent::Finding { finding: queued } if queued.id == finding.id),
     )
 }
 
@@ -1040,12 +1049,17 @@ mod tests {
                     "2026-10-23T10:09:59Z",
                 ),
                 (
-                    "busy_worker_within_a_day",
+                    "busy_worker_past_the_limit",
                     WorkerView::Present {
                         busy: true,
                         answer: None,
                     },
-                    "2026-10-24T09:59:59Z",
+                    "2026-10-24T10:00:00Z",
+                ),
+                (
+                    "quiet_hours_past_the_limit",
+                    idle(None),
+                    "2026-10-23T23:00:00Z",
                 ),
             ] {
                 let mut state = WatchState {
@@ -1114,7 +1128,18 @@ mod tests {
         #[test]
         fn lost_message_puts_what_it_told_ahead_of_what_is_queued() {
             let mut state = WatchState {
-                delivered: Some(delivered(vec![finding(2), finding(1)])),
+                delivered: Some(Delivered {
+                    events: vec![
+                        conflict(),
+                        WatchEvent::Finding {
+                            finding: finding(2),
+                        },
+                        WatchEvent::Finding {
+                            finding: finding(1),
+                        },
+                    ],
+                    ..delivered(vec![finding(2), finding(1)])
+                }),
                 ..pending_state()
             };
 
@@ -1128,13 +1153,14 @@ mod tests {
             assert_eq!(
                 delivery,
                 Delivery::Send(Some(AnswerNote::NotSeen {
-                    requeued: 1,
+                    requeued: 2,
                     first: true,
                 }))
             );
             assert_eq!(
                 state.pending,
                 [
+                    conflict(),
                     WatchEvent::Finding {
                         finding: finding(2),
                     },
@@ -1147,6 +1173,28 @@ mod tests {
             assert_eq!(
                 state.lost_since.as_deref(),
                 Some("2026-10-23T10:10:00.000Z")
+            );
+        }
+
+        #[test]
+        fn message_delivered_before_its_events_were_kept_tells_its_findings_again() {
+            let mut state = WatchState {
+                delivered: Some(delivered(vec![finding(2)])),
+                ..WatchState::default()
+            };
+
+            deliver(
+                &mut state,
+                idle(None),
+                &zoned("2026-10-23T10:10:00Z"),
+                &config(),
+            );
+
+            assert_eq!(
+                state.pending,
+                [WatchEvent::Finding {
+                    finding: finding(2),
+                }]
             );
         }
 
@@ -1178,29 +1226,6 @@ mod tests {
                 assert_eq!(delivery, expected, "case: {name}");
                 assert_eq!(state.lost_since.as_deref(), Some(NOON), "case: {name}");
             }
-        }
-
-        #[test]
-        fn busy_worker_is_given_up_on_after_a_day() {
-            let mut state = WatchState {
-                delivered: Some(delivered(vec![finding(1)])),
-                ..pending_state()
-            };
-            let busy = WorkerView::Present {
-                busy: true,
-                answer: None,
-            };
-
-            let delivery = deliver(&mut state, busy, &zoned("2026-10-24T10:00:00Z"), &config());
-
-            assert_eq!(
-                delivery,
-                Delivery::Hold(Some(AnswerNote::NotSeen {
-                    requeued: 0,
-                    first: true,
-                }))
-            );
-            assert_eq!(state.delivered, None);
         }
 
         #[test]
@@ -1357,6 +1382,9 @@ mod tests {
                         prompt,
                         findings: vec![finding(1)],
                         follow_up: false,
+                        events: vec![WatchEvent::Finding {
+                            finding: finding(1),
+                        }],
                     }),
                     ..WatchState::default()
                 }
@@ -1579,6 +1607,7 @@ mod tests {
             prompt: "go".to_owned(),
             findings,
             follow_up: false,
+            events: Vec::new(),
         }
     }
 

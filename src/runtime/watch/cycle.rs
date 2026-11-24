@@ -341,7 +341,7 @@ fn deliver(deps: &mut CycleDeps<'_>, config: &WatchConfig, entry: &mut Tracked, 
     }
 }
 
-const LOST_NOTICE: &str = "ワーカーが通知を受け取れなかったため、届かなかった指摘を送り直します";
+const LOST_NOTICE: &str = "ワーカーが通知を受け取れなかったため、送り直します";
 
 fn tell_answer(deps: &CycleDeps<'_>, entry: &Tracked, note: Option<AnswerNote>) {
     let (log, pr) = (deps.log, entry.link.url.as_str());
@@ -1485,7 +1485,7 @@ mod tests {
             assert!(
                 fixture.logged("answer_not_seen")[0]
                     .fields
-                    .contains(&("requeued", json!(1)))
+                    .contains(&("requeued", json!(2)))
             );
             assert_eq!(
                 *fixture.notices.borrow(),
@@ -1530,18 +1530,56 @@ mod tests {
         }
 
         #[test]
-        fn busy_worker_is_awaited_past_the_time_an_idle_one_is_given_up_on() {
+        fn whole_lost_message_goes_again_with_what_it_told_besides_findings() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| {
+                world.comments = vec![comment()];
+                world.summary = PrSummary {
+                    rollup: Some("FAILURE".to_owned()),
+                    ..summary()
+                };
+                world.failed_required = vec![build()];
+            });
+            fixture.cycle();
+
+            fixture.later(10);
+            fixture.cycle();
+
+            let again = fixture.prompt(1);
+            assert!(again.contains("discussion_r1"), "{again}");
+            assert!(again.contains("[必須CIの失敗] build"), "{again}");
+        }
+
+        #[test]
+        fn turn_started_while_the_worker_was_busy_past_the_limit_is_still_its_answer() {
             let fixture = Fixture::new(json!({}), Read::Again, "worker");
             fixture.update(|world| world.comments = vec![comment()]);
             fixture.cycle();
+            fixture.later(10);
+            fixture.cycle();
+            let second = fixture.prompt(1);
 
             fixture.update(|world| world.active = true);
-            fixture.later(60);
+            fixture.later(40);
+            fixture.cycle();
+            let waited = fixture.sent().len();
+            fixture.update(|world| {
+                world.active = false;
+                world.turns = vec![delegated_turn(
+                    at("2026-10-23T12:10:00Z"),
+                    &second,
+                    &format!("{PR}#discussion_r1 直す"),
+                    "reviewer",
+                )];
+            });
+            fixture.later(1);
             fixture.cycle();
 
-            assert_eq!(fixture.sent().len(), 1);
-            assert!(fixture.state().delivered.is_some());
-            assert!(fixture.notices.borrow().is_empty());
+            assert_eq!(waited, 2);
+            assert_eq!(fixture.sent().len(), 2);
+            assert_eq!(fixture.notices.borrow().len(), 1);
+            let after = fixture.state();
+            assert_eq!((after.delivered, after.lost_since), (None, None));
         }
     }
 

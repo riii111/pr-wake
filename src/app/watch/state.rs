@@ -131,6 +131,9 @@ pub(crate) struct Delivered {
     pub(crate) prompt: String,
     pub(crate) findings: Vec<Finding>,
     pub(crate) follow_up: bool,
+    // A message delivered before its events were kept has none, so only its findings are told again.
+    #[serde(default)]
+    pub(crate) events: Vec<WatchEvent>,
 }
 
 // Marks a bot whose reviews the watch has taken in.
@@ -459,6 +462,7 @@ mod tests {
                     prompt: "go".to_owned(),
                     findings: vec![finding()],
                     follow_up: false,
+                    events: Vec::new(),
                 }),
                 ..WatchState::default()
             }
