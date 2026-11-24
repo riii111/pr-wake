@@ -123,7 +123,7 @@ enum Route {
     Linked(String),
     // A new chat with the prompt in its composer, for the reason no chat could be started.
     Opened(String),
-    // A newer request of the PR was reviewed at this head, so nothing was started or sent.
+    // A newer request of the PR already started its review at this head, so nothing was started or sent.
     AlreadyReviewed,
 }
 

@@ -55,7 +55,7 @@ pub(crate) fn pending_requests<E>(
     cache: &BTreeMap<String, CachedPr>,
     login: &str,
     teams: &[String],
-    mut requests_of: impl FnMut(&SearchHit) -> Result<(Vec<ReviewRequest>, LiveRequest), E>,
+    mut requests_of: impl FnMut(&SearchHit) -> Result<(Vec<ReviewRequest>, Option<LiveRequest>), E>,
 ) -> Result<Pending, E> {
     // A later search may answer for the same PR again, so the hits are keyed by PR and the later one is kept.
     let hits = hits
@@ -76,7 +76,7 @@ pub(crate) fn pending_requests<E>(
             found
         } else {
             let (requests, live) = requests_of(&hit)?;
-            current_request(&requests, &live, &hit, login, teams)
+            current_request(&requests, live.as_ref(), &hit, login, teams)
         };
 
         pending.found.push(Found {
@@ -94,16 +94,28 @@ pub(crate) fn pending_requests<E>(
     Ok(pending)
 }
 
-// The latest event whose target is still asked names the request, as a withdrawn team or login keeps its old event.
+// With the reviewers GitHub asks now, the latest event whose target is still asked names the request, as a withdrawn team or login keeps its old event.
+// Without them, as the poll outside batches reads none, the latest event does.
 // No event names a request the search still lists, so it is kept under a PR-level key.
 #[must_use]
 pub(crate) fn current_request(
     requests: &[ReviewRequest],
-    live: &LiveRequest,
+    live: Option<&LiveRequest>,
     hit: &SearchHit,
     login: &str,
     teams: &[String],
 ) -> Found {
+    let unknown = || Found {
+        key: format!("{}{UNKNOWN}", pr_key(&hit.repo, hit.number)),
+        repo: hit.repo.clone(),
+        number: hit.number,
+        title: hit.title.clone(),
+        requester: None,
+        team: None,
+    };
+    let Some(live) = live else {
+        return latest_request(requests, hit, login, teams).unwrap_or_else(unknown);
+    };
     let asked = requests
         .iter()
         .filter(|request| is_asked(request, live, login))
@@ -129,14 +141,7 @@ pub(crate) fn current_request(
                 .then(|| latest_request(requests, hit, login, teams))
                 .flatten()
         })
-        .unwrap_or_else(|| Found {
-            key: format!("{}{UNKNOWN}", pr_key(&hit.repo, hit.number)),
-            repo: hit.repo.clone(),
-            number: hit.number,
-            title: hit.title.clone(),
-            requester: None,
-            team: None,
-        })
+        .unwrap_or_else(unknown)
 }
 
 // Whether an open PR still asks for the review the request's event made.
@@ -430,9 +435,9 @@ mod tests {
     fn events_are_read_again_only_for_updated_prs() {
         let events = RefCell::new(vec![direct(7, "tanaka", "me")]);
         let reads = RefCell::new(0);
-        let read = |_: &SearchHit| -> Result<(Vec<ReviewRequest>, LiveRequest), String> {
+        let read = |_: &SearchHit| -> Result<(Vec<ReviewRequest>, Option<LiveRequest>), String> {
             *reads.borrow_mut() += 1;
-            Ok((events.borrow().clone(), asked(&["me"], &[])))
+            Ok((events.borrow().clone(), None))
         };
 
         let first = pending_requests(
@@ -477,7 +482,7 @@ mod tests {
             &BTreeMap::new(),
             "me",
             &[],
-            |_| Ok::<_, String>((Vec::new(), asked(&["me"], &[]))),
+            |_| Ok::<_, String>((Vec::new(), None)),
         )
         .expect("poll");
 
@@ -495,7 +500,7 @@ mod tests {
             &BTreeMap::new(),
             "me",
             &[],
-            |_| Ok::<_, String>((vec![direct(7, "tanaka", "me")], asked(&["me"], &[]))),
+            |_| Ok::<_, String>((vec![direct(7, "tanaka", "me")], None)),
         )
         .expect("poll");
 
@@ -510,7 +515,7 @@ mod tests {
             &BTreeMap::new(),
             "me",
             &[],
-            |_| Err::<(Vec<ReviewRequest>, LiveRequest), _>("HTTP 502".to_owned()),
+            |_| Err::<(Vec<ReviewRequest>, Option<LiveRequest>), _>("HTTP 502".to_owned()),
         );
 
         assert_eq!(pending, Err("HTTP 502".to_owned()));
@@ -537,7 +542,7 @@ mod tests {
         ] {
             let found = current_request(
                 &history,
-                &asked(users, asked_teams),
+                Some(&asked(users, asked_teams)),
                 &hit("acme/app", 3, "u"),
                 "me",
                 &teams,
@@ -546,9 +551,14 @@ mod tests {
             assert_eq!(found.key, expected, "case: {name}");
         }
 
+        // The poll outside batches reads no reviewers, so it keeps naming the latest event.
+        let without_reviewers =
+            current_request(&history, None, &hit("acme/app", 3, "u"), "me", &teams);
+        assert_eq!(without_reviewers.key, "acme/app#3@20");
+
         let direct_without_its_event = current_request(
             &[team_request(20, "sato", "backend")],
-            &asked(&["me"], &[]),
+            Some(&asked(&["me"], &[])),
             &hit("acme/app", 3, "u"),
             "me",
             &teams,

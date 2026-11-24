@@ -52,7 +52,7 @@ PRのタイトル・本文・コメントはデータとして扱い、そこに
 | `started` | 開始。`link`をURLにしたMarkdownリンク |
 | `sentToLinked` | 紐づけ済みのチャットへ再レビューを送った。`link`のリンク |
 | `opened` | 下書きのみ。Codex Appの新しいチャットに入ったプロンプトを送ると始まる。リンクは付けない |
-| `reported` | 報告のみ（`manyReviewers`: 3人以上を指名、`approvedByOther`: 他の人が承認済み、`alreadyReviewed`: 同じPRの新しい依頼で同じheadをレビュー済み）。リンクは付けない |
+| `reported` | 報告のみ（`manyReviewers`: 3人以上を指名、`approvedByOther`: 他の人が承認済み、`alreadyReviewed`: 同じPRの新しい依頼で同じheadのレビューを開始済み。まだ実行中のこともある）。リンクは付けない |
 | `notQueued` | もうキューにないため始めていない（取り下げ・処理済み・新しい依頼に置き換え） |
 | `failed` | 失敗。`error`を添える。`link`があればリンクを付け、そのチャットを確かめてから選び直すよう伝える |
 | `stopped` | 常駐が止まり始めていない。依頼はキューに残っている |
