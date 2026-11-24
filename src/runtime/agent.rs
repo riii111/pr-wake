@@ -307,16 +307,23 @@ mod tests {
                 "HARNEXUS_STATE_PATH" => "/Users/me/harnexus/threads.json",
                 "HARNEXUS_T3_BIN" => "/opt/t3/bin/t3",
                 "T3CODE_HOME" => "/Users/me/.t3",
-                "XDG_CONFIG_HOME" => "relative",
+                "XDG_CONFIG_HOME" => "/Users/me/cfg",
                 "XDG_STATE_HOME" => "/Users/me/st",
                 _ => return None,
             };
             Some(OsString::from(value))
         };
+        let relative_or_empty = |name: &str| {
+            Some(OsString::from(if name == "XDG_CONFIG_HOME" {
+                "relative"
+            } else {
+                ""
+            }))
+        };
         let home = Path::new("/Users/me");
 
         let rendered = plist_of(WATCH, home, Some("me"), PROGRAM, &set).expect("render the plist");
-        let all_empty = plist_of(WATCH, home, Some("me"), PROGRAM, &|_| Some(OsString::new()))
+        let all_empty = plist_of(WATCH, home, Some("me"), PROGRAM, &relative_or_empty)
             .expect("render the plist");
 
         assert!(
@@ -326,6 +333,7 @@ mod tests {
                 "\t\t<key>HARNEXUS_STATE_PATH</key>\n\t\t<string>/Users/me/harnexus/threads.json</string>\n",
                 "\t\t<key>HARNEXUS_T3_BIN</key>\n\t\t<string>/opt/t3/bin/t3</string>\n",
                 "\t\t<key>T3CODE_HOME</key>\n\t\t<string>/Users/me/.t3</string>\n",
+                "\t\t<key>XDG_CONFIG_HOME</key>\n\t\t<string>/Users/me/cfg</string>\n",
                 "\t\t<key>XDG_STATE_HOME</key>\n\t\t<string>/Users/me/st</string>\n",
                 "\t</dict>\n",
             )),
