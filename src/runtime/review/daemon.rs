@@ -841,10 +841,13 @@ impl<'deps> Daemon<'deps> {
         let chosen = self.ask(request, close);
         self.lock_shown().notices.remove(&request.found.key);
         self.wake.signal();
-        if let Some(choice) = chosen {
+        // Saved before the pull is read, so a restart meanwhile never shows the answered notification again.
+        if let Some(choice) = chosen
+            && self.save_launching(request, choice).is_ok()
+        {
             // Read after the choice, so the review is pinned to the head at the time the owner chose.
             let pr = self.read_pull(&request.found).map(|pull| pull.pr);
-            self.start(request, choice, pr, false);
+            self.launch_saved(request, choice, pr, false);
         }
     }
 
@@ -955,9 +958,15 @@ impl<'deps> Daemon<'deps> {
         pr: Result<PullRequest, String>,
         skip_reviewed: bool,
     ) -> SelectedOutcome {
-        let found = &request.found;
-        let key = &found.key;
-        // Saved before the App opens, so a restart never opens a second chat.
+        if let Err(outcome) = self.save_launching(request, choice) {
+            return outcome;
+        }
+        self.launch_saved(request, choice, pr, skip_reviewed)
+    }
+
+    // Saved before the App opens, so a restart never opens a second chat.
+    fn save_launching(&self, request: &Request, choice: &Choice) -> Result<(), SelectedOutcome> {
+        let key = &request.found.key;
         let launching = self.update(key, |request| {
             request.status = Status::Launching;
             request.choice = Some(choice.id.clone());
@@ -966,13 +975,24 @@ impl<'deps> Daemon<'deps> {
         if let Err(error) = launching {
             self.log(&format!("{key}: not launched: {error}"));
             self.report_failure(request, &error);
-            return SelectedOutcome::Failed {
+            return Err(SelectedOutcome::Failed {
                 error,
                 thread: None,
-            };
+            });
         }
-
         self.log(&format!("{key}: chose {}", choice.id));
+        Ok(())
+    }
+
+    fn launch_saved(
+        &self,
+        request: &Request,
+        choice: &Choice,
+        pr: Result<PullRequest, String>,
+        skip_reviewed: bool,
+    ) -> SelectedOutcome {
+        let found = &request.found;
+        let key = &found.key;
         let launched = {
             let checkout = self.checkout_lock(&found.repo);
             let _one_at_a_time = checkout.lock().unwrap_or_else(PoisonError::into_inner);
