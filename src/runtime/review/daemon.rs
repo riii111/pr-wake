@@ -1746,6 +1746,44 @@ mod tests {
     }
 
     #[test]
+    fn choice_is_saved_before_the_pull_it_launches_is_read() {
+        let fixture = Fixture::new();
+        fixture.answer(CODE_REVIEW);
+        let paths = fixture.paths.clone();
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&saved);
+        // The saved state is what a restart during the read would recover from.
+        fixture.answer_with("gh api repos/acme/app/pulls/12", move |_| {
+            let state = review_record::load_state(&paths)
+                .expect("read the state")
+                .expect("a saved state");
+            let request = &state.requests["acme/app#12@30"];
+            seen.lock()
+                .expect("note the state")
+                .push((request.status, request.choice.clone()));
+            Err("HTTP 502".to_owned())
+        });
+
+        fixture.with_daemon(&Setup::default(), |daemon, stop| {
+            daemon.poll_once().expect("baseline poll");
+            notifying(daemon, stop, || {
+                fixture.request("acme/app", 12, &[requested(30, "sato")]);
+                daemon.poll_once().expect("poll");
+                fixture.wait_status("acme/app#12@30", Status::Failed);
+            });
+        });
+
+        assert_eq!(
+            *saved.lock().expect("read the states"),
+            [
+                (Status::Notifying, None),
+                (Status::Launching, Some("code".to_owned()))
+            ],
+            "the size is read before the owner answers, the head after the choice is saved"
+        );
+    }
+
+    #[test]
     fn failed_notification_is_queued_again_after_a_poll_interval() {
         let fixture = Fixture::new();
         fixture.answer_with("alerter", |_| {
@@ -2741,6 +2779,59 @@ mod tests {
         assert!(!waiting.accepted && !waiting.complete);
         assert_eq!(fixture.status("acme/app#12@30"), Status::Queued);
         assert!(fixture.opened().is_empty() && fixture.started().is_empty());
+    }
+
+    #[test]
+    fn stop_before_any_chat_leaves_the_request_queued_rather_than_failed() {
+        for (name, cut_short, selected) in [
+            ("batch_pull_read", "gh api repos/acme/app/pulls/1", false),
+            ("batch_worktree", "git -C ", false),
+            ("selected_pull_read", "gh api repos/acme/app/pulls/1", true),
+            ("selected_worktree", "git -C ", true),
+        ] {
+            let fixture = Fixture::batched();
+            fixture.save_queued(&[(1, 10)]);
+            fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
+            fixture.answer_with(cut_short, |call| {
+                call.stop.request();
+                Err("stopped".to_owned())
+            });
+            if selected {
+                fixture.select("one", &["acme/app#1@10"]);
+            } else {
+                review_record::request_now(
+                    &fixture.paths,
+                    &NowRequest { pr: None },
+                    Timestamp::now(),
+                )
+                .expect("ask for the batch");
+            }
+
+            fixture.take_selections();
+
+            let state = fixture.state();
+            let request = &state.requests["acme/app#1@10"];
+            assert_eq!(
+                (request.status, request.choice.as_deref()),
+                (Status::Queued, None),
+                "case: {name}"
+            );
+            if selected {
+                assert_eq!(
+                    fixture.selection("one").outcomes.get("acme/app#1@10"),
+                    Some(&SelectedOutcome::Stopped),
+                    "case: {name}"
+                );
+            }
+            assert!(
+                state
+                    .pending_digests
+                    .iter()
+                    .all(|pending| pending.digest.failed == 0),
+                "case: {name}"
+            );
+            assert_eq!(fixture.count_calls("osascript "), 0, "case: {name}");
+        }
     }
 
     #[test]

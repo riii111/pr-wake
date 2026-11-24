@@ -1170,11 +1170,28 @@ mod tests {
                 ..WatchState::default()
             };
             watch_record::save_watch_state(root, &pay(7), &halted).expect("save the state");
+            // PR 9's record holds the link of the halted PR 7, as a copied record would.
+            let misplaced = root.join(watch_record::pr_key(&pay(9)));
+            fs::create_dir_all(&misplaced).expect("create the record");
+            fs::copy(
+                root.join(watch_record::pr_key(&pay(7))).join("link.json"),
+                misplaced.join("link.json"),
+            )
+            .expect("copy the link");
 
+            let mismatched = release(root, "https://github.com/org/pay/pull/9");
+            let untouched = watch_record::load_watch_state(root, &pay(7)).expect("load the state");
             let released = release(root, "https://github.com/Org/Pay/pull/7/files");
             let again = release(root, PR);
             let unlinked = release(root, "https://github.com/org/pay/pull/8");
 
+            assert!(mismatched.is_err_and(|failure| {
+                failure
+                    .to_string()
+                    .contains("names org/pay#7, so nothing is released")
+            }));
+            assert_eq!(untouched, halted);
+            assert!(!misplaced.join("state.json").exists());
             assert_eq!(
                 serde_json::to_value(released.expect("release")).expect("write it"),
                 json!({ "released": "https://github.com/Org/Pay/pull/7", "worker": "worker" })
