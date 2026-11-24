@@ -659,7 +659,7 @@ impl<'deps> Daemon<'deps> {
         let mut state = self.lock_state();
         let before = state.pending_digests.clone();
         let digests = &mut state.pending_digests;
-        // Only the batch thread adds or removes digests, so the index stays valid while the batch runs.
+        // Every checkout's thread updates the batch's digest under its lock, and digests are removed only once every thread has ended, so the index stays valid.
         if let Some(pending) = kept.pending.and_then(|index| digests.get_mut(index)) {
             pending.digest = kept.digest.clone();
         } else {
