@@ -4,6 +4,7 @@ use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::{batch::Digest, request::pr_key};
+use crate::app::time;
 
 // Existing state files must keep loading, so the layout keeps their version and fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +33,7 @@ pub(crate) struct ReviewState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PendingDigest {
-    #[serde(with = "stamp")]
+    #[serde(with = "time::record")]
     pub(crate) ready: Timestamp,
     pub(crate) digest: Digest,
 }
@@ -43,9 +44,9 @@ pub(crate) struct Request {
     #[serde(flatten)]
     pub(crate) found: Found,
     pub(crate) status: Status,
-    #[serde(with = "stamp")]
+    #[serde(with = "time::record")]
     pub(crate) first_seen: Timestamp,
-    #[serde(with = "stamp")]
+    #[serde(with = "time::record")]
     pub(crate) updated_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) choice: Option<String>,
@@ -343,31 +344,11 @@ fn event_id(key: &str) -> Option<u64> {
     key.rsplit_once('@')?.1.parse().ok()
 }
 
-mod stamp {
-    use jiff::Timestamp;
-    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
-
-    use crate::app::time;
-
-    pub(super) fn serialize<S: Serializer>(
-        at: &Timestamp,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&time::format_timestamp(*at))
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Timestamp, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(D::Error::custom)
-    }
-}
-
 mod optional_stamp {
     use jiff::Timestamp;
     use serde::{Deserializer, Serializer};
+
+    use crate::app::time;
 
     #[expect(clippy::ref_option, reason = "serde passes the field by reference")]
     pub(super) fn serialize<S: Serializer>(
@@ -375,7 +356,7 @@ mod optional_stamp {
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match at {
-            Some(at) => super::stamp::serialize(at, serializer),
+            Some(at) => time::record::serialize(at, serializer),
             None => serializer.serialize_none(),
         }
     }
@@ -383,7 +364,7 @@ mod optional_stamp {
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<Timestamp>, D::Error> {
-        super::stamp::deserialize(deserializer).map(Some)
+        time::record::deserialize(deserializer).map(Some)
     }
 }
 
@@ -391,6 +372,8 @@ mod optional_stamp {
 mod poll_time {
     use jiff::Timestamp;
     use serde::{Deserializer, Serializer};
+
+    use crate::app::time;
 
     const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 
@@ -400,7 +383,7 @@ mod poll_time {
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match at {
-            Some(at) => super::stamp::serialize(at, serializer),
+            Some(at) => time::record::serialize(at, serializer),
             None => serializer.serialize_str(ZERO_TIME),
         }
     }
@@ -408,7 +391,7 @@ mod poll_time {
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<Timestamp>, D::Error> {
-        let at = super::stamp::deserialize(deserializer)?;
+        let at = time::record::deserialize(deserializer)?;
         let zero = ZERO_TIME.parse::<Timestamp>().ok();
         Ok((Some(at) != zero).then_some(at))
     }
