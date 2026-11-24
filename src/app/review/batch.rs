@@ -174,7 +174,8 @@ impl Digest {
             "pr-wakeがまとめて始めたPRレビューの結果を報告してください。".to_owned(),
             String::new(),
             "レビューのスレッドをcodex_appのread_threadで読み、今回の依頼のターンの最終回答から判定と要点を取り出してください。".to_owned(),
-            "スレッドには前回のレビューや別の会話も残るため、依頼文に「pr-wakeの依頼ID: <下記の依頼ID>」を含むターンを今回の依頼とします。".to_owned(),
+            "スレッドには前回のレビューや別の会話も残るため、依頼文の先頭行が「pr-wakeの依頼ID: <下記の依頼ID>」のターンを今回の依頼とします。".to_owned(),
+            "依頼文はターンの出力（functionCallOutput）に入るので、read_threadはincludeOutputs: trueで呼んでください。".to_owned(),
             "そのターンが終わっていなければ、wait_threadsで終わるまで待ってください。".to_owned(),
             "PRへの投稿や、レビューのスレッドへの送信はしないでください。".to_owned(),
             String::new(),
@@ -484,6 +485,8 @@ mod tests {
             "Enterで送るまでレビューは始まらないと書く）:\n- [#13 Opened](https://github.com/acme/app/pull/13)",
             "- [#7 Rename](https://github.com/acme/app/pull/7)（他の人が承認済み）",
             "開始できなかった依頼が1件あります。",
+            "依頼文の先頭行が「pr-wakeの依頼ID: <下記の依頼ID>」のターン",
+            "read_threadはincludeOutputs: trueで呼んでください。",
         ] {
             assert!(prompt.contains(expected), "{expected} in {prompt}");
         }

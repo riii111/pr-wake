@@ -1108,7 +1108,7 @@ mod tests {
         ));
         let prompt = "https://github.com/acme/app/pull/3 tanaka";
         let opened = format!(
-            "{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。\n\npr-wakeの依頼ID: smoke:acme/app#3",
+            "pr-wakeの依頼ID: smoke:acme/app#3\n\n{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。",
             worktree.display()
         );
         assert_eq!(
