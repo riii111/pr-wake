@@ -369,7 +369,7 @@ pub(crate) fn link(
         None => find_command("gh", &agent_path(&env.home, env.user.as_deref()))?,
     };
     let github = GhRest { run, gh: &gh, stop };
-    if is_own_pull_request(&github, &env.paths, &repo, number)? {
+    if is_own_pull_request(&github, &repo, number)? {
         return Ok(format!(
             "skipped {repo}#{number}: it is your own pull request, so no re-request comes to this chat"
         ));
@@ -856,21 +856,9 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
     Ok(())
 }
 
-fn is_own_pull_request(
-    github: &GhRest<'_>,
-    paths: &ReviewPaths,
-    repo: &str,
-    number: u64,
-) -> Result<bool, String> {
-    // The review saves the login it polls as, so GitHub is asked for it only while no readable state has it.
-    let saved = review_record::load_state(paths)
-        .ok()
-        .flatten()
-        .and_then(|state| state.login);
-    let login = match saved {
-        Some(login) => login,
-        None => github.current_login()?,
-    };
+fn is_own_pull_request(github: &GhRest<'_>, repo: &str, number: u64) -> Result<bool, String> {
+    // gh may have switched accounts since the review saved its login, so the login is asked of GitHub every time.
+    let login = github.current_login()?;
     let author = github.pull_request(repo, number)?.author;
     Ok(author.is_some_and(|author| author.eq_ignore_ascii_case(&login)))
 }
@@ -1371,37 +1359,32 @@ mod tests {
     }
 
     #[test]
-    fn link_without_a_login_from_github_or_the_saved_state_is_refused() {
-        for (name, saved, linked) in [("nothing_saved", None, false), ("saved", Some("me"), true)] {
-            let home = ReviewHome::new();
-            let mut state = ReviewState::default();
-            state.login = saved.map(str::to_owned);
-            review_record::save_state(&home.env.paths, &state).expect("save the state");
+    fn link_that_cannot_tell_the_author_is_refused_without_a_link() {
+        let home = ReviewHome::new();
+        let mut state = ReviewState::default();
+        state.login = Some("me".to_owned());
+        review_record::save_state(&home.env.paths, &state).expect("save the state");
 
-            let answer = link(
-                &home.env,
-                &|call| {
-                    if call.arguments.iter().any(|argument| argument == "user") {
-                        Err("gh: exit status 1".to_owned())
-                    } else {
-                        home.answer(call, "[]")
-                    }
-                },
-                &StopRequest::default(),
-                "acme/app#3",
-                Ok("review-chat".to_owned()),
-                Timestamp::UNIX_EPOCH,
-            );
+        let linked = link(
+            &home.env,
+            &|call| {
+                if call.arguments.iter().any(|argument| argument == "user") {
+                    Err("gh: exit status 1".to_owned())
+                } else {
+                    home.answer(call, "[]")
+                }
+            },
+            &StopRequest::default(),
+            "acme/app#3",
+            Ok("review-chat".to_owned()),
+            Timestamp::UNIX_EPOCH,
+        );
 
-            assert_eq!(answer.is_ok(), linked, "case: {name}: {answer:?}");
-            assert_eq!(
-                review_record::load_chat(&home.env.paths, "acme/app", 3)
-                    .expect("read the chat")
-                    .is_some(),
-                linked,
-                "case: {name}"
-            );
-        }
+        assert!(linked.is_err(), "{linked:?}");
+        assert_eq!(
+            review_record::load_chat(&home.env.paths, "acme/app", 3).expect("read no chat"),
+            None
+        );
     }
 
     #[test]
