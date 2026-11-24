@@ -156,6 +156,8 @@ pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
     let state = review_record::load_state(&env.paths)
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
+    let run = format!("{}-{}", Timestamp::now().as_nanosecond(), process::id());
+    review_record::record_run(&env.paths, &run).map_err(|error| error.to_string())?;
 
     let program = env::current_exe().ok().and_then(ProgramWatch::new);
     if program.is_none() {
@@ -184,6 +186,7 @@ pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
             replaced: replaced
                 .as_ref()
                 .map(|replaced| replaced as &(dyn Fn() -> bool + Sync)),
+            run: &run,
         },
         state,
     )
@@ -435,17 +438,33 @@ pub(crate) fn queue(paths: &ReviewPaths) -> Result<Vec<QueueEntry>, String> {
                 paths.state_file().display()
             )
         })?;
+    // Before a poll succeeds the queue is unread rather than empty, so its error or the wait is reported instead.
+    if state.last_poll.is_none() {
+        return Err(state.last_error.map_or_else(
+            || "the review has not polled GitHub yet; try again after its first poll".to_owned(),
+            |error| format!("the review could not poll GitHub yet: {error}"),
+        ));
+    }
     Ok(selection::queue(&state))
 }
 
-// Hands the chosen requests to the running review and waits for what it did with them, up to `waits` checks.
+// Hands the chosen requests to the running review under the caller's id and waits for what it did with them, up to `waits` checks.
 pub(crate) fn select(
     env: &ReviewEnv,
+    id: &str,
     keys: &[String],
-    at: Timestamp,
     pause: &dyn Fn(Duration) -> bool,
     waits: u32,
 ) -> Result<SelectionReport, String> {
+    if !is_selection_id(id) {
+        return Err(format!("not a selection id: {id}"));
+    }
+    // A repeated id reads what its first submission became, so a lost answer never starts a second review.
+    let recorded =
+        review_record::load_selection(&env.paths, id).map_err(|error| error.to_string())?;
+    if recorded.is_some() {
+        return await_selection(&env.paths, id, pause, waits);
+    }
     let config = review_record::read_config(&env.paths.config, &env.home, &env.codex_home)?;
     if config.batches.is_none() {
         return Err(format!(
@@ -463,26 +482,37 @@ pub(crate) fn select(
         Ok(None) => {}
         Err(error) => return Err(error.to_string()),
     }
-    let id = format!("{}-{}", at.as_nanosecond(), process::id());
+    let run = review_record::load_run(&env.paths)
+        .map_err(|error| error.to_string())?
+        .ok_or("the running review has not recorded its run; restart it with `pr-wake review stop` and `pr-wake review start`")?;
     // Written before the handoff, so the reader always finds this record or the review's own across the review taking the request.
-    review_record::save_selection(&env.paths, &id, &SelectionRecord::of(keys))
+    let record = SelectionRecord {
+        run: run.clone(),
+        ..SelectionRecord::of(keys)
+    };
+    let created = review_record::create_selection(&env.paths, id, &record)
         .map_err(|error| error.to_string())?;
-    let handed = review_record::request_now(
+    if !created {
+        return await_selection(&env.paths, id, pause, waits);
+    }
+    let handed = review_record::hand_over_selection(
         &env.paths,
+        id,
         &NowRequest {
             pr: None,
             selected: Some(Selected {
-                id: id.clone(),
+                id: id.to_owned(),
                 keys: keys.to_vec(),
+                run,
             }),
         },
-        at,
     );
+    // Nothing was handed over, so the same id may be submitted again.
     if let Err(error) = handed {
-        let _ = review_record::remove_selection(&env.paths, &id);
+        let _ = review_record::remove_selection(&env.paths, id);
         return Err(error.to_string());
     }
-    await_selection(&env.paths, &id, pause, waits)
+    await_selection(&env.paths, id, pause, waits)
 }
 
 pub(crate) fn selection_outcome(
@@ -507,15 +537,9 @@ pub(crate) fn queue_from_terminal(env: &ReviewEnv, json: bool) -> Result<(), Str
     }
 }
 
-pub(crate) fn select_from_skill(env: &ReviewEnv, keys: &[String]) -> Result<(), String> {
+pub(crate) fn select_from_skill(env: &ReviewEnv, id: &str, keys: &[String]) -> Result<(), String> {
     let stop = stop_on_termination()?;
-    let report = select(
-        env,
-        keys,
-        Timestamp::now(),
-        &|wait| pause(&stop, wait),
-        SELECTION_WAITS,
-    )?;
+    let report = select(env, id, keys, &|wait| pause(&stop, wait), SELECTION_WAITS)?;
     print_json(&report)
 }
 
@@ -865,12 +889,8 @@ fn await_selection(
     let state = review_record::load_state(paths)
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
-    let report = selection::report(id, &record, &state);
-    // Kept until read complete, so a caller that gave up can still read it; a file left by a failed removal holds only this report.
-    if report.complete {
-        let _ = review_record::remove_selection(paths, id);
-    }
-    Ok(report)
+    // Kept after it is read, so an answer lost on the way is read again; the review removes old ones as it starts.
+    Ok(selection::report(id, &record, &state))
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
@@ -1526,6 +1546,39 @@ mod tests {
     }
 
     #[test]
+    fn queue_before_a_successful_poll_is_an_error_rather_than_empty() {
+        for (name, polled, error, expected) in [
+            (
+                "first_poll_failed",
+                false,
+                Some("HTTP 401: Bad credentials"),
+                Err("the review could not poll GitHub yet: HTTP 401: Bad credentials"),
+            ),
+            (
+                "first_poll_pending",
+                false,
+                None,
+                Err("the review has not polled GitHub yet; try again after its first poll"),
+            ),
+            ("polled_and_empty", true, Some("HTTP 502"), Ok(0)),
+        ] {
+            let home = ReviewHome::new();
+            let mut state = ReviewState::default();
+            state.last_poll = polled.then_some(Timestamp::UNIX_EPOCH);
+            state.last_error = error.map(str::to_owned);
+            review_record::save_state(&home.env.paths, &state).expect("save the state");
+
+            let listed = queue(&home.env.paths);
+
+            assert_eq!(
+                listed.map(|entries| entries.len()),
+                expected.map_err(str::to_owned),
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn selection_needs_batches_and_a_running_review() {
         for (name, batches, running, expected) in [
             (
@@ -1553,8 +1606,8 @@ mod tests {
 
             let selected = select(
                 &home.env,
+                "sel-1",
                 &["acme/app#3@3".to_owned()],
-                Timestamp::UNIX_EPOCH,
                 &|_| true,
                 0,
             );
@@ -1581,13 +1634,15 @@ mod tests {
         let _review = review_record::hold_lock(&home.env.paths)
             .expect("lock")
             .expect("a free lock");
+        review_record::record_run(&home.env.paths, "run-1").expect("record the run");
         let waits = AtomicUsize::new(0);
         let keys = ["acme/app#3@3".to_owned()];
+        let id = "sel-1";
 
         let handed = select(
             &home.env,
+            id,
             &keys,
-            Timestamp::UNIX_EPOCH,
             &|_| {
                 waits.fetch_add(1, Ordering::SeqCst);
                 true
@@ -1595,10 +1650,11 @@ mod tests {
             2,
         )
         .expect("hand over the selection");
-        let id = handed.selection.clone();
+        let repeated = select(&home.env, id, &["acme/app#4@4".to_owned()], &|_| true, 0)
+            .expect("read the same selection");
         // Taken by the review, which has not recorded its acceptance yet.
         let taken = review_record::take_now_requests(&home.env.paths).expect("take it");
-        let waiting = selection_outcome(&home.env, &id, &|_| true, 0).expect("read the selection");
+        let waiting = selection_outcome(&home.env, id, &|_| true, 0).expect("read the selection");
         let mut record = SelectionRecord::of(&keys);
         record.accepted = true;
         record.outcomes.insert(
@@ -1608,12 +1664,12 @@ mod tests {
             },
         );
         record.complete = true;
-        review_record::save_selection(&home.env.paths, &id, &record).expect("record it");
-        let done = selection_outcome(&home.env, &id, &|_| true, 0).expect("read the outcome");
-        let again = selection_outcome(&home.env, &id, &|_| true, 0);
+        review_record::save_selection(&home.env.paths, id, &record).expect("record it");
+        let done = selection_outcome(&home.env, id, &|_| true, 0).expect("read the outcome");
+        let again = selection_outcome(&home.env, id, &|_| true, 0).expect("read it again");
 
         assert_eq!(waits.load(Ordering::SeqCst), 2);
-        for report in [&handed, &waiting] {
+        for report in [&handed, &repeated, &waiting] {
             assert!(!report.accepted && !report.complete, "{report:?}");
             assert_eq!(
                 serde_json::to_value(&report.requests).expect("write the requests"),
@@ -1627,14 +1683,16 @@ mod tests {
                 }])
             );
         }
-        assert_eq!(taken.len(), 1);
+        assert_eq!(taken.len(), 1, "a repeated id is handed over once");
         assert!(done.complete);
         assert_eq!(
             done.requests[0].link.as_deref(),
             Some("codex://threads/chat-1")
         );
-        let error = again.expect_err("a selection read to the end is gone");
-        assert!(error.starts_with(&format!("no selection {id}")), "{error}");
+        assert_eq!(
+            again, done,
+            "a complete selection is read again after its first read"
+        );
     }
 
     #[test]

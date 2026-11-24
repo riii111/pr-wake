@@ -19,11 +19,21 @@ pub(crate) struct ReviewRequest {
     pub(crate) team_slug: Option<String>,
 }
 
+// Whether a PR is open and whom it asks to review, read straight from GitHub.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LiveRequest {
+    pub(crate) open: bool,
+    pub(crate) users: Vec<String>,
+    pub(crate) teams: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Pending {
     pub(crate) found: Vec<Found>,
     pub(crate) prs: BTreeMap<String, CachedPr>,
 }
+
+const UNKNOWN: &str = "@unknown";
 
 // A search across all of GitHub answers incomplete results, so each search is scoped to one owner.
 // `user:` matches an organization too.
@@ -65,16 +75,7 @@ pub(crate) fn pending_requests<E>(
         let found = if let Some(found) = cached {
             found
         } else {
-            let requests = requests_of(&hit)?;
-            latest_request(&requests, &hit, login, teams).unwrap_or_else(|| Found {
-                // No event names a request the search still lists, so it is kept under a PR-level key.
-                key: format!("{key}@unknown"),
-                repo: hit.repo.clone(),
-                number: hit.number,
-                title: hit.title.clone(),
-                requester: None,
-                team: None,
-            })
+            current_request(&requests_of(&hit)?, &hit, login, teams)
         };
 
         pending.found.push(Found {
@@ -90,6 +91,63 @@ pub(crate) fn pending_requests<E>(
         );
     }
     Ok(pending)
+}
+
+// No event names a request the search still lists, so it is kept under a PR-level key.
+#[must_use]
+pub(crate) fn current_request(
+    requests: &[ReviewRequest],
+    hit: &SearchHit,
+    login: &str,
+    teams: &[String],
+) -> Found {
+    latest_request(requests, hit, login, teams).unwrap_or_else(|| Found {
+        key: format!("{}{UNKNOWN}", pr_key(&hit.repo, hit.number)),
+        repo: hit.repo.clone(),
+        number: hit.number,
+        title: hit.title.clone(),
+        requester: None,
+        team: None,
+    })
+}
+
+// Whether an open PR still asks for the review the request's event made.
+// The event outlives a withdrawal, so a known one counts only while its own target, the team or else the login, is still asked.
+#[must_use]
+pub(crate) fn still_requested(
+    live: &LiveRequest,
+    found: &Found,
+    login: &str,
+    teams: &[String],
+) -> bool {
+    let owner = found
+        .repo
+        .split_once('/')
+        .map_or(found.repo.as_str(), |(owner, _)| owner);
+    let direct = || {
+        live.users
+            .iter()
+            .any(|user| user.eq_ignore_ascii_case(login))
+    };
+    let team_asked = |team: &str| {
+        team.split_once('/').is_some_and(|(_, slug)| {
+            live.teams
+                .iter()
+                .any(|asked| asked.eq_ignore_ascii_case(slug))
+        })
+    };
+    if !live.open {
+        return false;
+    }
+    // No event names an unknown request's target, so any monitored one still asked keeps it.
+    if found.key.ends_with(UNKNOWN) {
+        return direct()
+            || live
+                .teams
+                .iter()
+                .any(|slug| configured_team(teams, owner, slug).is_some());
+    }
+    found.team.as_deref().map_or_else(direct, team_asked)
 }
 
 // Names the event's requester, never the PR author.
@@ -217,6 +275,74 @@ mod tests {
                 .expected
                 .map(|(key, requester)| (key.to_owned(), requester.map(str::to_owned)));
             assert_eq!(found, expected, "case: {}", case.name);
+        }
+    }
+
+    #[test]
+    fn known_request_stays_only_while_its_own_target_is_asked() {
+        let teams = vec!["acme/backend".to_owned()];
+        for (name, event, team, users, asked_teams, expected) in [
+            (
+                "team_withdrawn_direct_left",
+                "20",
+                Some("acme/backend"),
+                &["me"][..],
+                &[][..],
+                false,
+            ),
+            (
+                "direct_withdrawn_team_left",
+                "20",
+                None,
+                &[][..],
+                &["backend"][..],
+                false,
+            ),
+            (
+                "team_still_asked",
+                "20",
+                Some("acme/backend"),
+                &[][..],
+                &["Backend"][..],
+                true,
+            ),
+            ("direct_still_asked", "20", None, &["ME"][..], &[][..], true),
+            (
+                "unknown_by_the_team",
+                "unknown",
+                None,
+                &[][..],
+                &["backend"][..],
+                true,
+            ),
+            (
+                "unknown_by_another_team",
+                "unknown",
+                None,
+                &[][..],
+                &["frontend"][..],
+                false,
+            ),
+        ] {
+            let found = Found {
+                key: format!("acme/app#3@{event}"),
+                repo: "acme/app".to_owned(),
+                number: 3,
+                title: "PR 3".to_owned(),
+                requester: None,
+                team: team.map(str::to_owned),
+            };
+            let live = LiveRequest {
+                open: true,
+                users: users.iter().map(|user| (*user).to_owned()).collect(),
+                teams: asked_teams.iter().map(|slug| (*slug).to_owned()).collect(),
+            };
+
+            assert_eq!(
+                still_requested(&live, &found, "me", &teams),
+                expected,
+                "case: {name}"
+            );
         }
     }
 

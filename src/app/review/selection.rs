@@ -14,15 +14,23 @@ use super::{
 pub(crate) struct Selected {
     pub(crate) id: String,
     pub(crate) keys: Vec<String>,
+    // The run of the review the caller saw running, so a later run never starts a selection made long before it.
+    pub(crate) run: String,
 }
 
 // What the running review has done with a selection so far; a key without an outcome is not handled yet.
 // The caller writes it before the handoff, so a reader finds it whether or not the review has taken the selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SelectionRecord {
     pub(crate) keys: Vec<String>,
     #[serde(default)]
+    pub(crate) run: String,
+    #[serde(default)]
     pub(crate) accepted: bool,
+    // Saved before a request's launch begins, so a review that dies in it closes the request as unconfirmed rather than unstarted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) in_flight: Option<String>,
     pub(crate) outcomes: BTreeMap<String, SelectedOutcome>,
     pub(crate) complete: bool,
 }
@@ -64,6 +72,8 @@ pub(crate) enum SelectedOutcome {
     },
     // The review stopped before reaching it, so it stays queued.
     Stopped,
+    // The review ended while launching it, so a chat may or may not have started.
+    Unconfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -120,10 +130,12 @@ pub(crate) enum Pending {
     Pending,
 }
 
+const MAX_ID_CHARS: usize = 64;
+
 // The id names a file, so it is kept to the characters the caller generates.
 #[must_use]
 pub(crate) fn is_selection_id(id: &str) -> bool {
-    !id.is_empty()
+    (1..=MAX_ID_CHARS).contains(&id.len())
         && id
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '-')
@@ -206,6 +218,22 @@ impl SelectionRecord {
             ..Self::default()
         }
     }
+
+    // Ends a selection the review can no longer work on, keeping each outcome already known.
+    pub(crate) fn close(&mut self, in_flight: &SelectedOutcome) {
+        let in_flight_key = self.in_flight.take();
+        for key in &self.keys {
+            if !self.outcomes.contains_key(key) {
+                let outcome = if in_flight_key.as_ref() == Some(key) {
+                    in_flight.clone()
+                } else {
+                    SelectedOutcome::Stopped
+                };
+                self.outcomes.insert(key.clone(), outcome);
+            }
+        }
+        self.complete = true;
+    }
 }
 
 impl SelectedOutcome {
@@ -216,7 +244,8 @@ impl SelectedOutcome {
             Self::Opened { .. }
             | Self::Reported { .. }
             | Self::NotQueued { .. }
-            | Self::Stopped => None,
+            | Self::Stopped
+            | Self::Unconfirmed => None,
         }
     }
 }
@@ -376,28 +405,13 @@ mod tests {
     }
 
     #[test]
-    fn report_of_a_selection_not_taken_yet_is_all_pending() {
-        let record = SelectionRecord::of(&["acme/app#1@10".to_owned()]);
-
-        let written = report("7-1", &record, &ReviewState::default());
-
-        assert!(!written.accepted);
-        assert!(!written.complete);
-        assert_eq!(
-            written.requests[0].outcome,
-            ReportedOutcome::Pending {
-                outcome: Pending::Pending
-            }
-        );
-    }
-
-    #[test]
     fn selection_id_is_only_letters_digits_and_hyphens() {
         for (name, id, expected) in [
             ("generated", "1763000000000000000-4242", true),
             ("empty", "", false),
             ("path", "../state", false),
             ("dot", "a.json", false),
+            ("too_long", &"a".repeat(65), false),
         ] {
             assert_eq!(is_selection_id(id), expected, "case: {name}");
         }

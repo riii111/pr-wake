@@ -38,6 +38,8 @@ pub(super) enum ReviewCommand {
     // Called by the pr-wake-review-queue Skill, which reads its JSON; `queue` is the command for people.
     #[command(hide = true)]
     Select {
+        #[arg(long, value_name = "SELECTION")]
+        id: String,
         #[arg(required = true, value_name = "KEY")]
         keys: Vec<String>,
     },
@@ -121,7 +123,7 @@ pub(super) fn run(command: ReviewCommand) -> Result<(), String> {
         ReviewCommand::Link { pr } => review::link_from_chat(&env()?, &pr),
         ReviewCommand::Now { pr } => review::request_now_from_terminal(&env()?, pr.as_deref()),
         ReviewCommand::Queue(flag) => review::queue_from_terminal(&env()?, flag.json),
-        ReviewCommand::Select { keys } => review::select_from_skill(&env()?, &keys),
+        ReviewCommand::Select { id, keys } => review::select_from_skill(&env()?, &id, &keys),
         ReviewCommand::Outcome { id } => review::selection_outcome_from_skill(&env()?, &id),
         ReviewCommand::Install => review::install(&env()?),
         ReviewCommand::Uninstall => agent::uninstall(agent::REVIEW, &env()?.home),
@@ -181,8 +183,16 @@ mod tests {
             ),
             (
                 "select_two",
-                &["review", "select", "acme/app#1@10", "acme/app#2@20"],
+                &[
+                    "review",
+                    "select",
+                    "--id",
+                    "7-1",
+                    "acme/app#1@10",
+                    "acme/app#2@20",
+                ],
                 ReviewCommand::Select {
+                    id: "7-1".to_owned(),
                     keys: vec!["acme/app#1@10".to_owned(), "acme/app#2@20".to_owned()],
                 },
             ),

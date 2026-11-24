@@ -145,6 +145,18 @@ pub(crate) fn save_json(
         .map_err(|error| RecordError::new(path, RecordErrorKind::Write(error)))
 }
 
+// `false` when the file already exists, which is left as it was.
+pub(crate) fn save_new_json(
+    path: &Path,
+    value: &impl Serialize,
+    layout: JsonLayout,
+) -> Result<bool, RecordError> {
+    encode(value, layout)
+        .map_err(io::Error::from)
+        .and_then(|content| write_new(path, &content))
+        .map_err(|error| RecordError::new(path, RecordErrorKind::Write(error)))
+}
+
 // A file already gone counts as removed.
 pub(crate) fn remove_record(path: &Path) -> Result<(), RecordError> {
     match fs::remove_file(path) {
@@ -219,6 +231,26 @@ fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
 
     // The rename itself survives a crash only once the directory is synced.
     sync_directory(directory)
+}
+
+// A hard link fails on an existing name, so two writers of one path never both win, and the file appears whole.
+fn write_new(path: &Path, content: &[u8]) -> io::Result<bool> {
+    let directory = parent(path)?;
+    prepare_directory(directory)?;
+    let (temporary, mut file) = create_temporary(path)?;
+    let linked = file
+        .write_all(content)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::hard_link(&temporary, path)
+        });
+    let _ = fs::remove_file(&temporary);
+    match linked {
+        Ok(()) => sync_directory(directory).map(|()| true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn create_temporary(path: &Path) -> io::Result<(PathBuf, File)> {
