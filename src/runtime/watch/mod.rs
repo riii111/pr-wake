@@ -452,6 +452,13 @@ fn release(root: &Path, url: &str) -> Result<ReleaseOutput, Failure> {
     let link = watch_record::load_link(root, &named.pr)
         .map_err(Failure::State)?
         .ok_or_else(|| Failure::Refused(format!("{} is not linked to a worker", named.url)))?;
+    // The link is found by a hash of the PR rather than by reading every link, so one naming another PR is refused before anything is written.
+    if !link.pr.is_same(&named.pr) {
+        return Err(Failure::Refused(format!(
+            "the record of {} names {}#{}, so nothing is released",
+            named.url, link.pr.repo, link.pr.number
+        )));
+    }
     let state = watch_record::load_watch_state(root, &link.pr).map_err(Failure::State)?;
     let Some(released) = watch::release(&state) else {
         return Err(Failure::Refused(format!("{} is not halted", named.url)));
