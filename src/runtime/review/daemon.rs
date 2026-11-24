@@ -501,17 +501,9 @@ impl<'deps> Daemon<'deps> {
         login: &str,
     ) -> Result<(PullDetails, Plan), SelectedOutcome> {
         let found = self.queued_request(key)?.found;
-        let unverified = |error: String| {
-            // A read a stop cut short says nothing of the request, so it is told as stopped like the keys after it.
-            if self.deps.stop.is_requested() {
-                return SelectedOutcome::Stopped;
-            }
-            SelectedOutcome::Failed {
-                error: format!(
-                    "could not check the request on GitHub, so it stays queued: {error}"
-                ),
-                thread: None,
-            }
+        let unverified = |error: String| SelectedOutcome::Failed {
+            error: format!("could not check the request on GitHub, so it stays queued: {error}"),
+            thread: None,
         };
         if login.is_empty() {
             return Err(unverified("the login is unknown".to_owned()));
@@ -1027,7 +1019,6 @@ impl<'deps> Daemon<'deps> {
                         reason: ReportReason::AlreadyReviewed,
                     },
                     review_started: false,
-                    reached_chat: false,
                 },
                 Ok(pr) => launch(self.deps.tools, choice, found, &pr, self.deps.stop),
                 Err(error) => Launched {
@@ -1038,10 +1029,8 @@ impl<'deps> Daemon<'deps> {
                         thread: None,
                     },
                     review_started: false,
-                    reached_chat: false,
                 },
             };
-            let launched = self.requeue_stopped(key, launched);
             // Saved before the lock is released, so the next launch in this process already sees its proof.
             self.record_launched(key, &launched);
             launched
@@ -1054,38 +1043,12 @@ impl<'deps> Daemon<'deps> {
         launched.outcome
     }
 
-    // Without batches a queued request is shown to the owner again, so only a batch takes back a request a stop cut short before any chat.
-    fn requeue_stopped(&self, key: &str, launched: Launched) -> Launched {
-        let SelectedOutcome::Failed { error, .. } = &launched.outcome else {
-            return launched;
-        };
-        if launched.reached_chat
-            || !self.deps.stop.is_requested()
-            || self.deps.tools.config.batches.is_none()
-        {
-            return launched;
-        }
-        self.log(&format!(
-            "{key}: queued again, as a stop came before any chat: {error}"
-        ));
-        Launched {
-            outcome: SelectedOutcome::Stopped,
-            ..launched
-        }
-    }
-
     fn record_launched(&self, key: &str, launched: &Launched) {
         let worktree = launched
             .worktree
             .as_ref()
             .map(|worktree| worktree.to_string_lossy().into_owned());
         self.log_saved(self.update(key, |request| {
-            // Nothing was sent or created, so the next batch or selection takes it as if it had never been claimed.
-            if launched.outcome == SelectedOutcome::Stopped {
-                request.status = Status::Queued;
-                request.choice = None;
-                return;
-            }
             request.head_sha.clone_from(&launched.head);
             request.worktree = worktree;
             request.review_started = launched.review_started;
@@ -2779,59 +2742,6 @@ mod tests {
         assert!(!waiting.accepted && !waiting.complete);
         assert_eq!(fixture.status("acme/app#12@30"), Status::Queued);
         assert!(fixture.opened().is_empty() && fixture.started().is_empty());
-    }
-
-    #[test]
-    fn stop_before_any_chat_leaves_the_request_queued_rather_than_failed() {
-        for (name, cut_short, selected) in [
-            ("batch_pull_read", "gh api repos/acme/app/pulls/1", false),
-            ("batch_worktree", "git -C ", false),
-            ("selected_pull_read", "gh api repos/acme/app/pulls/1", true),
-            ("selected_worktree", "git -C ", true),
-        ] {
-            let fixture = Fixture::batched();
-            fixture.save_queued(&[(1, 10)]);
-            fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
-            fixture.answer_with(cut_short, |call| {
-                call.stop.request();
-                Err("stopped".to_owned())
-            });
-            if selected {
-                fixture.select("one", &["acme/app#1@10"]);
-            } else {
-                review_record::request_now(
-                    &fixture.paths,
-                    &NowRequest { pr: None },
-                    Timestamp::now(),
-                )
-                .expect("ask for the batch");
-            }
-
-            fixture.take_selections();
-
-            let state = fixture.state();
-            let request = &state.requests["acme/app#1@10"];
-            assert_eq!(
-                (request.status, request.choice.as_deref()),
-                (Status::Queued, None),
-                "case: {name}"
-            );
-            if selected {
-                assert_eq!(
-                    fixture.selection("one").outcomes.get("acme/app#1@10"),
-                    Some(&SelectedOutcome::Stopped),
-                    "case: {name}"
-                );
-            }
-            assert!(
-                state
-                    .pending_digests
-                    .iter()
-                    .all(|pending| pending.digest.failed == 0),
-                "case: {name}"
-            );
-            assert_eq!(fixture.count_calls("osascript "), 0, "case: {name}");
-        }
     }
 
     #[test]

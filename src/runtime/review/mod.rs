@@ -117,7 +117,6 @@ struct Launched {
     worktree: Option<PathBuf>,
     outcome: SelectedOutcome,
     review_started: bool,
-    reached_chat: bool,
 }
 
 // Well under the one second within which a wait must notice a stop request.
@@ -695,10 +694,8 @@ fn launch(
     pr: &PullRequest,
     stop: &StopRequest,
 ) -> Launched {
-    let ended = |worktree: Option<PathBuf>, outcome, review_started| Launched {
+    let ended = |worktree, outcome, review_started| Launched {
         head: Some(pr.head_sha.clone()),
-        // The worktree is made just before the first chat is touched, so a launch without one reached none.
-        reached_chat: worktree.is_some(),
         worktree,
         outcome,
         review_started,
