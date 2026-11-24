@@ -33,9 +33,9 @@ pub(super) enum ReviewCommand {
         )]
         pr: Option<String>,
     },
-    #[command(about = "List the requests queued for the next batch")]
-    Queue(JsonFlag),
-    // Called by the pr-wake-review-queue Skill, which reads its JSON; `queue` is the command for people.
+    #[command(about = "List pending review requests")]
+    List(JsonFlag),
+    // Called by the pr-wake-review-queue Skill, which reads its JSON; `list` is the command for people.
     #[command(hide = true)]
     Select {
         #[arg(long, value_name = "SELECTION")]
@@ -122,7 +122,7 @@ pub(super) fn run(command: ReviewCommand) -> Result<(), String> {
         }
         ReviewCommand::Link { pr } => review::link_from_chat(&env()?, &pr),
         ReviewCommand::Now { pr } => review::request_now_from_terminal(&env()?, pr.as_deref()),
-        ReviewCommand::Queue(flag) => review::queue_from_terminal(&env()?, flag.json),
+        ReviewCommand::List(flag) => review::queue_from_terminal(&env()?, flag.json),
         ReviewCommand::Select { id, keys } => review::select_from_skill(&env()?, &id, &keys),
         ReviewCommand::Outcome { id } => review::selection_outcome_from_skill(&env()?, &id),
         ReviewCommand::Install => review::install(&env()?),
@@ -177,9 +177,9 @@ mod tests {
                 },
             ),
             (
-                "queue_as_json",
-                &["review", "queue", "--json"],
-                ReviewCommand::Queue(JsonFlag { json: true }),
+                "list_as_json",
+                &["review", "list", "--json"],
+                ReviewCommand::List(JsonFlag { json: true }),
             ),
             (
                 "select_two",

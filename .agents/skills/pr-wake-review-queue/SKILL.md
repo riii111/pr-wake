@@ -5,11 +5,11 @@ description: |
   「ためているレビューを見せて」「キューから選んでレビューを始めたい」と言われたときに使う。
 ---
 
-# pr-wake review queue
+# pr-wake-review-queue
 
 ## 一覧
 
-`pr-wake review queue --json`を実行する。
+`pr-wake review list --json`を実行する。
 失敗したらstderrをそのまま伝えて終える。
 `requests`が空なら、ためている依頼はないと伝えて終える。
 
