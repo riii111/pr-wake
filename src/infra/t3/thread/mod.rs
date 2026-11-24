@@ -271,7 +271,7 @@ fn view_of(shown: &Map<String, Value>) -> Option<View> {
     let messages = shown.get("messages")?.as_array()?;
     Some(View {
         thread: Thread {
-            status: text_of(thread.get("status")),
+            status: text_or_none(thread.get("status")).unwrap_or_default(),
             active_run_id: text_or_none(thread.get("activeRunId")),
             latest_run_id: text_or_none(thread.get("latestRunId")),
             pending_request_count: thread
@@ -284,7 +284,7 @@ fn view_of(shown: &Map<String, Value>) -> Option<View> {
             .filter_map(Value::as_object)
             .filter_map(|message| {
                 Some(Message {
-                    role: text_of(message.get("role")),
+                    role: text_or_none(message.get("role")).unwrap_or_default(),
                     run_id: text_or_none(message.get("runId")),
                     text: message.get("text")?.as_str()?.to_owned(),
                 })
@@ -308,14 +308,6 @@ fn error_detail(error: String) -> Map<String, Value> {
 
 fn brief(text: &str) -> String {
     text.trim().chars().take(BRIEF_CHARS).collect()
-}
-
-fn text_of(value: Option<&Value>) -> String {
-    match value {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(other) => other.to_string(),
-    }
 }
 
 fn text_or_none(value: Option<&Value>) -> Option<String> {
@@ -616,7 +608,7 @@ mod tests {
 
     fn sent() -> Delivered {
         Delivered {
-            at: "2026-10-23T03:00:00.000Z".to_owned(),
+            at: Timestamp::UNIX_EPOCH,
             sender: "t3".to_owned(),
             prompt: PROMPT.to_owned(),
             findings: Vec::new(),

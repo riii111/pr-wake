@@ -3,6 +3,7 @@ use std::{
     sync::LazyLock,
 };
 
+use jiff::Timestamp;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +31,7 @@ pub(crate) struct PrLink {
     pub(crate) pr: PrRef,
     pub(crate) url: String,
     pub(crate) worker: String,
-    pub(crate) linked_at: String,
+    pub(crate) linked_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

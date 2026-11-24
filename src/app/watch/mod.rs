@@ -174,12 +174,12 @@ fn hand_over(state: &mut WatchState, worker: &str) -> Option<HandedOver> {
 pub(crate) fn is_due(state: &WatchState, now: Timestamp, config: &WatchConfig) -> bool {
     let idle_after = SignedDuration::try_from_secs_f64(config.idle_after_hours * 3600.0)
         .unwrap_or(SignedDuration::MAX);
-    let interval = if Elapsed::since(state.changed_at.as_deref(), now).at_least(idle_after) {
+    let interval = if elapsed_since(state.changed_at, now) >= idle_after {
         config.idle_interval_seconds
     } else {
         config.poll_interval_seconds
     };
-    Elapsed::since(state.checked_at.as_deref(), now).at_least(seconds(interval) - DUE_MARGIN)
+    elapsed_since(state.checked_at, now) >= seconds(interval) - DUE_MARGIN
 }
 
 pub(crate) fn observe(
@@ -187,14 +187,14 @@ pub(crate) fn observe(
     summary: Option<&PrSummary>,
     now: Timestamp,
 ) -> Observed {
-    state.checked_at = Some(time::format_timestamp(now));
+    state.checked_at = Some(now);
     let Some(summary) = summary else {
         return Observed::Unreadable;
     };
 
     let changed = state.summary.as_ref() != Some(summary);
     if changed {
-        state.changed_at = Some(time::format_timestamp(now));
+        state.changed_at = Some(now);
     }
     if summary.state != OPEN {
         state.status = WatchStatus::Ended;
@@ -232,7 +232,7 @@ pub(crate) fn take_in<'state>(
     state: &'state mut WatchState,
     summary: &PrSummary,
     detail: &PrDetail,
-    linked_at: &str,
+    linked_at: Timestamp,
     owner: &str,
     config: &WatchConfig,
 ) -> &'state [WatchEvent] {
@@ -301,7 +301,7 @@ fn take_answer(
             let resent = told_events(delivered).len();
             let first = !losing;
             if first {
-                state.lost_since = Some(time::format_timestamp(now));
+                state.lost_since = Some(now);
             }
             return Awaited::Taken(Some(AnswerNote::NotSeen { resent, first }));
         }
@@ -337,7 +337,7 @@ fn is_lost(delivered: &Delivered, losing: bool, busy: bool, now: Timestamp) -> b
     } else {
         LOST_AFTER
     };
-    !Elapsed::since(Some(delivered.at.as_str()), now).less_than(wait)
+    now.duration_since(delivered.at) >= wait
 }
 
 fn has_message(state: &WatchState) -> bool {
@@ -436,7 +436,7 @@ pub(crate) fn finish_send(
             }
             let findings = sending.findings.len();
             state.delivered = Some(Delivered {
-                at: time::format_timestamp(sent_at),
+                at: sent_at,
                 sender: sender.to_owned(),
                 prompt: sending.prompt,
                 findings: sending.findings,
@@ -508,43 +508,15 @@ fn seconds(seconds: u64) -> SignedDuration {
     i64::try_from(seconds).map_or(SignedDuration::MAX, SignedDuration::from_secs)
 }
 
+// A time never recorded is infinitely long ago.
+fn elapsed_since(time: Option<Timestamp>, now: Timestamp) -> SignedDuration {
+    time.map_or(SignedDuration::MAX, |time| now.duration_since(time))
+}
+
 // A message waits while the answer to the last one is still coming, so it never interrupts it.
 enum Awaited {
     Coming,
     Taken(Option<AnswerNote>),
-}
-
-// A time never recorded is infinitely long ago.
-// One that does not parse is neither longer nor shorter, as the TypeScript watch's `NaN` was.
-enum Elapsed {
-    Never,
-    Unreadable,
-    Since(SignedDuration),
-}
-
-impl Elapsed {
-    fn since(time: Option<&str>, now: Timestamp) -> Self {
-        match time.map(str::parse::<Timestamp>) {
-            None => Self::Never,
-            Some(Err(_)) => Self::Unreadable,
-            Some(Ok(time)) => Self::Since(now.duration_since(time)),
-        }
-    }
-
-    fn at_least(&self, duration: SignedDuration) -> bool {
-        match self {
-            Self::Never => true,
-            Self::Unreadable => false,
-            Self::Since(elapsed) => *elapsed >= duration,
-        }
-    }
-
-    fn less_than(&self, duration: SignedDuration) -> bool {
-        match self {
-            Self::Never | Self::Unreadable => false,
-            Self::Since(elapsed) => *elapsed < duration,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -612,7 +584,7 @@ mod tests {
                     conflict(),
                 ],
                 halted: Some(Map::new()),
-                lost_since: Some(NOON.to_owned()),
+                lost_since: Some(at(NOON)),
                 ..WatchState::default()
             };
             let config = config();
@@ -763,11 +735,10 @@ mod tests {
                     None,
                     false,
                 ),
-                ("unreadable_check_time", Some("soon"), Some(NOON), false),
             ] {
                 let state = WatchState {
-                    checked_at: checked_at.map(str::to_owned),
-                    changed_at: changed_at.map(str::to_owned),
+                    checked_at: checked_at.map(at),
+                    changed_at: changed_at.map(at),
                     ..WatchState::default()
                 };
 
@@ -789,7 +760,7 @@ mod tests {
             assert_eq!(
                 state,
                 WatchState {
-                    checked_at: Some("2026-10-23T12:00:00.000Z".to_owned()),
+                    checked_at: Some(at(NOON)),
                     ..WatchState::default()
                 }
             );
@@ -849,7 +820,7 @@ mod tests {
         fn open_pr_is_read_in_full_only_when_its_summary_changed() {
             let mut state = WatchState {
                 summary: Some(summary()),
-                changed_at: Some("2026-10-22T00:00:00.000Z".to_owned()),
+                changed_at: Some(at("2026-10-22T00:00:00Z")),
                 ..WatchState::default()
             };
             let updated = PrSummary {
@@ -858,11 +829,11 @@ mod tests {
             };
 
             let unchanged = observe(&mut state, Some(&summary()), at(NOON));
-            let unchanged_since = state.changed_at.clone();
+            let unchanged_since = state.changed_at;
             let changed = observe(&mut state, Some(&updated), at(NOON));
 
             assert_eq!(unchanged, Observed::Kept { paused: false });
-            assert_eq!(unchanged_since.as_deref(), Some("2026-10-22T00:00:00.000Z"));
+            assert_eq!(unchanged_since, Some(at("2026-10-22T00:00:00Z")));
             assert_eq!(
                 changed,
                 Observed::ReadDetail {
@@ -870,10 +841,7 @@ mod tests {
                     resumed: false,
                 }
             );
-            assert_eq!(
-                state.changed_at.as_deref(),
-                Some("2026-10-23T12:00:00.000Z")
-            );
+            assert_eq!(state.changed_at, Some(at(NOON)));
         }
 
         #[test]
@@ -889,7 +857,7 @@ mod tests {
                 &mut state,
                 &summary(),
                 &first,
-                LINKED_AT,
+                at(LINKED_AT),
                 "owner",
                 &config(),
             )
@@ -898,7 +866,7 @@ mod tests {
                 &mut state,
                 &summary(),
                 &later,
-                LINKED_AT,
+                at(LINKED_AT),
                 "owner",
                 &config(),
             )
@@ -959,6 +927,17 @@ mod tests {
             ] {
                 assert_eq!(awaits_delivery(&state), expected, "case: {name}");
             }
+        }
+
+        #[test]
+        fn missing_sender_is_kept_as_the_reason_and_told_only_when_new() {
+            let mut state = pending_state();
+
+            let first = hold_for_sender(&mut state, "no chat is registered");
+            let again = hold_for_sender(&mut state, "no chat is registered");
+
+            assert_eq!((first, again), (true, false));
+            assert_eq!(state.reason.as_deref(), Some("no chat is registered"));
         }
 
         #[test]
@@ -1147,11 +1126,7 @@ mod tests {
                         .is_some_and(|delivered| delivered.lost),
                     "case: {name}"
                 );
-                assert_eq!(
-                    state.lost_since,
-                    Some(time::format_timestamp(at(now))),
-                    "case: {name}"
-                );
+                assert_eq!(state.lost_since, Some(at(now)), "case: {name}");
             }
         }
 
@@ -1217,31 +1192,43 @@ mod tests {
 
         #[test]
         fn message_lost_again_is_given_up_on_later_and_keeps_when_the_losses_began() {
-            for (name, now, expected) in [
+            let busy = WorkerView::Present {
+                busy: true,
+                answer: None,
+            };
+            for (name, view, now, expected) in [
                 (
                     "within_half_an_hour",
+                    idle(None),
                     "2026-10-23T10:29:59Z",
                     Delivery::Hold(None),
                 ),
                 (
                     "after_half_an_hour",
+                    idle(None),
                     "2026-10-23T10:30:00Z",
                     Delivery::Send(Some(AnswerNote::NotSeen {
                         resent: 1,
                         first: false,
                     })),
                 ),
+                (
+                    "busy_worker_after_half_an_hour",
+                    busy,
+                    "2026-10-23T10:30:00Z",
+                    Delivery::Hold(None),
+                ),
             ] {
                 let mut state = WatchState {
                     delivered: Some(delivered(vec![finding(1)])),
-                    lost_since: Some(NOON.to_owned()),
+                    lost_since: Some(at(NOON)),
                     ..pending_state()
                 };
 
-                let delivery = deliver(&mut state, idle(None), &zoned(now), &config());
+                let delivery = deliver(&mut state, view, &zoned(now), &config());
 
                 assert_eq!(delivery, expected, "case: {name}");
-                assert_eq!(state.lost_since.as_deref(), Some(NOON), "case: {name}");
+                assert_eq!(state.lost_since, Some(at(NOON)), "case: {name}");
             }
         }
 
@@ -1257,7 +1244,7 @@ mod tests {
                         lost: true,
                         ..delivered(vec![finding(1)])
                     }),
-                    lost_since: Some(NOON.to_owned()),
+                    lost_since: Some(at(NOON)),
                     ..pending_state()
                 };
 
@@ -1397,7 +1384,7 @@ mod tests {
                 state,
                 WatchState {
                     delivered: Some(Delivered {
-                        at: "2026-10-23T12:00:03.000Z".to_owned(),
+                        at: at("2026-10-23T12:00:03Z"),
                         sender: "sender-chat".to_owned(),
                         prompt,
                         findings: vec![finding(1)],
@@ -1605,7 +1592,7 @@ mod tests {
 
     fn delivered(findings: Vec<Finding>) -> Delivered {
         Delivered {
-            at: "2026-10-23T10:00:00.000Z".to_owned(),
+            at: at("2026-10-23T10:00:00Z"),
             sender: "sender-chat".to_owned(),
             prompt: "go".to_owned(),
             findings,

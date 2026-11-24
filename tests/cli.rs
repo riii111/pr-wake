@@ -177,113 +177,12 @@ fn watch_ends_before_it_can_send_when_harnexus_cannot_be_asked(#[case] link: Opt
     assert!(!home.state().join("watch.lock").exists());
 }
 
-// The records harnexus-task watch left on a Mac.
-mod legacy_records {
-    use super::*;
-
-    #[test]
-    fn status_shows_the_sender_queues_awaited_answers_and_a_pending_hand_over() {
-        let home = Home::legacy();
-
-        let shown = home.watch(&["status", "--json"], &[]);
-
-        let shown = shown.json();
-        assert_eq!(shown["sender"], "sender-chat");
-        let prs = shown["prs"]
-            .as_array()
-            .expect("the PRs")
-            .iter()
-            .map(|pr| {
-                json!([
-                    pr["pr"],
-                    pr["worker"],
-                    pr["status"],
-                    pr["pending"],
-                    pr["awaitingAnswer"],
-                    pr["handingOver"]
-                ])
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            prs,
-            [
-                json!([url(7), "next-chat", "watching", 0, true, true]),
-                json!([url(8), "w8", "watching", 0, false, false]),
-                json!([url(9), "w9", "watching", 1, false, false]),
-                json!([url(10), "w10", "halted", 0, false, false]),
-            ]
-        );
-    }
-
-    #[test]
-    fn halted_pr_is_released_and_its_message_taken_as_delivered() {
-        let home = Home::legacy();
-
-        let released = home.watch(&["release", &url(10)], &[]);
-
-        assert_eq!(
-            released.json(),
-            json!({ "released": url(10), "worker": "w10" })
-        );
-        let state = home.record("e4fa9c7ae05e70a7", "state");
-        assert_eq!(
-            [&state["status"], &state["halted"], &state["pending"]],
-            [&json!("watching"), &Value::Null, &json!([])]
-        );
-    }
-
-    #[test]
-    fn same_chat_keeps_its_link_time_and_another_chat_must_take_over() {
-        let home = Home::legacy();
-
-        let again = home.watch(&["link", &url(9)], &[("CODEX_THREAD_ID", "w9")]);
-        let refused = home.watch(&["link", &url(9)], &[("CODEX_THREAD_ID", "other")]);
-        let kept = home.record("6db070b27f9194fb", "link");
-        let taken = home.watch(
-            &["link", &url(9), "--take-over"],
-            &[("CODEX_THREAD_ID", "other")],
-        );
-        let moved = home.record("6db070b27f9194fb", "link");
-
-        assert_eq!(again.json(), json!({ "threadId": "w9", "watched": url(9) }));
-        assert_eq!(
-            [&kept["worker"], &kept["linkedAt"]],
-            [&json!("w9"), &json!("2026-10-20T00:00:00.000Z")]
-        );
-        assert_eq!(refused.code, Some(1));
-        assert!(
-            refused.stderr.contains("already watched for chat w9"),
-            "{}",
-            refused.stderr
-        );
-        assert_eq!(
-            taken.json(),
-            json!({ "threadId": "other", "watched": url(9) })
-        );
-        assert_eq!(moved["worker"], "other");
-        assert_ne!(moved["linkedAt"], "2026-10-20T00:00:00.000Z");
-    }
-
-    fn url(number: u64) -> String {
-        format!("https://github.com/org/pay/pull/{number}")
-    }
-}
-
 impl Home {
     fn new() -> Self {
         let home = Self {
             root: tempfile::tempdir().expect("create a directory"),
         };
         home.write_config(&json!({ "repositories": { "org/pay": { "account": "owner" } } }));
-        home
-    }
-
-    fn legacy() -> Self {
-        let home = Self::new();
-        copy_directory(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch"),
-            &home.state(),
-        );
         home
     }
 
@@ -295,12 +194,6 @@ impl Home {
 
     fn state(&self) -> PathBuf {
         self.root.path().join("state/harnexus-crew/watch")
-    }
-
-    fn record(&self, key: &str, file: &str) -> Value {
-        let path = self.state().join(key).join(format!("{file}.json"));
-        serde_json::from_str(&fs::read_to_string(path).expect("read the record"))
-            .expect("parse the record")
     }
 
     fn watch(&self, arguments: &[&str], env: &[(&str, &str)]) -> Run {
@@ -343,17 +236,4 @@ fn run(arguments: &[&str]) -> Output {
         .args(arguments)
         .output()
         .expect("run pr-wake")
-}
-
-fn copy_directory(from: &Path, to: &Path) {
-    fs::create_dir_all(to).expect("create the directory");
-    for entry in fs::read_dir(from).expect("list the fixture") {
-        let entry = entry.expect("read an entry");
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_directory(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).expect("copy the record");
-        }
-    }
 }

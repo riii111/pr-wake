@@ -1251,7 +1251,7 @@ mod tests {
             pr: pr.clone(),
             url: "https://github.com/acme/app/pull/3".to_owned(),
             worker: "worker-chat".to_owned(),
-            linked_at: "2026-11-12T00:00:00.000Z".to_owned(),
+            linked_at: "2026-11-12T00:00:00Z".parse().expect("parse the time"),
         };
         watch_record::record_link(&home.env.watch_state, &watched).expect("link the worker");
 
