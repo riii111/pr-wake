@@ -23,7 +23,7 @@ use crate::{
             one_line,
             request::request_queries,
             state::{Found, ReviewState, Status},
-            with_worktree,
+            with_request, with_worktree,
         },
         time,
         watch::{
@@ -297,7 +297,7 @@ pub(crate) fn smoke(
         let prompt = choice.render(&pr, smoke.requester);
         out(&format!("prompt: {prompt}"));
         let worktree = prepare(&tools, &pr, stop)?;
-        let opened = with_worktree(&prompt, &worktree, &pr);
+        let opened = with_request(&with_worktree(&prompt, &worktree, &pr), &request.key);
         out(&format!("worktree: {}", worktree.display()));
         match linked_chat(&tools, &pr)? {
             Some(chat) => {
@@ -311,7 +311,7 @@ pub(crate) fn smoke(
         }
         return Ok(());
     }
-    let launched = launch(&tools, choice, &pr.repo, pr.number, smoke.requester, stop);
+    let launched = launch(&tools, choice, &request, stop);
     if let Some(worktree) = &launched.worktree {
         out(&format!("worktree: {}", worktree.display()));
     }
@@ -589,15 +589,8 @@ fn ask_owner(
 }
 
 // Reads the PR again, so the review is pinned to the head at the time the owner chose.
-fn launch(
-    tools: &Tools<'_>,
-    choice: &Choice,
-    repo: &str,
-    number: u64,
-    requester: Option<&str>,
-    stop: &StopRequest,
-) -> Launched {
-    let pr = match github(tools, stop).pull_request(repo, number) {
+fn launch(tools: &Tools<'_>, choice: &Choice, request: &Found, stop: &StopRequest) -> Launched {
+    let pr = match github(tools, stop).pull_request(&request.repo, request.number) {
         Ok(pr) => pr,
         Err(error) => {
             return Launched {
@@ -622,7 +615,14 @@ fn launch(
         Ok(worktree) => worktree,
         Err(error) => return ended(None, None, Err(error)),
     };
-    let prompt = with_worktree(&choice.render(&pr, requester), &worktree, &pr);
+    let prompt = with_request(
+        &with_worktree(
+            &choice.render(&pr, request.requester.as_deref()),
+            &worktree,
+            &pr,
+        ),
+        &request.key,
+    );
 
     // A linked PR stays in its chat, so a failed send is reported rather than split off into a new chat.
     if let Some(chat) = linked {
@@ -1108,7 +1108,7 @@ mod tests {
         ));
         let prompt = "https://github.com/acme/app/pull/3 tanaka";
         let opened = format!(
-            "{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。",
+            "{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。\n\npr-wakeの依頼ID: smoke:acme/app#3",
             worktree.display()
         );
         assert_eq!(

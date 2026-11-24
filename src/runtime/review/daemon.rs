@@ -65,16 +65,10 @@ struct ShownNotice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
-    SentToLinked(Chat),
-    Started(Chat),
+    SentToLinked(String),
+    Started(String),
     Opened,
     Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Chat {
-    thread: String,
-    head: String,
 }
 
 // A wake-up that is kept until the notify loop takes it, as a channel of one would be.
@@ -427,8 +421,8 @@ impl<'deps> Daemon<'deps> {
             Outcome::Opened => digest.opened.push(Listed::of(&request.found)),
             Outcome::SentToLinked(chat) | Outcome::Started(chat) => {
                 digest.started.push(Listed {
-                    chat: Some(chat.thread),
-                    head: Some(chat.head),
+                    chat: Some(chat),
+                    request: Some(request.found.key.clone()),
                     ..Listed::of(&request.found)
                 });
             }
@@ -653,14 +647,7 @@ impl<'deps> Daemon<'deps> {
                 .launching
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            launch(
-                self.deps.tools,
-                choice,
-                &found.repo,
-                found.number,
-                found.requester.as_deref(),
-                self.deps.stop,
-            )
+            launch(self.deps.tools, choice, found, self.deps.stop)
         };
 
         let head = launched.pr.map(|pr| pr.head_sha);
@@ -685,11 +672,11 @@ impl<'deps> Daemon<'deps> {
                 self.log(&format!(
                     "{key}: sent to chat {chat} for {worktree} at {head}"
                 ));
-                return Outcome::SentToLinked(Chat { thread: chat, head });
+                return Outcome::SentToLinked(chat);
             }
             (Ok(()), Some(Route::Started(chat))) => {
                 self.log(&format!("{key}: started chat {chat} at {head}"));
-                return Outcome::Started(Chat { thread: chat, head });
+                return Outcome::Started(chat);
             }
             (Ok(()), Some(Route::Opened(reason))) => self.log(&format!(
                 "{key}: opened {worktree} at {head}, as no chat could be started: {reason}"
@@ -893,7 +880,7 @@ mod tests {
             PullRequest,
             config::{Batches, ConfigFile, ReviewConfig},
             state::Found,
-            with_worktree,
+            with_request, with_worktree,
         },
         infra::{
             codex_app::new_chat_link,
@@ -975,10 +962,13 @@ mod tests {
         let worktree = fixture.worktree_at(HEAD);
         assert_eq!(
             fixture.started(),
-            [fixture.review_chat_at(HEAD)],
+            [fixture.review_chat_at(HEAD, "acme/app#12@30")],
             "a chat is tried first"
         );
-        assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
+        assert_eq!(
+            fixture.opened(),
+            [fixture.new_chat_at(HEAD, "acme/app#12@30")]
+        );
         assert_eq!(fixture.sent(), []);
         let launched = fixture.state().requests["acme/app#12@30"].clone();
         assert_eq!(launched.choice.as_deref(), Some("code"));
@@ -1009,7 +999,10 @@ mod tests {
             });
         });
 
-        assert_eq!(fixture.started(), [fixture.review_chat_at(HEAD)]);
+        assert_eq!(
+            fixture.started(),
+            [fixture.review_chat_at(HEAD, "acme/app#12@30")]
+        );
         assert_eq!(fixture.opened(), Vec::<String>::new());
         assert_eq!(
             fixture.state().requests["acme/app#12@30"].worktree,
@@ -1017,7 +1010,10 @@ mod tests {
         );
         assert_eq!(
             fixture.sent(),
-            [("new-chat".to_owned(), fixture.worktree_prompt_at(HEAD))]
+            [(
+                "new-chat".to_owned(),
+                fixture.worktree_prompt_at(HEAD, "acme/app#12@31")
+            )]
         );
         assert_eq!(fixture.count_calls("alerter "), 1);
     }
@@ -1120,9 +1116,21 @@ mod tests {
             });
         });
 
-        assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
-        let to_chat = ("review-chat".to_owned(), fixture.worktree_prompt_at(LATER));
-        assert_eq!(fixture.sent(), [to_chat.clone(), to_chat]);
+        assert_eq!(
+            fixture.opened(),
+            [fixture.new_chat_at(HEAD, "acme/app#12@30")]
+        );
+        let to_chat = |key| {
+            (
+                "review-chat".to_owned(),
+                fixture.worktree_prompt_at(LATER, key),
+            )
+        };
+        assert_eq!(
+            fixture.sent(),
+            [to_chat("acme/app#12@31"), to_chat("acme/app#12@32")],
+            "each re-request of one head is told apart by its key"
+        );
         let sent = fixture.state().requests["acme/app#12@31"].clone();
         assert_eq!(sent.head_sha.as_deref(), Some(LATER));
         assert_eq!(sent.choice.as_deref(), Some("code"));
@@ -1206,7 +1214,10 @@ mod tests {
         assert_eq!(fixture.count_calls("alerter "), 1);
         assert_eq!(
             fixture.sent(),
-            [("review-chat".to_owned(), fixture.worktree_prompt_at(HEAD))]
+            [(
+                "review-chat".to_owned(),
+                fixture.worktree_prompt_at(HEAD, "acme/app#12@30")
+            )]
         );
         assert_eq!(
             fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
@@ -1243,7 +1254,10 @@ mod tests {
 
         assert_eq!(queued, 0);
         assert_eq!(fixture.count_calls("alerter "), 1);
-        assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
+        assert_eq!(
+            fixture.opened(),
+            [fixture.new_chat_at(HEAD, "acme/app#12@30")]
+        );
         assert_eq!(fixture.sent().len(), 1);
         assert_eq!(
             fixture.count_calls("再レビューを紐づけ済みのチャットへ送りました"),
@@ -1372,7 +1386,7 @@ mod tests {
             fixture.opened(),
             [
                 "https://github.com/acme/app/pull/12".to_owned(),
-                fixture.new_chat_at(HEAD),
+                fixture.new_chat_at(HEAD, "acme/app#12@30"),
             ]
         );
     }
@@ -1738,9 +1752,7 @@ mod tests {
         assert_eq!(titles, ["Review｜T PR#1", "レビュー報告｜11/18 11:00"]);
         let (_, report) = &started[1];
         assert!(
-            report.contains(&format!(
-                "- [#1 PR 1](https://github.com/acme/app/pull/1) スレッドID review-chat、head {HEAD}"
-            )),
+            report.contains("- [#1 PR 1](https://github.com/acme/app/pull/1) スレッドID review-chat、依頼ID acme/app#1@10"),
             "{report}"
         );
         assert_eq!(fixture.count_calls("osascript "), 0);
@@ -2417,8 +2429,8 @@ mod tests {
             ))
         }
 
-        fn worktree_prompt_at(&self, head: &str) -> String {
-            with_worktree(
+        fn worktree_prompt_at(&self, head: &str, key: &str) -> String {
+            let prompt = with_worktree(
                 &self.prompt_at(head),
                 &self.worktree_at(head),
                 &PullRequest {
@@ -2429,17 +2441,21 @@ mod tests {
                     head_sha: head.to_owned(),
                     base_ref: String::new(),
                 },
-            )
+            );
+            with_request(&prompt, key)
         }
 
         // The title and the prompt of a new review chat for PR 12 at `head`.
-        fn review_chat_at(&self, head: &str) -> (String, String) {
-            ("Review｜T PR#12".to_owned(), self.worktree_prompt_at(head))
+        fn review_chat_at(&self, head: &str, key: &str) -> (String, String) {
+            (
+                "Review｜T PR#12".to_owned(),
+                self.worktree_prompt_at(head, key),
+            )
         }
 
-        fn new_chat_at(&self, head: &str) -> String {
+        fn new_chat_at(&self, head: &str, key: &str) -> String {
             new_chat_link(
-                &self.worktree_prompt_at(head),
+                &self.worktree_prompt_at(head, key),
                 &self.home.path().join("review-home"),
             )
         }

@@ -57,9 +57,8 @@ pub(crate) struct Listed {
     // A digest saved by an older pr-wake has none, so the report says the chat is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) chat: Option<String>,
-    // A linked chat keeps earlier reviews, so the report finds this one by the head its request names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) head: Option<String>,
+    pub(crate) request: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,7 +174,7 @@ impl Digest {
             "pr-wakeがまとめて始めたPRレビューの結果を報告してください。".to_owned(),
             String::new(),
             "レビューのスレッドをcodex_appのread_threadで読み、今回の依頼のターンの最終回答から判定と要点を取り出してください。".to_owned(),
-            "スレッドには前回のレビューや別の会話も残るため、依頼文に下記のheadのSHAを含む最新のターンを今回の依頼とします。".to_owned(),
+            "スレッドには前回のレビューや別の会話も残るため、依頼文に「pr-wakeの依頼ID: <下記の依頼ID>」を含むターンを今回の依頼とします。".to_owned(),
             "そのターンが終わっていなければ、wait_threadsで終わるまで待ってください。".to_owned(),
             "PRへの投稿や、レビューのスレッドへの送信はしないでください。".to_owned(),
             String::new(),
@@ -189,11 +188,11 @@ impl Digest {
                     || "スレッドID不明（判定は読まずに、スレッドが分からないと書く）".to_owned(),
                     |chat| format!("スレッドID {chat}"),
                 );
-                let head = pr
-                    .head
+                let request = pr
+                    .request
                     .as_deref()
-                    .map_or_else(String::new, |head| format!("、head {head}"));
-                format!("- {} {chat}{head}", pr.link())
+                    .map_or_else(String::new, |request| format!("、依頼ID {request}"));
+                format!("- {} {chat}{request}", pr.link())
             }));
         }
         if !self.opened.is_empty() {
@@ -232,7 +231,7 @@ impl Listed {
             number: found.number,
             title: found.title.clone(),
             chat: None,
-            head: None,
+            request: None,
         }
     }
 
@@ -467,7 +466,7 @@ mod tests {
             started: vec![
                 Listed {
                     chat: Some("chat-12".to_owned()),
-                    head: Some("abc".to_owned()),
+                    request: Some("acme/app#12@30".to_owned()),
                     ..listed(12, "Fix\nthe bug")
                 },
                 listed(14, "Saved before"),
@@ -480,7 +479,7 @@ mod tests {
         let prompt = digest.report_prompt();
 
         for expected in [
-            "- [#12 Fix the bug](https://github.com/acme/app/pull/12) スレッドID chat-12、head abc",
+            "- [#12 Fix the bug](https://github.com/acme/app/pull/12) スレッドID chat-12、依頼ID acme/app#12@30",
             "- [#14 Saved before](https://github.com/acme/app/pull/14) スレッドID不明",
             "Enterで送るまでレビューは始まらないと書く）:\n- [#13 Opened](https://github.com/acme/app/pull/13)",
             "- [#7 Rename](https://github.com/acme/app/pull/7)（他の人が承認済み）",
@@ -527,7 +526,7 @@ mod tests {
             number,
             title: title.to_owned(),
             chat: None,
-            head: None,
+            request: None,
         }
     }
 }
