@@ -21,6 +21,7 @@ use crate::{
     infra::{
         alerter,
         gh::rest::GhRest,
+        harnexus::{Created, NewChat},
         review_record::{self, ReviewPaths},
         stop::StopRequest,
     },
@@ -62,10 +63,10 @@ struct ShownNotice {
     replacing: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
-    SentToLinked,
-    Started,
+    SentToLinked(String),
+    Started(Option<String>),
     Failed,
 }
 
@@ -376,11 +377,11 @@ impl<'deps> Daemon<'deps> {
                 .iter()
                 .enumerate()
                 .find(|(_, pending)| pending.ready <= now)
-                .map(|(index, pending)| (index, pending.digest.clone()));
-            let Some((index, digest)) = due else {
+                .map(|(index, pending)| (index, pending.clone()));
+            let Some((index, pending)) = due else {
                 return;
             };
-            if let Err(error) = self.notify_digest(&digest) {
+            if let Err(error) = self.report_digest(&pending) {
                 self.log(&format!("batch notification: {error}"));
                 // A stop may have kept osascript from running, so the digest stays for the restarted review.
                 if self.deps.stop.is_requested() {
@@ -414,12 +415,45 @@ impl<'deps> Daemon<'deps> {
         let choices = &self.deps.tools.config.choices;
         // No notification asks for a choice in a batch, so a linked PR keeps its earlier one and any other takes the first, which the config always has.
         let choice = self.linked_choice(request).unwrap_or(&choices[0]);
-        match self.start(request, choice) {
-            Outcome::Failed => digest.failed += 1,
-            Outcome::SentToLinked | Outcome::Started => {
-                digest.started.push(Listed::of(&request.found));
+        let chat = match self.start(request, choice) {
+            Outcome::Failed => {
+                digest.failed += 1;
+                return;
+            }
+            Outcome::SentToLinked(chat) => Some(chat),
+            Outcome::Started(chat) => chat,
+        };
+        digest.started.push(Listed {
+            chat,
+            ..Listed::of(&request.found)
+        });
+    }
+
+    fn report_digest(&self, pending: &PendingDigest) -> Result<(), String> {
+        let tools = self.deps.tools;
+        let ready = pending.ready.to_zoned(self.deps.zone.clone());
+        let title = format!("レビュー報告｜{}", ready.strftime("%m/%d %H:%M"));
+        let prompt = pending.digest.report_prompt();
+        let created = (tools.create)(
+            &NewChat {
+                project: &tools.config.chat_home,
+                title: &title,
+                prompt: &prompt,
+            },
+            self.deps.stop,
+        );
+        match created {
+            Created::Started(chat) => self.log(&format!("batch report: chat {chat}")),
+            // The chat may exist, so the digest is not shown again in a notification.
+            Created::Unknown(reason) => self.log(&format!(
+                "batch report: the chat could not be confirmed; check Codex App: {reason}"
+            )),
+            Created::NotSent(reason) => {
+                self.log(&format!("batch report: no chat, so notifying: {reason}"));
+                return self.notify_digest(&pending.digest);
             }
         }
+        Ok(())
     }
 
     fn notify_digest(&self, digest: &Digest) -> Result<(), String> {
@@ -587,7 +621,7 @@ impl<'deps> Daemon<'deps> {
             "{}: re-request of a linked PR, sent with {} without asking",
             request.found.key, choice.id
         ));
-        if self.start(request, choice) == Outcome::SentToLinked {
+        if matches!(self.start(request, choice), Outcome::SentToLinked(_)) {
             self.report(request, "再レビューを紐づけ済みのチャットへ送りました");
         }
     }
@@ -645,10 +679,11 @@ impl<'deps> Daemon<'deps> {
                 self.log(&format!(
                     "{key}: sent to chat {chat} for {worktree} at {head}"
                 ));
-                return Outcome::SentToLinked;
+                return Outcome::SentToLinked(chat);
             }
             (Ok(()), Some(Route::Started(chat))) => {
                 self.log(&format!("{key}: started chat {chat} at {head}"));
+                return Outcome::Started(Some(chat));
             }
             (Ok(()), Some(Route::Opened(reason))) => self.log(&format!(
                 "{key}: opened {worktree} at {head}, as no chat could be started: {reason}"
@@ -660,7 +695,7 @@ impl<'deps> Daemon<'deps> {
                 return Outcome::Failed;
             }
         }
-        Outcome::Started
+        Outcome::Started(None)
     }
 
     // The oldest queued request becomes notifying, saved before it is shown.
@@ -857,7 +892,6 @@ mod tests {
         infra::{
             codex_app::new_chat_link,
             command::{RunTool, ToolCall},
-            harnexus::{Created, NewChat},
             review_record::ReviewChat,
         },
         runtime::review::{Commands, CreateChat, Delivery, SendToChat, pause},
@@ -887,7 +921,7 @@ mod tests {
         // Each prompt sent to a linked chat, after the chat.
         sent: Mutex<Vec<(String, String)>>,
         creation: Mutex<Created>,
-        // Each prompt a new chat was started with, after the head its worktree starts at.
+        // Each prompt a new chat was started with, after its title.
         started: Mutex<Vec<(String, String)>>,
         inbox: Mutex<String>,
     }
@@ -933,7 +967,7 @@ mod tests {
         let worktree = fixture.worktree_at(HEAD);
         assert_eq!(
             fixture.started(),
-            [(HEAD.to_owned(), fixture.prompt_at(HEAD))],
+            [fixture.review_chat_at(HEAD)],
             "a chat is tried first"
         );
         assert_eq!(fixture.opened(), [fixture.new_chat_at(HEAD)]);
@@ -967,12 +1001,12 @@ mod tests {
             });
         });
 
-        assert_eq!(
-            fixture.started(),
-            [(HEAD.to_owned(), fixture.prompt_at(HEAD))]
-        );
+        assert_eq!(fixture.started(), [fixture.review_chat_at(HEAD)]);
         assert_eq!(fixture.opened(), Vec::<String>::new());
-        assert_eq!(fixture.state().requests["acme/app#12@30"].worktree, None);
+        assert_eq!(
+            fixture.state().requests["acme/app#12@30"].worktree,
+            Some(fixture.worktree_at(HEAD).display().to_string())
+        );
         assert_eq!(
             fixture.sent(),
             [("new-chat".to_owned(), fixture.worktree_prompt_at(HEAD))]
@@ -1673,6 +1707,38 @@ mod tests {
     }
 
     #[test]
+    fn batch_is_reported_in_a_chat_that_links_each_review_chat() {
+        let fixture = Fixture::batched();
+        fixture.save_queued(&[(1, 10)]);
+        fixture.request("acme/app", 1, &[requested(10, "tanaka")]);
+        fixture.set_creation(Created::Started("review-chat".to_owned()));
+        let now = || tokyo("2026-11-18T11:30:00");
+
+        fixture.with_daemon(
+            &Setup {
+                now: Some(&now),
+                ..Setup::default()
+            },
+            |daemon, _| daemon.batch_once(),
+        );
+
+        let started = fixture.started();
+        let titles = started
+            .iter()
+            .map(|(title, _)| title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, ["Review｜T PR#1", "レビュー報告｜11/18 11:00"]);
+        let (_, report) = &started[1];
+        assert!(
+            report
+                .contains("- [#1 PR 1](https://github.com/acme/app/pull/1) スレッドID review-chat"),
+            "{report}"
+        );
+        assert_eq!(fixture.count_calls("osascript "), 0);
+        assert_eq!(fixture.state().pending_digests, []);
+    }
+
+    #[test]
     fn batch_notification_cut_short_by_a_stop_is_shown_once_after_the_restart() {
         let fixture = Fixture::batched();
         fixture.save_queued(&[(1, 10)]);
@@ -2251,7 +2317,7 @@ mod tests {
             self.started
                 .lock()
                 .expect("note the new chat")
-                .push((chat.head_sha.to_owned(), chat.prompt.to_owned()));
+                .push((chat.title.to_owned(), chat.prompt.to_owned()));
             self.creation.lock().expect("read the creation").clone()
         }
 
@@ -2313,6 +2379,11 @@ mod tests {
                     base_ref: String::new(),
                 },
             )
+        }
+
+        // The title and the prompt of a new review chat for PR 12 at `head`.
+        fn review_chat_at(&self, head: &str) -> (String, String) {
+            ("Review｜T PR#12".to_owned(), self.worktree_prompt_at(head))
         }
 
         fn new_chat_at(&self, head: &str) -> String {

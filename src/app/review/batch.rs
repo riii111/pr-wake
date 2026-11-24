@@ -46,8 +46,14 @@ pub(crate) struct Digest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Listed {
+    // A digest saved by an older pr-wake has none, so its PRs are listed without a URL.
+    #[serde(default)]
+    pub(crate) repo: String,
     pub(crate) number: u64,
     pub(crate) title: String,
+    // The review chat, which a review opened without one lacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) chat: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,15 +152,70 @@ impl Digest {
         }
         lines.join("\n")
     }
+
+    // The report chat reads each review chat itself, so a review still running when the report starts is waited for.
+    #[must_use]
+    pub(crate) fn report_prompt(&self) -> String {
+        let mut lines = vec![
+            "pr-wakeがまとめて始めたPRレビューの結果を報告してください。".to_owned(),
+            String::new(),
+            "レビューのスレッドをcodex_appのread_threadで読み、最終回答から判定と要点を取り出してください。".to_owned(),
+            "終わっていないスレッドは、wait_threadsで終わるまで待ってください。".to_owned(),
+            "PRへの投稿や、レビューのスレッドへの送信はしないでください。".to_owned(),
+            String::new(),
+            "PRごとに、PRへのリンク、判定（LGTM・修正必要など）、1〜2行の要点、`[スレッド](codex://threads/<スレッドID>)`の形のリンクを書いてください。".to_owned(),
+        ];
+        if !self.started.is_empty() {
+            lines.push(String::new());
+            lines.push("レビューしたPR:".to_owned());
+            lines.extend(self.started.iter().map(|pr| {
+                let chat = pr.chat.as_deref().map_or_else(
+                    || "スレッドなし（Codex Appで開いたプロンプトから始める）".to_owned(),
+                    |chat| format!("スレッドID {chat}"),
+                );
+                format!("- {} {chat}", pr.link())
+            }));
+        }
+        if !self.reported.is_empty() {
+            lines.push(String::new());
+            lines.push("レビューを始めず、報告だけにしたPR:".to_owned());
+            lines.extend(
+                self.reported
+                    .iter()
+                    .map(|(pr, reason)| format!("- {}（{}）", pr.link(), reason.text())),
+            );
+        }
+        if self.failed > 0 {
+            lines.push(String::new());
+            lines.push(format!(
+                "開始できなかった依頼が{}件あります。理由は`pr-wake review logs`で確認できると添えてください。",
+                self.failed
+            ));
+        }
+        lines.join("\n")
+    }
 }
 
 impl Listed {
     #[must_use]
     pub(crate) fn of(found: &Found) -> Self {
         Self {
+            repo: found.repo.clone(),
             number: found.number,
             title: found.title.clone(),
+            chat: None,
         }
+    }
+
+    fn link(&self) -> String {
+        let title = one_line(&self.title);
+        if self.repo.is_empty() {
+            return format!("#{} {title}", self.number);
+        }
+        format!(
+            "[#{} {title}](https://github.com/{}/pull/{})",
+            self.number, self.repo, self.number
+        )
     }
 
     fn line(&self) -> String {
@@ -371,6 +432,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn report_prompt_links_each_pr_and_its_review_chat() {
+        let digest = Digest {
+            started: vec![
+                Listed {
+                    chat: Some("chat-12".to_owned()),
+                    ..listed(12, "Fix\nthe bug")
+                },
+                listed(13, "Opened"),
+            ],
+            reported: vec![(listed(7, "Rename"), ReportReason::ApprovedByOther)],
+            failed: 1,
+        };
+
+        let prompt = digest.report_prompt();
+
+        for expected in [
+            "- [#12 Fix the bug](https://github.com/acme/app/pull/12) スレッドID chat-12",
+            "- [#13 Opened](https://github.com/acme/app/pull/13) スレッドなし（Codex Appで開いたプロンプトから始める）",
+            "- [#7 Rename](https://github.com/acme/app/pull/7)（他の人が承認済み）",
+            "開始できなかった依頼が1件あります。",
+        ] {
+            assert!(prompt.contains(expected), "{expected} in {prompt}");
+        }
+    }
+
+    #[test]
+    fn report_prompt_omits_the_empty_groups() {
+        let digest = Digest {
+            started: Vec::new(),
+            reported: vec![(listed(7, "Rename"), ReportReason::ManyReviewers)],
+            failed: 0,
+        };
+
+        let prompt = digest.report_prompt();
+
+        assert!(!prompt.contains("レビューしたPR:"), "{prompt}");
+        assert!(!prompt.contains("開始できなかった"), "{prompt}");
+        assert!(
+            prompt.contains("- [#7 Rename](https://github.com/acme/app/pull/7)（3人以上を指名）")
+        );
+    }
+
     fn batches() -> Batches {
         Batches {
             ready_at: vec![Time::constant(11, 0, 0, 0), Time::constant(16, 0, 0, 0)],
@@ -387,8 +491,10 @@ mod tests {
 
     fn listed(number: u64, title: &str) -> Listed {
         Listed {
+            repo: "acme/app".to_owned(),
             number,
             title: title.to_owned(),
+            chat: None,
         }
     }
 }

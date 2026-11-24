@@ -687,13 +687,17 @@ mod tests {
                 ready: at("2026-11-12T02:00:00Z"),
                 digest: Digest {
                     started: vec![Listed {
+                        repo: "acme/app".to_owned(),
                         number: 1,
                         title: "T".to_owned(),
+                        chat: Some("review-chat".to_owned()),
                     }],
                     reported: vec![(
                         Listed {
+                            repo: "acme/app".to_owned(),
                             number: 2,
                             title: "U".to_owned(),
+                            chat: None,
                         },
                         ReportReason::ApprovedByOther,
                     )],
