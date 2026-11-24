@@ -12,7 +12,9 @@ use super::{Launched, STOP_CHECK, Tools, ask_owner, github, launch};
 use crate::{
     app::review::{
         PullDetails, PullRequest,
-        batch::{Digest, NowRequest, Plan, ReportReason, Reviewers, due_slot, plan},
+        batch::{
+            Digest, NowRequest, Plan, ReportReason, Reviewers, SubmittedReview, due_slot, plan,
+        },
         config::Choice,
         inbox::threads_to_clear,
         notice::Selection,
@@ -340,7 +342,8 @@ impl<'deps> Daemon<'deps> {
                         };
                         let outcome = match self.read_pull(&request.found) {
                             Ok(pull) => {
-                                let plan = self.plan(&request.found, &pull, login);
+                                let reviews = self.read_reviews(&request.found);
+                                let plan = self.plan(&request.found, &pull, reviews, login);
                                 self.apply_plan(&request, plan, pull.pr)
                             }
                             Err(error) => self.start_listed(&request, Err(error), true),
@@ -507,6 +510,8 @@ impl<'deps> Daemon<'deps> {
         }
         let github = github(self.deps.tools, self.deps.stop);
         let teams = &self.deps.tools.config.teams;
+        // Read before the request is checked, so a withdrawal or a re-request while the reviews are read is still caught.
+        let reviews = github.reviews(&found.repo, found.number);
         // Read without the poll's cache, as the queue the owner chose from may predate a withdrawal or a re-request.
         let pull = github
             .pull_request(&found.repo, found.number)
@@ -514,6 +519,8 @@ impl<'deps> Daemon<'deps> {
         let events = github
             .review_requests(&found.repo, found.number)
             .map_err(unverified)?;
+        // The reads above leave the request queued, so a poll meanwhile can still withdraw or replace it.
+        self.queued_request(key)?;
         let hit = SearchHit {
             repo: found.repo.clone(),
             number: found.number,
@@ -533,9 +540,7 @@ impl<'deps> Daemon<'deps> {
                 newer: None,
             });
         }
-        let plan = self.plan(&found, &pull, login);
-        // The reads above leave the request queued, so a poll meanwhile can still withdraw or replace it.
-        self.queued_request(key)?;
+        let plan = self.plan(&found, &pull, reviews, login);
         Ok((pull, plan))
     }
 
@@ -702,8 +707,18 @@ impl<'deps> Daemon<'deps> {
         github(self.deps.tools, self.deps.stop).pull_request(&found.repo, found.number)
     }
 
-    fn plan(&self, found: &Found, pull: &PullDetails, login: &str) -> Plan {
-        match github(self.deps.tools, self.deps.stop).reviews(&found.repo, found.number) {
+    fn read_reviews(&self, found: &Found) -> Result<Vec<SubmittedReview>, String> {
+        github(self.deps.tools, self.deps.stop).reviews(&found.repo, found.number)
+    }
+
+    fn plan(
+        &self,
+        found: &Found,
+        pull: &PullDetails,
+        reviews: Result<Vec<SubmittedReview>, String>,
+        login: &str,
+    ) -> Plan {
+        match reviews {
             Ok(reviews) => plan(
                 &Reviewers {
                     author: pull.author.clone(),
@@ -2416,62 +2431,85 @@ mod tests {
     }
 
     #[test]
-    fn poll_during_the_github_reads_still_replaces_a_selected_request() {
-        let fixture = Fixture::batched();
-        fixture.save_queued(&[(12, 30)]);
-        // Seen before the test's clock, so a request the poll adds is the later one.
-        let mut state = fixture.state();
-        state
-            .requests
-            .get_mut("acme/app#12@30")
-            .expect("request")
-            .first_seen = tokyo("2026-11-20T12:00:00");
-        review_record::save_state(&fixture.paths, &state).expect("save the state");
-        fixture.request("acme/app", 12, &[requested(30, "sato")]);
-        let looking = Arc::new(AtomicBool::new(false));
-        let released = Arc::new(AtomicBool::new(false));
-        let (looked, release) = (Arc::clone(&looking), Arc::clone(&released));
-        // The reviews are read last, so the poll comes after every other read of GitHub.
-        fixture.answer_with(
-            "gh api --paginate repos/acme/app/pulls/12/reviews",
-            move |_| {
-                looked.store(true, Ordering::SeqCst);
-                wait_for(|| release.load(Ordering::SeqCst));
-                Ok(b"[]".to_vec())
-            },
-        );
-        fixture.select("one", &["acme/app#12@30"]);
-        let now = || tokyo("2026-11-21T12:00:00");
+    fn re_request_while_the_reviews_are_read_keeps_a_selected_request_from_starting() {
+        let newer = Some("acme/app#12@31".to_owned());
+        for (name, polled, expected) in [
+            (
+                "polled",
+                true,
+                SelectedOutcome::NotQueued {
+                    status: Some(Status::Withdrawn),
+                    newer: newer.clone(),
+                },
+            ),
+            (
+                "only_on_github",
+                false,
+                SelectedOutcome::NotQueued {
+                    status: None,
+                    newer,
+                },
+            ),
+        ] {
+            let fixture = Fixture::batched();
+            fixture.save_queued(&[(12, 30)]);
+            // Seen before the test's clock, so a request the poll adds is the later one.
+            let mut state = fixture.state();
+            state
+                .requests
+                .get_mut("acme/app#12@30")
+                .expect("request")
+                .first_seen = tokyo("2026-11-20T12:00:00");
+            review_record::save_state(&fixture.paths, &state).expect("save the state");
+            fixture.request("acme/app", 12, &[requested(30, "sato")]);
+            let looking = Arc::new(AtomicBool::new(false));
+            let released = Arc::new(AtomicBool::new(false));
+            let (looked, release) = (Arc::clone(&looking), Arc::clone(&released));
+            // A poll never reads the reviews, so holding them holds only the selection.
+            fixture.answer_with(
+                "gh api --paginate repos/acme/app/pulls/12/reviews",
+                move |_| {
+                    looked.store(true, Ordering::SeqCst);
+                    wait_for(|| release.load(Ordering::SeqCst));
+                    Ok(b"[]".to_vec())
+                },
+            );
+            fixture.select("one", &["acme/app#12@30"]);
+            let now = || tokyo("2026-11-21T12:00:00");
 
-        fixture.with_daemon(
-            &Setup {
-                now: Some(&now),
-                ..Setup::default()
-            },
-            |daemon, _| {
-                thread::scope(|scope| {
-                    let batch = scope.spawn(|| daemon.batch_once());
-                    wait_for(|| looking.load(Ordering::SeqCst));
-                    fixture.request(
-                        "acme/app",
-                        12,
-                        &[requested(30, "sato"), requested(31, "sato")],
-                    );
-                    daemon.poll_once().expect("poll during the lookup");
-                    released.store(true, Ordering::SeqCst);
-                    batch.join().expect("join the batch");
-                });
-            },
-        );
+            fixture.with_daemon(
+                &Setup {
+                    now: Some(&now),
+                    ..Setup::default()
+                },
+                |daemon, _| {
+                    thread::scope(|scope| {
+                        let batch = scope.spawn(|| daemon.batch_once());
+                        wait_for(|| looking.load(Ordering::SeqCst));
+                        fixture.request(
+                            "acme/app",
+                            12,
+                            &[requested(30, "sato"), requested(31, "sato")],
+                        );
+                        if polled {
+                            daemon.poll_once().expect("poll during the lookup");
+                        }
+                        released.store(true, Ordering::SeqCst);
+                        batch.join().expect("join the batch");
+                    });
+                },
+            );
 
-        assert_eq!(
-            fixture.selection("one").outcomes.get("acme/app#12@30"),
-            Some(&SelectedOutcome::NotQueued {
-                status: Some(Status::Withdrawn),
-                newer: Some("acme/app#12@31".to_owned()),
-            })
-        );
-        assert!(fixture.opened().is_empty() && fixture.started().is_empty());
+            assert_eq!(
+                fixture.selection("one").outcomes.get("acme/app#12@30"),
+                Some(&expected),
+                "case: {name}"
+            );
+            assert!(
+                fixture.opened().is_empty() && fixture.started().is_empty(),
+                "case: {name}"
+            );
+        }
     }
 
     #[test]
