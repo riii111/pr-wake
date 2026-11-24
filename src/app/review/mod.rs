@@ -69,6 +69,12 @@ pub(crate) fn with_worktree(prompt: &str, worktree: &Path, pr: &PullRequest) -> 
     )
 }
 
+// One chat holds a PR's every review, so the report finds this request's turn by the key, put first to survive a cut-short read.
+#[must_use]
+pub(crate) fn with_request(prompt: &str, key: &str) -> String {
+    format!("pr-wakeの依頼ID: {key}\n\n{prompt}")
+}
+
 #[must_use]
 pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")

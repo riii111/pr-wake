@@ -5,8 +5,7 @@ use serde_json::{Map, Value, json};
 use super::thread::{NOT_SENT, result_text};
 
 pub(crate) struct NewChat<'chat> {
-    pub(crate) checkout: &'chat Path,
-    pub(crate) head_sha: &'chat str,
+    pub(crate) project: &'chat Path,
     pub(crate) title: &'chat str,
     pub(crate) prompt: &'chat str,
 }
@@ -23,7 +22,7 @@ type CallTool<'call> = dyn FnMut(&str, Map<String, Value>) -> Map<String, Value>
 
 pub(crate) fn create_chat(call: &mut CallTool<'_>, chat: &NewChat<'_>) -> Created {
     let projects = call("list_projects", Map::new());
-    let project = match project_of(&projects, chat.checkout) {
+    let project = match project_of(&projects, chat.project) {
         Ok(project) => project,
         Err(reason) => return Created::NotSent(reason),
     };
@@ -34,14 +33,11 @@ fn arguments(project: &str, chat: &NewChat<'_>) -> Map<String, Value> {
     let arguments = json!({
         "title": chat.title,
         "prompt": chat.prompt,
-        // The app resolves the branch name as any ref, so the worktree starts at the fetched head.
+        // The prompt names the worktree to read, so the chat runs in the project folder without a worktree of its own.
         "target": {
             "type": "project",
             "projectId": project,
-            "environment": {
-                "type": "worktree",
-                "startingState": { "type": "branch", "branchName": chat.head_sha },
-            },
+            "environment": { "type": "local" },
         },
     });
     match arguments {
@@ -50,8 +46,7 @@ fn arguments(project: &str, chat: &NewChat<'_>) -> Map<String, Value> {
     }
 }
 
-// Only a local project at the checkout counts, so the chat's worktree is added from the configured clone.
-fn project_of(answer: &Map<String, Value>, checkout: &Path) -> Result<String, String> {
+fn project_of(answer: &Map<String, Value>, folder: &Path) -> Result<String, String> {
     if answer.get("outcome").and_then(Value::as_str) != Some("done") {
         return Err(format!(
             "cannot list the Codex projects: {}",
@@ -67,14 +62,14 @@ fn project_of(answer: &Map<String, Value>, checkout: &Path) -> Result<String, St
             project["hostId"] == "local"
                 && project["path"]
                     .as_str()
-                    .is_some_and(|path| Path::new(path) == checkout)
+                    .is_some_and(|path| Path::new(path) == folder)
         })
         .and_then(|project| project["projectId"].as_str())
         .map(str::to_owned)
         .ok_or_else(|| {
             format!(
-                "Codex App has no project at {}; add the checkout as a project",
-                checkout.display()
+                "Codex App has no project at {}; add the folder as a project",
+                folder.display()
             )
         })
 }
@@ -104,16 +99,16 @@ fn message_of(answer: &Map<String, Value>) -> &str {
 mod tests {
     use super::*;
 
-    const CHECKOUT: &str = "/repos/app";
+    const HOME: &str = "/Users/me/review-home";
 
     #[test]
-    fn chat_starts_in_a_worktree_of_the_checkouts_project_at_the_head() {
+    fn chat_starts_in_the_folder_of_the_project_at_the_home() {
         let mut calls = Vec::new();
         let created = create_chat(
             &mut |tool, arguments| {
                 calls.push((tool.to_owned(), Value::Object(arguments)));
                 match tool {
-                    "list_projects" => listed(&[("other", "/repos/other"), ("p1", CHECKOUT)]),
+                    "list_projects" => listed(&[("other", "/repos/other"), ("p1", HOME)]),
                     _ => answer(json!({ "outcome": "done", "threadId": "review-chat" })),
                 }
             },
@@ -133,10 +128,7 @@ mod tests {
                         "target": {
                             "type": "project",
                             "projectId": "p1",
-                            "environment": {
-                                "type": "worktree",
-                                "startingState": { "type": "branch", "branchName": "abc" },
-                            },
+                            "environment": { "type": "local" },
                         },
                     })
                 ),
@@ -145,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_is_not_created_without_a_project_at_the_checkout() {
+    fn chat_is_not_created_without_a_project_at_the_home() {
         for (name, projects) in [
             (
                 "unlisted",
@@ -191,7 +183,7 @@ mod tests {
         ] {
             let created = create_chat(
                 &mut |tool, _| match tool {
-                    "list_projects" => listed(&[("p1", CHECKOUT)]),
+                    "list_projects" => listed(&[("p1", HOME)]),
                     _ => answer(created_answer.clone()),
                 },
                 &chat(),
@@ -203,8 +195,7 @@ mod tests {
 
     fn chat() -> NewChat<'static> {
         NewChat {
-            checkout: Path::new(CHECKOUT),
-            head_sha: "abc",
+            project: Path::new(HOME),
             title: "Review acme/app#12",
             prompt: "review it",
         }

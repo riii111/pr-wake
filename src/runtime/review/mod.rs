@@ -24,7 +24,7 @@ use crate::{
             request::request_queries,
             selection::{self, QueueEntry, SelectionRecord, SelectionReport, is_selection_id},
             state::{Found, ReviewState, Status},
-            with_worktree,
+            with_request, with_worktree,
         },
         time,
         watch::{
@@ -38,7 +38,7 @@ use crate::{
         codex_app::{new_chat_link, open_link},
         command::{RunTool, run_tool},
         gh::rest::GhRest,
-        git::worktree::{Checkout, fetch_pr_head, prepare_worktree},
+        git::worktree::{Checkout, prepare_worktree},
         harnexus::{
             Bridge, CallTimeouts, CodexWorkers, Created, NewChat, call_socket_path, create_chat,
         },
@@ -306,7 +306,7 @@ pub(crate) fn smoke(
         let prompt = choice.render(&pr, smoke.requester);
         out(&format!("prompt: {prompt}"));
         let worktree = prepare(&tools, &pr, stop)?;
-        let opened = with_worktree(&prompt, &worktree, &pr);
+        let opened = with_request(&with_worktree(&prompt, &worktree, &pr), &request.key);
         out(&format!("worktree: {}", worktree.display()));
         match linked_chat(&tools, &pr)? {
             Some(chat) => {
@@ -320,13 +320,7 @@ pub(crate) fn smoke(
         }
         return Ok(());
     }
-    let launched = launch(
-        &tools,
-        choice,
-        (&pr.repo, pr.number, smoke.requester),
-        &|_| false,
-        stop,
-    );
+    let launched = launch(&tools, choice, &request, &|_| false, stop);
     if let Some(worktree) = &launched.worktree {
         out(&format!("worktree: {}", worktree.display()));
     }
@@ -708,12 +702,11 @@ fn ask_owner(
 fn launch(
     tools: &Tools<'_>,
     choice: &Choice,
-    request: (&str, u64, Option<&str>),
+    request: &Found,
     reviewed: &dyn Fn(&PullRequest) -> bool,
     stop: &StopRequest,
 ) -> Launched {
-    let (repo, number, requester) = request;
-    let pr = match github(tools, stop).pull_request(repo, number) {
+    let pr = match github(tools, stop).pull_request(&request.repo, request.number) {
         Ok(pr) => pr,
         Err(error) => {
             return Launched {
@@ -733,19 +726,25 @@ fn launch(
     if reviewed(&pr) {
         return ended(Some(Route::AlreadyReviewed), None, Ok(()));
     }
-    let prompt = choice.render(&pr, requester);
-
     let linked = match linked_chat(tools, &pr) {
         Ok(linked) => linked,
         Err(error) => return ended(None, None, Err(error)),
     };
+    let worktree = match prepare(tools, &pr, stop) {
+        Ok(worktree) => worktree,
+        Err(error) => return ended(None, None, Err(error)),
+    };
+    let prompt = with_request(
+        &with_worktree(
+            &choice.render(&pr, request.requester.as_deref()),
+            &worktree,
+            &pr,
+        ),
+        &request.key,
+    );
+
     // A linked PR stays in its chat, so a failed send is reported rather than split off into a new chat.
     if let Some(chat) = linked {
-        let worktree = match prepare(tools, &pr, stop) {
-            Ok(worktree) => worktree,
-            Err(error) => return ended(None, None, Err(error)),
-        };
-        let prompt = with_worktree(&prompt, &worktree, &pr);
         let result = match (tools.send)(&chat.thread, &prompt, stop) {
             Delivery::Sent => Ok(()),
             Delivery::NotSent(reason) => {
@@ -759,16 +758,25 @@ fn launch(
         return ended(Some(Route::Linked(chat.thread)), Some(worktree), result);
     }
 
-    let unstarted = match start_chat(tools, &pr, &prompt, stop) {
+    let title = format!("Review｜{} PR#{}", one_line(&pr.title), pr.number);
+    let created = (tools.create)(
+        &NewChat {
+            project: &tools.config.chat_home,
+            title: &title,
+            prompt: &prompt,
+        },
+        stop,
+    );
+    let unstarted = match created {
         Created::Started(thread) => {
             let linked = link_started(tools, &pr, &thread);
-            return ended(Some(Route::Started(thread)), None, linked);
+            return ended(Some(Route::Started(thread)), Some(worktree), linked);
         }
         // Opening another chat could leave two reviews of one request.
         Created::Unknown(reason) => {
             return ended(
                 None,
-                None,
+                Some(worktree),
                 Err(format!(
                     "the new review chat could not be confirmed; check Codex App before choosing again: {reason}"
                 )),
@@ -776,49 +784,10 @@ fn launch(
         }
         Created::NotSent(reason) => reason,
     };
-    let worktree = match prepare(tools, &pr, stop) {
-        Ok(worktree) => worktree,
-        Err(error) => return ended(None, None, Err(error)),
-    };
-    let link = new_chat_link(
-        &with_worktree(&prompt, &worktree, &pr),
-        &tools.config.chat_home,
-    );
+    let link = new_chat_link(&prompt, &tools.config.chat_home);
     let result = open_link(tools.run, &tools.commands.open, &link, stop)
         .map_err(|error| format!("open deep link: {error}"));
     ended(Some(Route::Opened(unstarted)), Some(worktree), result)
-}
-
-fn start_chat(tools: &Tools<'_>, pr: &PullRequest, prompt: &str, stop: &StopRequest) -> Created {
-    let Some(checkout) = tools.config.checkout_of(&pr.repo) else {
-        return Created::NotSent(format!(
-            "{} has no local checkout in repositories of the config",
-            pr.repo
-        ));
-    };
-    // Codex App adds the chat's worktree from this checkout, so the head must be in it first.
-    let fetched = fetch_pr_head(
-        &Checkout {
-            run: tools.run,
-            git: &tools.commands.git,
-            path: checkout,
-            stop,
-        },
-        pr,
-    );
-    if let Err(error) = fetched {
-        return Created::NotSent(error);
-    }
-    let title = format!("Review｜{} PR#{}", one_line(&pr.title), pr.number);
-    (tools.create)(
-        &NewChat {
-            checkout,
-            head_sha: &pr.head_sha,
-            title: &title,
-            prompt,
-        },
-        stop,
-    )
 }
 
 fn link_started(tools: &Tools<'_>, pr: &PullRequest, thread: &str) -> Result<(), String> {
@@ -1292,7 +1261,7 @@ mod tests {
         ));
         let prompt = "https://github.com/acme/app/pull/3 tanaka";
         let opened = format!(
-            "{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。",
+            "pr-wakeの依頼ID: smoke:acme/app#3\n\n{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。",
             worktree.display()
         );
         assert_eq!(

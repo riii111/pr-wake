@@ -42,14 +42,25 @@ pub(crate) enum ReportReason {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Digest {
     pub(crate) started: Vec<Listed>,
+    // Opened in Codex App with the prompt, which runs only once the owner sends it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) opened: Vec<Listed>,
     pub(crate) reported: Vec<(Listed, ReportReason)>,
     pub(crate) failed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Listed {
+    // A digest saved by an older pr-wake has none, so its PRs are listed without a URL.
+    #[serde(default)]
+    pub(crate) repo: String,
     pub(crate) number: u64,
     pub(crate) title: String,
+    // A digest saved by an older pr-wake has none, so the report says the chat is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,18 +138,27 @@ impl Digest {
     pub(crate) fn subtitle(&self) -> String {
         format!(
             "レビュー {}件",
-            self.started.len() + self.reported.len() + self.failed
+            self.started.len() + self.opened.len() + self.reported.len() + self.failed
         )
     }
 
     // A notification shows a few lines, so the PRs past them are only counted.
     #[must_use]
     pub(crate) fn message(&self) -> String {
-        let mut listed = self.started.iter().map(Listed::line).chain(
-            self.reported
-                .iter()
-                .map(|(pr, reason)| format!("報告のみ: {}（{}）", pr.line(), reason.text())),
-        );
+        let mut listed = self
+            .started
+            .iter()
+            .map(Listed::line)
+            .chain(
+                self.opened
+                    .iter()
+                    .map(|pr| format!("送信待ち: {}", pr.line())),
+            )
+            .chain(
+                self.reported
+                    .iter()
+                    .map(|(pr, reason)| format!("報告のみ: {}（{}）", pr.line(), reason.text())),
+            );
         let mut lines = listed.by_ref().take(MAX_LISTED).collect::<Vec<_>>();
         let rest = listed.count();
         if rest > 0 {
@@ -149,15 +169,85 @@ impl Digest {
         }
         lines.join("\n")
     }
+
+    // The report chat reads each review chat itself, so a review still running when the report starts is waited for.
+    #[must_use]
+    pub(crate) fn report_prompt(&self) -> String {
+        let mut lines = vec![
+            "pr-wakeがまとめて始めたPRレビューの結果を報告してください。".to_owned(),
+            String::new(),
+            "レビューのスレッドをcodex_appのread_threadで読み、今回の依頼のターンの最終回答から判定と要点を取り出してください。".to_owned(),
+            "スレッドには前回のレビューや別の会話も残るため、依頼文の先頭行が「pr-wakeの依頼ID: <下記の依頼ID>」のターンを今回の依頼とします。".to_owned(),
+            "依頼文はターンの出力（functionCallOutput）に入るので、read_threadはincludeOutputs: trueで呼んでください。".to_owned(),
+            "そのターンが終わっていなければ、wait_threadsで終わるまで待ってください。".to_owned(),
+            "PRへの投稿や、レビューのスレッドへの送信はしないでください。".to_owned(),
+            String::new(),
+            "PRごとに、PRへのリンク、判定（LGTM・修正必要など）、1〜2行の要点、`[スレッド](codex://threads/<スレッドID>)`の形のリンクを書いてください。".to_owned(),
+        ];
+        if !self.started.is_empty() {
+            lines.push(String::new());
+            lines.push("レビューしたPR:".to_owned());
+            lines.extend(self.started.iter().map(|pr| {
+                let chat = pr.chat.as_deref().map_or_else(
+                    || "スレッドID不明（判定は読まずに、スレッドが分からないと書く）".to_owned(),
+                    |chat| format!("スレッドID {chat}"),
+                );
+                let request = pr
+                    .request
+                    .as_deref()
+                    .map_or_else(String::new, |request| format!("、依頼ID {request}"));
+                format!("- {} {chat}{request}", pr.link())
+            }));
+        }
+        if !self.opened.is_empty() {
+            lines.push(String::new());
+            lines.push(
+                "スレッドを作れず、Codex Appに入力済みの新規スレッドを開いただけのPR（Enterで送るまでレビューは始まらないと書く）:"
+                    .to_owned(),
+            );
+            lines.extend(self.opened.iter().map(|pr| format!("- {}", pr.link())));
+        }
+        if !self.reported.is_empty() {
+            lines.push(String::new());
+            lines.push("レビューを始めず、報告だけにしたPR:".to_owned());
+            lines.extend(
+                self.reported
+                    .iter()
+                    .map(|(pr, reason)| format!("- {}（{}）", pr.link(), reason.text())),
+            );
+        }
+        if self.failed > 0 {
+            lines.push(String::new());
+            lines.push(format!(
+                "開始できなかった依頼が{}件あります。理由は`pr-wake review logs`で確認できると添えてください。",
+                self.failed
+            ));
+        }
+        lines.join("\n")
+    }
 }
 
 impl Listed {
     #[must_use]
     pub(crate) fn of(found: &Found) -> Self {
         Self {
+            repo: found.repo.clone(),
             number: found.number,
             title: found.title.clone(),
+            chat: None,
+            request: None,
         }
+    }
+
+    fn link(&self) -> String {
+        let title = one_line(&self.title);
+        if self.repo.is_empty() {
+            return format!("#{} {title}", self.number);
+        }
+        format!(
+            "[#{} {title}](https://github.com/{}/pull/{})",
+            self.number, self.repo, self.number
+        )
     }
 
     fn line(&self) -> String {
@@ -339,21 +429,22 @@ mod tests {
                 "started_and_reported",
                 Digest {
                     started: vec![listed(12, "Fix\nthe bug")],
+                    opened: vec![listed(13, "Opened")],
                     reported: vec![
                         (listed(33344, "Add a job"), ReportReason::ManyReviewers),
                         (listed(7, "Rename"), ReportReason::ApprovedByOther),
                     ],
                     failed: 0,
                 },
-                "レビュー 3件",
-                "#12 Fix the bug\n報告のみ: #33344 Add a job（3人以上を指名）\n報告のみ: #7 Rename（他の人が承認済み）",
+                "レビュー 4件",
+                "#12 Fix the bug\n送信待ち: #13 Opened\n報告のみ: #33344 Add a job（3人以上を指名）\n報告のみ: #7 Rename（他の人が承認済み）",
             ),
             (
                 "long_title_and_failures",
                 Digest {
                     started: vec![listed(1, &"a".repeat(31))],
-                    reported: Vec::new(),
                     failed: 2,
+                    ..Digest::default()
                 },
                 "レビュー 3件",
                 &format!("#1 {}…\n開始できず: 2件", "a".repeat(29)),
@@ -362,8 +453,7 @@ mod tests {
                 "more_than_fit",
                 Digest {
                     started: (1..=7).map(|number| listed(number, "T")).collect(),
-                    reported: Vec::new(),
-                    failed: 0,
+                    ..Digest::default()
                 },
                 "レビュー 7件",
                 "#1 T\n#2 T\n#3 T\n#4 T\n#5 T\nほか2件",
@@ -372,6 +462,54 @@ mod tests {
             assert_eq!(digest.subtitle(), subtitle, "case: {name}");
             assert_eq!(digest.message(), message, "case: {name}");
         }
+    }
+
+    #[test]
+    fn report_prompt_links_each_pr_and_its_review_chat() {
+        let digest = Digest {
+            started: vec![
+                Listed {
+                    chat: Some("chat-12".to_owned()),
+                    request: Some("acme/app#12@30".to_owned()),
+                    ..listed(12, "Fix\nthe bug")
+                },
+                listed(14, "Saved before"),
+            ],
+            opened: vec![listed(13, "Opened")],
+            reported: vec![(listed(7, "Rename"), ReportReason::ApprovedByOther)],
+            failed: 1,
+        };
+
+        let prompt = digest.report_prompt();
+
+        for expected in [
+            "- [#12 Fix the bug](https://github.com/acme/app/pull/12) スレッドID chat-12、依頼ID acme/app#12@30",
+            "- [#14 Saved before](https://github.com/acme/app/pull/14) スレッドID不明",
+            "Enterで送るまでレビューは始まらないと書く）:\n- [#13 Opened](https://github.com/acme/app/pull/13)",
+            "- [#7 Rename](https://github.com/acme/app/pull/7)（他の人が承認済み）",
+            "開始できなかった依頼が1件あります。",
+            "依頼文の先頭行が「pr-wakeの依頼ID: <下記の依頼ID>」のターン",
+            "read_threadはincludeOutputs: trueで呼んでください。",
+        ] {
+            assert!(prompt.contains(expected), "{expected} in {prompt}");
+        }
+    }
+
+    #[test]
+    fn report_prompt_omits_the_empty_groups() {
+        let digest = Digest {
+            reported: vec![(listed(7, "Rename"), ReportReason::ManyReviewers)],
+            ..Digest::default()
+        };
+
+        let prompt = digest.report_prompt();
+
+        assert!(!prompt.contains("レビューしたPR:"), "{prompt}");
+        assert!(!prompt.contains("Enterで送る"), "{prompt}");
+        assert!(!prompt.contains("開始できなかった"), "{prompt}");
+        assert!(
+            prompt.contains("- [#7 Rename](https://github.com/acme/app/pull/7)（3人以上を指名）")
+        );
     }
 
     fn batches() -> Batches {
@@ -390,8 +528,11 @@ mod tests {
 
     fn listed(number: u64, title: &str) -> Listed {
         Listed {
+            repo: "acme/app".to_owned(),
             number,
             title: title.to_owned(),
+            chat: None,
+            request: None,
         }
     }
 }
