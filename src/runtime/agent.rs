@@ -38,10 +38,6 @@ pub(crate) const WATCH: Agent = Agent {
     kept: "config, state and logs are kept",
 };
 
-// The agents of the tools pr-wake replaced, removed at install so two never send the same news.
-pub(crate) const LEGACY_REVIEW: &str = "io.github.riii111.review-notifier";
-pub(crate) const LEGACY_WATCH: &str = "io.github.riii111.pr-watch";
-
 const UNLOAD_WAIT: Duration = Duration::from_secs(10);
 const UNLOAD_CHECK: Duration = Duration::from_millis(100);
 
@@ -88,14 +84,6 @@ pub(crate) fn uninstall(agent: Agent, home: &Path) -> Result<(), String> {
     remove(agent.label, home)?;
     output::write_stdout(&format!("{}\n", agent.kept));
     Ok(())
-}
-
-pub(crate) fn remove_legacy(label: &str, home: &Path) -> Result<(), String> {
-    if plist_path(label, home).exists() {
-        remove(label, home)
-    } else {
-        Ok(())
-    }
 }
 
 pub(crate) fn start(agent: Agent, home: &Path) -> Result<(), String> {

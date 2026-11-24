@@ -220,7 +220,6 @@ pub(crate) fn install(env: Env<'_>) -> Result<(), String> {
     run(Mode::DryRun(Vec::new()), env).map_err(|failure| failure.to_string())?;
 
     let home = home_of(env).ok_or("the home directory is unknown")?;
-    agent::remove_legacy(agent::LEGACY_WATCH, &home)?;
     agent::install(agent::WATCH, &home, agent::user().as_deref(), env)
 }
 

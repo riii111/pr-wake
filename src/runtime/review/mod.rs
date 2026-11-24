@@ -349,7 +349,6 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
     }
     // The config is checked before the running agent stops, so a bad config leaves it running.
     check_from_terminal(config, env)?;
-    agent::remove_legacy(agent::LEGACY_REVIEW, &env.home)?;
     agent::install(agent::REVIEW, &env.home, env.user.as_deref(), &|name| {
         env::var_os(name)
     })
