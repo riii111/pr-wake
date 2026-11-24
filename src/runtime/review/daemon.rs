@@ -2100,6 +2100,31 @@ mod tests {
     }
 
     #[test]
+    fn stop_during_a_batch_leaves_the_later_requests_queued() {
+        let mut fixture = Fixture::batched();
+        let web = fixture.home.path().join("src").join("web");
+        fixture
+            .config
+            .repositories
+            .insert("acme/web".to_owned(), web);
+        fixture.save_queued_in(&[("acme/app", 1, 10), ("acme/web", 2, 20)]);
+        fixture.answer_with("gh api repos/acme/app/pulls/1", |call| {
+            call.stop.request();
+            Err("stopped".to_owned())
+        });
+        review_record::request_now(&fixture.paths, &NowRequest { pr: None }, Timestamp::now())
+            .expect("ask for the batch");
+
+        fixture.take_selections();
+
+        assert_eq!(
+            ["acme/app#1@10", "acme/web#2@20"].map(|key| fixture.status(key)),
+            [Status::Failed, Status::Queued]
+        );
+        assert!(fixture.opened().is_empty() && fixture.started().is_empty());
+    }
+
+    #[test]
     fn review_now_starts_the_queued_requests_or_one_pr_whatever_its_reviewers() {
         for (name, pr, expected) in [
             ("queued", None, [Status::Launched, Status::Reported]),
