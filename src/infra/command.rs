@@ -296,6 +296,9 @@ fn wait_for_end(
     let mut termination: Option<(Termination, Instant)> = None;
     let mut killed = false;
     loop {
+        // Read before the ends already signaled are taken, so a command that ended before the deadline is never judged timed out.
+        let now = Instant::now();
+        streams.take_ends();
         // Reaping releases the group ID, so the child is reaped only after its streams close or are given up on.
         if streams.are_closed()
             && let Some(status) = reap(child)?
@@ -306,7 +309,6 @@ fn wait_for_end(
             });
         }
 
-        let now = Instant::now();
         match termination {
             None => {
                 let cause = if stop.is_requested() {
@@ -399,9 +401,20 @@ impl Streams {
         self.open == 0
     }
 
-    // Returns early when a stream closes or the child exits.
+    fn take_ends(&mut self) {
+        while let Ok(end) = self.ends.try_recv() {
+            self.count(&end);
+        }
+    }
+
     fn wait(&mut self, limit: Duration) {
-        if matches!(self.ends.recv_timeout(limit), Ok(End::Stream)) {
+        if let Ok(end) = self.ends.recv_timeout(limit) {
+            self.count(&end);
+        }
+    }
+
+    const fn count(&mut self, end: &End) {
+        if matches!(end, End::Stream) {
             self.open -= 1;
         }
     }
@@ -554,6 +567,37 @@ mod tests {
         };
         assert_eq!(status.signal(), Some(libc::SIGKILL));
         assert!(error.started());
+    }
+
+    // The wait starts past its deadline, as when its thread resumes late, with every end already signaled.
+    #[test]
+    fn command_that_ended_before_a_passed_deadline_keeps_its_output() {
+        let command = shell("printf out; exit 3", TEN_SECONDS);
+        let mut child = command.spawn().expect("run sh");
+        let mut streams = Streams::start(&mut child, None);
+        let (exit, exited) = mpsc::channel();
+        notify_exit(child.id(), exit);
+        exited.recv().expect("wait for the exit");
+        let closing = Instant::now() + TEN_SECONDS;
+        while !(streams.stdout.is_finished() && streams.stderr.is_finished()) {
+            assert!(Instant::now() < closing, "the streams never closed");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let ending = wait_for_end(
+            &mut child,
+            &mut streams,
+            Instant::now(),
+            TEN_SECONDS,
+            &StopRequest::default(),
+        )
+        .expect("wait for the end");
+
+        let Ending::Finished(status) = ending else {
+            panic!("a command that had ended was stopped");
+        };
+        assert_eq!(status.code(), Some(3));
+        assert_eq!(streams.collect().expect("collect the output").0, b"out");
     }
 
     #[test]
