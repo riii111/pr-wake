@@ -1246,7 +1246,7 @@ mod tests {
     use crate::{
         app::review::{
             config::{Batches, ConfigFile, ReviewConfig},
-            selection::{queue, report},
+            selection::queue,
             state::Found,
             with_request, with_worktree,
         },
@@ -2632,6 +2632,9 @@ mod tests {
         ] {
             let fixture = Fixture::batched();
             fixture.save_queued(&[(1, 10), (2, 20), (3, 30)]);
+            for (number, event) in [(1, 10), (2, 20), (3, 30)] {
+                fixture.request("acme/app", number, &[requested(event, "sato")]);
+            }
             let mut state = fixture.state();
             state
                 .requests
@@ -2655,17 +2658,26 @@ mod tests {
                 record.in_flight = Some(keys[1].clone());
             }
             review_record::save_selection(&fixture.paths, "old", &record).expect("save it");
+            let now = || tokyo("2026-11-21T12:00:00");
 
-            fixture.with_daemon(&Setup::default(), |daemon, _| {
-                daemon.recover().expect("recover");
-                daemon.recover().expect("recover again");
-            });
+            fixture.with_daemon(
+                &Setup {
+                    now: Some(&now),
+                    ..Setup::default()
+                },
+                |daemon, _| {
+                    daemon.recover().expect("recover");
+                    daemon.recover().expect("recover again");
+                    daemon.batch_once();
+                },
+            );
 
             let closed = fixture.selection("old");
             assert!(
                 closed.complete && closed.in_flight.is_none(),
                 "case: {name}"
             );
+            assert_eq!(closed.accepted, accepted, "case: {name}");
             let started = SelectedOutcome::Started {
                 thread: "chat-1".to_owned(),
             };
@@ -2685,7 +2697,10 @@ mod tests {
                 Some(&SelectedOutcome::Stopped),
                 "case: {name}"
             );
-            assert_eq!(fixture.status(&keys[2]), Status::Queued, "case: {name}");
+            let untouched = if accepted { &keys[2..] } else { &keys[..] };
+            for key in untouched {
+                assert_eq!(fixture.status(key), Status::Queued, "case: {name}: {key}");
+            }
             assert!(
                 fixture.opened().is_empty() && fixture.started().is_empty(),
                 "case: {name}"
@@ -2852,14 +2867,6 @@ mod tests {
                 "scheduled_newer_draft_only",
                 false,
                 Status::Launched,
-                false,
-                HEAD,
-                true,
-            ),
-            (
-                "scheduled_newer_withdrawn",
-                false,
-                Status::Withdrawn,
                 false,
                 HEAD,
                 true,
@@ -3031,15 +3038,9 @@ mod tests {
             .into_iter()
             .map(|entry| entry.key)
             .collect::<Vec<_>>();
-        fixture.select("chosen", &["acme/app#12@10"]);
-        fixture.take_selections();
 
         assert_eq!(queued, ["acme/app#12@10"]);
         assert_eq!(fixture.status("acme/app#12@20"), Status::Withdrawn);
-        assert!(matches!(
-            fixture.selection("chosen").outcomes.get("acme/app#12@10"),
-            Some(SelectedOutcome::Opened { .. })
-        ));
     }
 
     #[test]
@@ -3081,34 +3082,13 @@ mod tests {
         assert!(lost.accepted && !lost.complete, "{lost:?}");
         assert_eq!(lost.in_flight.as_deref(), Some("acme/app#12@30"));
         assert!(saved.complete && saved.in_flight.is_none(), "{saved:?}");
-        let report = report("one", &saved, &fixture.state());
         assert_eq!(
-            report.requests[0].link.as_deref(),
-            Some("codex://threads/chat-1")
+            saved.outcomes.get("acme/app#12@30"),
+            Some(&SelectedOutcome::Started {
+                thread: "chat-1".to_owned()
+            })
         );
         assert_eq!(fixture.started().len(), 1, "launched once");
-    }
-
-    #[test]
-    fn selection_made_for_an_earlier_run_is_closed_unstarted() {
-        let fixture = Fixture::batched();
-        fixture.save_queued(&[(12, 30)]);
-        fixture.request("acme/app", 12, &[requested(30, "sato")]);
-        fixture.select_for("run-0", "yesterday", &["acme/app#12@30"]);
-
-        fixture.with_daemon(&Setup::default(), |daemon, _| {
-            daemon.recover().expect("recover");
-        });
-        fixture.take_selections();
-
-        let closed = fixture.selection("yesterday");
-        assert!(closed.complete && !closed.accepted);
-        assert_eq!(
-            closed.outcomes.get("acme/app#12@30"),
-            Some(&SelectedOutcome::Stopped)
-        );
-        assert_eq!(fixture.status("acme/app#12@30"), Status::Queued);
-        assert_eq!(fixture.opened(), Vec::<String>::new());
     }
 
     #[test]

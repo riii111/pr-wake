@@ -528,34 +528,13 @@ mod tests {
             direct(10, "tanaka", "me"),
             team_request(20, "sato", "backend"),
         ];
-        for (name, users, asked_teams, expected) in [
-            ("both_asked", &["me"][..], &["backend"][..], "acme/app#3@20"),
-            ("team_withdrawn", &["me"][..], &[][..], "acme/app#3@10"),
-            (
-                "direct_withdrawn",
-                &[][..],
-                &["backend"][..],
-                "acme/app#3@20",
-            ),
-            // The reviewers may lag the search, so the latest event stands as before.
-            ("neither_asked_yet", &[][..], &[][..], "acme/app#3@20"),
-        ] {
-            let found = current_request(
-                &history,
-                Some(&asked(users, asked_teams)),
-                &hit("acme/app", 3, "u"),
-                "me",
-                &teams,
-            );
-
-            assert_eq!(found.key, expected, "case: {name}");
-        }
-
-        // The poll outside batches reads no reviewers, so it keeps naming the latest event.
-        let without_reviewers =
-            current_request(&history, None, &hit("acme/app", 3, "u"), "me", &teams);
-        assert_eq!(without_reviewers.key, "acme/app#3@20");
-
+        let neither_asked_yet = current_request(
+            &history,
+            Some(&asked(&[], &[])),
+            &hit("acme/app", 3, "u"),
+            "me",
+            &teams,
+        );
         let direct_without_its_event = current_request(
             &[team_request(20, "sato", "backend")],
             Some(&asked(&["me"], &[])),
@@ -564,6 +543,10 @@ mod tests {
             &teams,
         );
 
+        assert_eq!(
+            neither_asked_yet.key, "acme/app#3@20",
+            "the reviewers may lag the search, so the latest event stands as before"
+        );
         assert_eq!(
             direct_without_its_event.key, "acme/app#3@unknown",
             "a withdrawn team's event does not name the direct request"

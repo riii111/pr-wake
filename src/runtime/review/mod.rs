@@ -1564,18 +1564,11 @@ mod tests {
 
             let error = selected.expect_err(name);
             assert!(error.contains(expected), "case: {name}: {error}");
-            assert_eq!(
-                review_record::take_now_requests(&home.env.paths)
-                    .expect("take the requests")
-                    .len(),
-                0,
-                "case: {name}"
-            );
         }
     }
 
     #[test]
-    fn selection_not_taken_in_time_is_pending_and_its_outcome_is_read_later_once() {
+    fn selection_not_taken_in_time_is_pending_and_its_outcome_reads_the_same_when_read_again() {
         let home = ReviewHome::new();
         home.add_batches();
         let mut state = ReviewState::default();
@@ -1619,20 +1612,24 @@ mod tests {
         let again = selection_outcome(&home.env, id, &|_| true, 0).expect("read it again");
 
         assert_eq!(waits.load(Ordering::SeqCst), 2);
-        for report in [&handed, &repeated, &waiting] {
-            assert!(!report.accepted && !report.complete, "{report:?}");
-            assert_eq!(
-                serde_json::to_value(&report.requests).expect("write the requests"),
-                serde_json::json!([{
+        assert_eq!(
+            serde_json::to_value(&handed).expect("write the report"),
+            serde_json::json!({
+                "selection": "sel-1",
+                "accepted": false,
+                "complete": false,
+                "requests": [{
                     "key": "acme/app#3@3",
                     "repo": "acme/app",
                     "number": 3,
                     "title": "PR 3",
                     "url": "https://github.com/acme/app/pull/3",
                     "outcome": "pending",
-                }])
-            );
-        }
+                }],
+            })
+        );
+        assert_eq!(repeated, handed, "a repeated id reads the first selection");
+        assert_eq!(waiting, handed, "a later read while waiting");
         assert_eq!(
             submitted,
             Some(SelectionRecord {

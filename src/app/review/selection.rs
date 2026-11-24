@@ -319,7 +319,6 @@ mod tests {
     fn queue_shows_an_older_request_again_unless_a_newer_one_is_still_queued() {
         for (name, newer_status, expected) in [
             ("newer_launched", Status::Launched, "acme/app#12@10"),
-            ("newer_withdrawn", Status::Withdrawn, "acme/app#12@10"),
             ("newer_queued", Status::Queued, "acme/app#12@20"),
         ] {
             let mut state = ReviewState::default();

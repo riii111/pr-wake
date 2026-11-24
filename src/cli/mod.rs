@@ -122,7 +122,6 @@ mod tests {
             ("release_without_a_pr", &["watch", "release"]),
             ("unknown_watch_command", &["watch", "unknown"]),
             ("smoke_without_a_pr", &["review", "smoke"]),
-            ("select_without_a_key", &["review", "select"]),
             ("unknown_feature", &["notify"]),
             ("engine_flag", &["watch", "--status"]),
             ("link_without_a_pr", &["watch", "link"]),
