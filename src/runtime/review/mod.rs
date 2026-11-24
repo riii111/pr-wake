@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use jiff::{Timestamp, Zoned, tz::TimeZone};
+use jiff::{Timestamp, ZonedDateTime, tz::TimeZone};
 use serde_json::Value;
 
 use self::daemon::{Daemon, DaemonDeps};
@@ -889,8 +889,11 @@ fn github<'tools>(tools: &'tools Tools<'_>, stop: &'tools StopRequest) -> GhRest
 }
 
 fn status_text(state: &ReviewState, zone: &TimeZone) -> String {
-    let local =
-        |at: Timestamp, format: &str| at.to_zoned(zone.clone()).strftime(format).to_string();
+    let local = |at: Timestamp, format: &str| {
+        at.to_zoned_datetime(zone.clone())
+            .strftime(format)
+            .to_string()
+    };
     let mut lines = vec![
         format!("login: {}", state.login.as_deref().unwrap_or_default()),
         format!(
@@ -996,7 +999,9 @@ fn print_line(line: &str) {
 
 // launchd sends the agent's standard error to its log.
 fn log_line(message: &str) {
-    let at = Zoned::now().strftime("%Y/%m/%d %H:%M:%S").to_string();
+    let at = ZonedDateTime::now()
+        .strftime("%Y/%m/%d %H:%M:%S")
+        .to_string();
     output::write_stderr(&format!("{at} {message}\n"));
 }
 

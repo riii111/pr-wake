@@ -287,7 +287,7 @@ impl<'deps> Daemon<'deps> {
         }
         self.take_selections();
 
-        let now = (self.deps.now)().to_zoned(self.deps.zone.clone());
+        let now = (self.deps.now)().to_zoned_datetime(self.deps.zone.clone());
         let mut state = self.lock_state();
         if let Some(slot) = due_slot(batches, &now, state.last_batch) {
             // Saved before any review starts, so a restart within the slot does not run it again.
@@ -726,7 +726,7 @@ impl<'deps> Daemon<'deps> {
 
     fn report_digest(&self, pending: &PendingDigest) -> Result<(), String> {
         let tools = self.deps.tools;
-        let ready = pending.ready.to_zoned(self.deps.zone.clone());
+        let ready = pending.ready.to_zoned_datetime(self.deps.zone.clone());
         let title = format!("レビュー報告｜{}", ready.strftime("%m/%d %H:%M"));
         let prompt = pending.digest.report_prompt();
         let created = (tools.create)(

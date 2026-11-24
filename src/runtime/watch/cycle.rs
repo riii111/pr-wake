@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path, process, time::Duration};
 
-use jiff::{Timestamp, Zoned};
+use jiff::{Timestamp, ZonedDateTime};
 
 use super::{
     Failure,
@@ -25,7 +25,7 @@ pub(crate) struct CycleDeps<'deps> {
     pub(crate) paths: &'deps WatchPaths,
     pub(crate) github: &'deps mut dyn GitHub,
     pub(crate) workers: &'deps mut dyn Workers,
-    pub(crate) now: &'deps dyn Fn() -> Zoned,
+    pub(crate) now: &'deps dyn Fn() -> ZonedDateTime,
     pub(crate) log: &'deps dyn Log,
     // Shows the owner a notification with a subtitle and a message, without waiting.
     pub(crate) notify: &'deps dyn Fn(&str, &str) -> Result<(), String>,
@@ -299,7 +299,12 @@ fn apply_summary(
     }
 }
 
-fn deliver(deps: &mut CycleDeps<'_>, config: &WatchConfig, entry: &mut Tracked, now: &Zoned) {
+fn deliver(
+    deps: &mut CycleDeps<'_>,
+    config: &WatchConfig,
+    entry: &mut Tracked,
+    now: &ZonedDateTime,
+) {
     if !watch::awaits_delivery(&entry.state) {
         return;
     }
@@ -2050,7 +2055,7 @@ mod tests {
         fn cycle_over(&self, over: &mut HashSet<String>) {
             let mut github = FakeGitHub(self);
             let mut workers = self.workers();
-            let now = || self.world.borrow().now.to_zoned(TimeZone::UTC);
+            let now = || self.world.borrow().now.to_zoned_datetime(TimeZone::UTC);
             let mut deps = CycleDeps {
                 paths: &self.paths,
                 github: &mut github,
@@ -2074,7 +2079,7 @@ mod tests {
         ) -> Result<(), Failure> {
             let mut github = FakeGitHub(self);
             let mut workers = self.workers();
-            let now = || self.world.borrow().now.to_zoned(TimeZone::UTC);
+            let now = || self.world.borrow().now.to_zoned_datetime(TimeZone::UTC);
             watch_forever(Watch {
                 cycle: CycleDeps {
                     paths: &self.paths,
