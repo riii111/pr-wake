@@ -34,7 +34,8 @@ use crate::{
         },
     },
     infra::{
-        command::ExternalCommand,
+        alerter,
+        command::{ExternalCommand, run_tool},
         gh::GhApi,
         harnexus::{Bridge, CallApp, CallTimeouts, CodexWorkers, call_socket_path},
         record::{BaseDirectories, RecordError, RecordErrorKind},
@@ -130,6 +131,8 @@ struct ReadStatus {
     pending: usize,
     follow_up: usize,
     awaiting_answer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    undelivered_since: Option<String>,
     // The running watch has yet to hand the PR to the chat it is now linked to.
     handing_over: bool,
     checked_at: Option<String>,
@@ -178,6 +181,9 @@ const EXECUTION_ENV: &str = "HARNEXUS_EXECUTION_ENV";
 
 // A PR no watch has linked has no state, so it is shown as a first read and this link time is never used.
 const EPOCH: &str = "1970-01-01T00:00:00.000Z";
+
+// The watch has no command config, and macOS keeps osascript here.
+const OSASCRIPT: &str = "/usr/bin/osascript";
 
 // Well under the one second within which a wait must notice a stop request.
 const STOP_CHECK: Duration = Duration::from_millis(500);
@@ -279,6 +285,9 @@ fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
             workers: &mut workers,
             now: &Zoned::now,
             log: &log,
+            notify: &|subtitle, message| {
+                alerter::notify_outcome(&run_tool, Path::new(OSASCRIPT), subtitle, message, &stop)
+            },
         },
         stop: &stop,
         pause: &mut |wait| pause(&stop, wait),
@@ -487,6 +496,7 @@ fn status(root: &Path) -> Result<StatusOutput, Failure> {
                     pending: state.pending.len(),
                     follow_up: state.follow_up.len(),
                     awaiting_answer: state.delivered.is_some(),
+                    undelivered_since: state.lost_since,
                     checked_at: state.checked_at,
                 }),
             },
@@ -526,8 +536,12 @@ fn status_text(status: &StatusOutput) -> String {
                 } else {
                     ""
                 };
+                let undelivered = read
+                    .undelivered_since
+                    .as_ref()
+                    .map_or_else(String::new, |since| format!(" undelivered since {since}"));
                 format!(
-                    "{} {}{reason} pending={}{awaiting}",
+                    "{} {}{reason} pending={}{awaiting}{undelivered}",
                     read.pr,
                     read.status.name(),
                     read.pending
@@ -1091,6 +1105,21 @@ mod tests {
                     ],
                 ),
                 (
+                    "pr_whose_worker_keeps_missing_messages",
+                    StatusOutput {
+                        sender: Some("chat-1".to_owned()),
+                        sender_error: None,
+                        prs: vec![PrStatus::Read(ReadStatus {
+                            undelivered_since: Some("2026-10-23T12:10:00.000Z".to_owned()),
+                            ..read_status(7, WatchStatus::Watching, None, 0, true)
+                        })],
+                    },
+                    vec![
+                        "https://github.com/org/pay/pull/7 watching pending=0 awaiting answer undelivered since 2026-10-23T12:10:00.000Z",
+                        "sender: chat-1",
+                    ],
+                ),
+                (
                     "unreadable_pr",
                     StatusOutput {
                         sender: Some("chat-1".to_owned()),
@@ -1130,7 +1159,23 @@ mod tests {
             pending: usize,
             awaiting_answer: bool,
         ) -> PrStatus {
-            PrStatus::Read(ReadStatus {
+            PrStatus::Read(read_status(
+                number,
+                status,
+                reason,
+                pending,
+                awaiting_answer,
+            ))
+        }
+
+        fn read_status(
+            number: u64,
+            status: WatchStatus,
+            reason: Option<&str>,
+            pending: usize,
+            awaiting_answer: bool,
+        ) -> ReadStatus {
+            ReadStatus {
                 pr: format!("https://github.com/org/pay/pull/{number}"),
                 worker: format!("w{number}"),
                 status,
@@ -1138,9 +1183,10 @@ mod tests {
                 pending,
                 follow_up: 0,
                 awaiting_answer,
+                undelivered_since: None,
                 handing_over: false,
                 checked_at: None,
-            })
+            }
         }
     }
 
@@ -1187,6 +1233,7 @@ mod tests {
                     workers: &mut workers,
                     now: &now,
                     log: &log,
+                    notify: &|_, _| Ok(()),
                 },
                 stop: &stop,
                 pause: &mut |_| {},

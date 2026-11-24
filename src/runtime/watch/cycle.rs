@@ -27,6 +27,8 @@ pub(crate) struct CycleDeps<'deps> {
     pub(crate) workers: &'deps mut dyn Workers,
     pub(crate) now: &'deps dyn Fn() -> Zoned,
     pub(crate) log: &'deps dyn Log,
+    // Shows the owner a notification with a subtitle and a message, without waiting.
+    pub(crate) notify: &'deps dyn Fn(&str, &str) -> Result<(), String>,
 }
 
 pub(crate) struct Watch<'deps> {
@@ -331,18 +333,38 @@ fn deliver(deps: &mut CycleDeps<'_>, config: &WatchConfig, entry: &mut Tracked, 
                 .with("pr", entry.link.url.as_str())
                 .with("reason", entry.state.reason.clone()),
         ),
-        Delivery::Hold(note) => log_answer(deps.log, &entry.link.url, note),
+        Delivery::Hold(note) => tell_answer(deps, entry, note),
         Delivery::Send(note) => {
-            log_answer(deps.log, &entry.link.url, note);
+            tell_answer(deps, entry, note);
             send(deps, config, entry, &sender, now.timestamp());
         }
     }
 }
 
-fn log_answer(log: &dyn Log, pr: &str, note: Option<AnswerNote>) {
+const LOST_NOTICE: &str = "ワーカーが通知を受け取れなかったため、届かなかった指摘を送り直します";
+
+fn tell_answer(deps: &CycleDeps<'_>, entry: &Tracked, note: Option<AnswerNote>) {
+    let (log, pr) = (deps.log, entry.link.url.as_str());
     match note {
         None => {}
-        Some(AnswerNote::NotSeen) => log.write(Entry::new("answer_not_seen").with("pr", pr)),
+        Some(AnswerNote::NotSeen { requeued, first }) => {
+            log.write(
+                Entry::new("answer_not_seen")
+                    .with("pr", pr)
+                    .with("requeued", requeued),
+            );
+            // Later losses in a row only repeat what the owner was told, so only the first is shown.
+            if first {
+                let subtitle = format!("{} #{}", entry.link.pr.repo, entry.link.pr.number);
+                if let Err(error) = (deps.notify)(&subtitle, LOST_NOTICE) {
+                    log.write(
+                        Entry::new("notify_failed")
+                            .with("pr", pr)
+                            .with("error", error),
+                    );
+                }
+            }
+        }
         Some(AnswerNote::Incomplete { missing }) => log.write(
             Entry::new("answer_incomplete")
                 .with("pr", pr)
@@ -478,6 +500,7 @@ mod tests {
         world: RefCell<World>,
         calls: RefCell<Calls>,
         logs: Recorded,
+        notices: RefCell<Vec<(String, String)>>,
     }
 
     #[derive(Default)]
@@ -1441,6 +1464,87 @@ mod tests {
         }
     }
 
+    mod lost_message {
+        use super::*;
+
+        #[test]
+        fn message_an_idle_worker_never_started_goes_again_and_the_owner_is_told_once() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            fixture.later(9);
+            fixture.cycle();
+            let waited = fixture.sent().len();
+
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(waited, 1);
+            assert_eq!(fixture.sent().len(), 2);
+            assert!(fixture.prompt(1).contains("discussion_r1"));
+            assert!(
+                fixture.logged("answer_not_seen")[0]
+                    .fields
+                    .contains(&("requeued", json!(1)))
+            );
+            assert_eq!(
+                *fixture.notices.borrow(),
+                [("org/pay #7".to_owned(), LOST_NOTICE.to_owned())]
+            );
+            assert_eq!(
+                fixture.state().lost_since.as_deref(),
+                Some("2026-10-23T12:10:00.000Z")
+            );
+        }
+
+        #[test]
+        fn worker_that_keeps_missing_messages_is_tried_less_often_until_it_answers() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+            fixture.later(10);
+            fixture.cycle();
+            fixture.later(29);
+            fixture.cycle();
+            let waited = fixture.sent().len();
+
+            fixture.later(1);
+            fixture.cycle();
+            let third = fixture.prompt(2);
+            fixture.update(|world| {
+                world.turns = vec![delegated_turn(
+                    world.now,
+                    &third,
+                    &format!("{PR}#discussion_r1 直す"),
+                    "reviewer",
+                )];
+            });
+            fixture.later(1);
+            fixture.cycle();
+
+            assert_eq!(waited, 2);
+            assert_eq!(fixture.sent().len(), 3);
+            assert_eq!(fixture.notices.borrow().len(), 1);
+            let after = fixture.state();
+            assert_eq!((after.delivered, after.lost_since), (None, None));
+        }
+
+        #[test]
+        fn busy_worker_is_awaited_past_the_time_an_idle_one_is_given_up_on() {
+            let fixture = Fixture::new(json!({}), Read::Again, "worker");
+            fixture.update(|world| world.comments = vec![comment()]);
+            fixture.cycle();
+
+            fixture.update(|world| world.active = true);
+            fixture.later(60);
+            fixture.cycle();
+
+            assert_eq!(fixture.sent().len(), 1);
+            assert!(fixture.state().delivered.is_some());
+            assert!(fixture.notices.borrow().is_empty());
+        }
+    }
+
     mod hand_over {
         use super::*;
 
@@ -1750,6 +1854,7 @@ mod tests {
                 }),
                 calls: RefCell::new(Calls::default()),
                 logs: Recorded::default(),
+                notices: RefCell::default(),
             };
 
             fixture.link_to(worker);
@@ -1801,6 +1906,10 @@ mod tests {
                 workers: &mut workers,
                 now: &now,
                 log: &self.logs,
+                notify: &|subtitle, message| {
+                    self.notify(subtitle, message);
+                    Ok(())
+                },
             };
 
             run_cycle(&mut deps, over).expect("the cycle runs");
@@ -1822,12 +1931,22 @@ mod tests {
                     workers: &mut workers,
                     now: &now,
                     log: &self.logs,
+                    notify: &|subtitle, message| {
+                        self.notify(subtitle, message);
+                        Ok(())
+                    },
                 },
                 stop,
                 pause,
                 replaced,
                 ended: &|| None,
             })
+        }
+
+        fn notify(&self, subtitle: &str, message: &str) {
+            self.notices
+                .borrow_mut()
+                .push((subtitle.to_owned(), message.to_owned()));
         }
 
         // The real workers of both apps, with the app and the t3 CLI answering from the world.
