@@ -1908,21 +1908,21 @@ mod tests {
         });
         let clock = Mutex::new(tokyo("2026-11-18T10:51:00"));
         let now = || *clock.lock().expect("read the clock");
+        let setup = Setup {
+            now: Some(&now),
+            ..Setup::default()
+        };
 
-        let shown_before_the_ready_time = fixture.with_daemon(
-            &Setup {
-                now: Some(&now),
-                ..Setup::default()
-            },
-            |daemon, _| {
-                daemon.batch_once();
-                let shown = fixture.count_calls("osascript ");
-                *clock.lock().expect("move the clock") = tokyo("2026-11-18T11:00:00");
-                daemon.batch_once();
-                daemon.batch_once();
-                shown
-            },
-        );
+        fixture.with_daemon(&setup, |daemon, _| daemon.batch_once());
+        *clock.lock().expect("move the clock") = tokyo("2026-11-18T10:55:00");
+        let shown_before_the_ready_time = fixture.with_daemon(&setup, |daemon, _| {
+            daemon.batch_once();
+            let shown = fixture.count_calls("osascript ");
+            *clock.lock().expect("move the clock") = tokyo("2026-11-18T11:00:00");
+            daemon.batch_once();
+            daemon.batch_once();
+            shown
+        });
 
         let statuses = [
             "acme/app#1@10",

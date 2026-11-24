@@ -402,6 +402,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn check_v1_accepts_a_bridge_offering_the_watch_tools() {
+        let bridge = v1_bridge(|_| None);
+
+        assert_eq!(client(&bridge, QUICK).check_v1(), Ok(()));
+    }
+
     #[rstest]
     #[case::without_send(
         json!({ "version": 1, "outcome": "done", "operations": ["read_thread"] }),

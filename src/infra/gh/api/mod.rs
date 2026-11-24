@@ -452,6 +452,13 @@ mod tests {
                 ("issue:31", "coderabbitai[bot]", None, false, false, false),
             ]
         );
+        // An issue comment has no state, so asking for one would fail the whole query.
+        assert!(posts[0].query.contains(
+            "reviews(first: 100) { nodes { databaseId url createdAt body author { __typename login } state }"
+        ));
+        assert!(posts[0].query.contains(
+            "comments(first: 100) { nodes { databaseId url createdAt body author { __typename login } }"
+        ));
         assert_eq!(
             detail.failed_required,
             [

@@ -668,6 +668,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_login_is_not_an_account() {
+        let gh = FakeGh::answering(r#"{"login":""}"#.to_owned());
+
+        let login = gh.rest(|rest| rest.current_login());
+
+        assert!(login.is_err(), "{login:?}");
+    }
+
     impl FakeGh {
         fn answering(output: String) -> Self {
             Self {

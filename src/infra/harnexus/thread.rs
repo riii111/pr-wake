@@ -609,6 +609,7 @@ mod tests {
     #[rstest]
     #[case::done("done", SendOutcome::Done)]
     #[case::not_sent("not_sent", SendOutcome::NotSent)]
+    #[case::invalid("invalid", SendOutcome::NotSent)]
     #[case::unsupported("unsupported", SendOutcome::NotSent)]
     #[case::unknown(
         "unknown",

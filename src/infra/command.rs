@@ -558,13 +558,19 @@ mod tests {
         let timeout = Duration::from_secs(1);
         let script = format!(r#"sh -c '{WRITE_PID}; exec sleep 60' sh "$1" & echo started"#);
         let command = shell(&script, timeout).arguments([&ready]);
+        let started_at = Instant::now();
 
         let error = command.run(&StopRequest::default()).expect_err("timed out");
 
+        let waited = started_at.elapsed();
         let CommandErrorKind::Terminated { cause, .. } = error.kind else {
             panic!("expected a termination, got {error:?}");
         };
         assert_eq!(cause, Termination::Timeout(timeout));
+        assert!(
+            waited < timeout + Duration::from_secs(1),
+            "returned {waited:?} after the start"
+        );
         wait_until_gone(read_pid(&ready));
     }
 

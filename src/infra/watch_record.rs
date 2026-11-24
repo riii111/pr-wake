@@ -346,6 +346,11 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("load every state");
         let sender = load_sender(root.path()).expect("load the sender");
+        let mixed_case = PrRef {
+            repo: "ORG/Pay".to_owned(),
+            number: 9,
+        };
+        let found = load_link(root.path(), &mixed_case).expect("load the link");
 
         assert_eq!(
             loaded,
@@ -362,6 +367,7 @@ mod tests {
             ]
         );
         assert_eq!(sender.as_deref(), Some("sender-chat"));
+        assert_eq!(found.map(|link| link.worker).as_deref(), Some("w9"));
     }
 
     #[test]

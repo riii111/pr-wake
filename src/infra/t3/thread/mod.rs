@@ -373,6 +373,11 @@ mod tests {
                     "not_sent",
                 ),
                 (
+                    "sandbox_blocks_the_port",
+                    ran(1, "", "Failed to reserve loopback port\nlisten EPERM"),
+                    "not_sent",
+                ),
+                (
                     "after_reaching_the_server",
                     ran(
                         1,
