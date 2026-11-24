@@ -10,7 +10,7 @@ use crate::{
         inbox::InboxThread,
         is_repo_name,
         notice::Size,
-        request::{ReviewRequest, SearchHit},
+        request::{LiveRequest, ReviewRequest, SearchHit},
     },
     infra::{
         command::{RunTool, ToolCall},
@@ -73,6 +73,15 @@ struct Pull {
     html_url: String,
     head: Head,
     base: Base,
+}
+
+#[derive(Deserialize)]
+struct PullRequested {
+    state: String,
+    #[serde(default)]
+    requested_reviewers: Vec<Account>,
+    #[serde(default)]
+    requested_teams: Vec<Team>,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +262,25 @@ impl GhRest<'_> {
             url: pull.html_url,
             head_sha: pull.head.sha,
             base_ref: pull.base.name,
+        })
+    }
+
+    pub(crate) fn live_request(&self, repo: &str, number: u64) -> Result<LiveRequest, String> {
+        let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
+        let pull = serde_json::from_slice::<PullRequested>(&output)
+            .map_err(|error| format!("review requests of {repo}#{number}: {error}"))?;
+        Ok(LiveRequest {
+            open: pull.state == "open",
+            users: pull
+                .requested_reviewers
+                .into_iter()
+                .map(|account| account.login)
+                .collect(),
+            teams: pull
+                .requested_teams
+                .into_iter()
+                .map(|team| team.slug)
+                .collect(),
         })
     }
 

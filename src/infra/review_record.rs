@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process,
+    time::SystemTime,
 };
 
 use jiff::Timestamp;
@@ -15,6 +16,7 @@ use crate::app::{
     review::{
         batch::NowRequest,
         config::{ConfigFile, ReviewConfig},
+        selection::SelectionRecord,
         state::ReviewState,
     },
     watch::pr::PrRef,
@@ -40,6 +42,13 @@ const STATE: &str = "state.json";
 const LOCK: &str = "lock";
 const CHATS: &str = "chats";
 const NOW: &str = "now";
+const SELECTIONS: &str = "selections";
+const RUN: &str = "run.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Run {
+    id: String,
+}
 
 impl ReviewPaths {
     #[must_use]
@@ -154,6 +163,81 @@ pub(crate) fn take_now_requests(
             request
         })
         .collect())
+}
+
+// The caller of a selection waits on its own file, which the running review rewrites as each request ends.
+pub(crate) fn save_selection(
+    paths: &ReviewPaths,
+    id: &str,
+    record: &SelectionRecord,
+) -> Result<(), RecordError> {
+    record::save_json(
+        &selection_path(paths, id),
+        record,
+        JsonLayout::TwoSpacesAndNewline,
+    )
+}
+
+pub(crate) fn load_selection(
+    paths: &ReviewPaths,
+    id: &str,
+) -> Result<Option<SelectionRecord>, RecordError> {
+    record::load_json(&selection_path(paths, id))
+}
+
+// `false` when a record of the id exists, which is left untouched so a repeated id never replaces its receipt.
+pub(crate) fn create_selection(
+    paths: &ReviewPaths,
+    id: &str,
+    record: &SelectionRecord,
+) -> Result<bool, RecordError> {
+    record::save_new_json(
+        &selection_path(paths, id),
+        record,
+        JsonLayout::TwoSpacesAndNewline,
+    )
+}
+
+pub(crate) fn remove_selection(paths: &ReviewPaths, id: &str) -> Result<(), RecordError> {
+    record::remove_record(&selection_path(paths, id))
+}
+
+// The ids of the recorded selections, with when each record was last written.
+pub(crate) fn selection_ids(
+    paths: &ReviewPaths,
+) -> Result<Vec<(String, Option<SystemTime>)>, RecordError> {
+    let directory = paths.state.join(SELECTIONS);
+    let names = record::list_directory(&directory)?.unwrap_or_default();
+    Ok(names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.into_string().ok()?;
+            let id = name
+                .strip_suffix(".json")
+                .filter(|id| !id.starts_with('.'))?;
+            let written = fs::metadata(directory.join(&name))
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            Some((id.to_owned(), written))
+        })
+        .collect())
+}
+
+// Written by each review as it starts, so a selection names the run it was handed to.
+pub(crate) fn record_run(paths: &ReviewPaths, run: &str) -> Result<(), RecordError> {
+    record::save_json(
+        &paths.state.join(RUN),
+        &Run { id: run.to_owned() },
+        JsonLayout::TwoSpacesAndNewline,
+    )
+}
+
+pub(crate) fn load_run(paths: &ReviewPaths) -> Result<Option<String>, RecordError> {
+    Ok(record::load_json::<Run>(&paths.state.join(RUN))?.map(|run| run.id))
+}
+
+fn selection_path(paths: &ReviewPaths, id: &str) -> PathBuf {
+    paths.state.join(SELECTIONS).join(format!("{id}.json"))
 }
 
 fn chat_path(paths: &ReviewPaths, repo: &str, number: u64) -> PathBuf {

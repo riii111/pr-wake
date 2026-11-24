@@ -157,6 +157,21 @@ Skillは、紐づけたPRの再依頼なら前回と同じもの、それ以外�
 
 `pr-wake review status`では、ためている依頼を`queued`、報告だけにした依頼を`reported`と表示する。
 
+#### ためた依頼から選んで始める
+
+`pr-wake review list`で、ためている依頼の一覧を表示する。
+Codex Appの会話で`$pr-wake-review-queue`を使うと、PRごとの変更の要約つきで一覧を示し、選んだ依頼のレビューを始めて、開始したチャットのリンクを返す。
+選んだ依頼も、決まった時刻と同じ人数の基準で、始めるか報告だけにするかを決める。
+起動結果はSkillを使った会話へまとめて返す。
+一覧を出した後に取り下げられた依頼や、すでに始めた依頼は始めない。
+
+このSkillはリポジトリの`.agents/skills`にある。
+ほかのプロジェクトの会話でも使うには、`~/.codex/skills`へリンクを張る。
+
+```bash
+ln -s "$PWD/.agents/skills/pr-wake-review-queue" ~/.codex/skills/
+```
+
 #### GitHubの通知
 
 `batches`を書くと、受け付けたPRのGitHub通知を整理する。

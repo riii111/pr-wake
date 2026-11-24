@@ -55,6 +55,10 @@ pub(crate) struct Request {
     pub(crate) worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    // Whether a chat confirmed the review started or the linked chat took it, so a draft left in a composer proves nothing.
+    // `None` on a record written before it, whose proof is inferred from what that version saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) review_started: Option<bool>,
 }
 
 // The key names the review_requested event, so only a re-request is notified again.
@@ -162,6 +166,7 @@ impl ReviewState {
                     head_sha: None,
                     worktree: None,
                     error: None,
+                    review_started: None,
                 },
             );
         }
@@ -229,6 +234,26 @@ impl ReviewState {
             .max_by(|left, right| {
                 (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
             })
+    }
+
+    // A later request of the same PR, which a review of this one would duplicate.
+    // Only a queued one is still owed a review, so a withdrawn or already handled newer event never hides an older one GitHub names again.
+    #[must_use]
+    pub(crate) fn newer_request(&self, key: &str) -> Option<&str> {
+        let request = self.requests.get(key)?;
+        let pr = pr_key(&request.found.repo, request.found.number);
+        self.requests
+            .values()
+            .filter(|other| {
+                other.status == Status::Queued
+                    && pr_key(&other.found.repo, other.found.number) == pr
+                    && (other.first_seen, &other.found.key)
+                        > (request.first_seen, &request.found.key)
+            })
+            .max_by(|left, right| {
+                (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
+            })
+            .map(|other| other.found.key.as_str())
     }
 
     #[must_use]
