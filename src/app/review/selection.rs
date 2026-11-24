@@ -8,22 +8,13 @@ use super::{
     state::{Request, ReviewState, Status},
 };
 
-// The requests the owner chose from the queue, handed to the running review under an id the caller waits on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Selected {
-    pub(crate) id: String,
-    pub(crate) keys: Vec<String>,
-    // The run of the review the caller saw running, so a later run never starts a selection made long before it.
-    pub(crate) run: String,
-}
-
-// What the running review has done with a selection so far; a key without an outcome is not handled yet.
-// The caller writes it before the handoff, so a reader finds it whether or not the review has taken the selection.
+// The requests the owner chose from the queue and what the running review has done with them so far.
+// The caller's one write of it is the handoff, so it is the input until accepted and the result after; a key without an outcome is not handled yet.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SelectionRecord {
     pub(crate) keys: Vec<String>,
+    // The run of the review the caller saw running, so a later run never starts a selection made long before it.
     #[serde(default)]
     pub(crate) run: String,
     #[serde(default)]
@@ -322,6 +313,34 @@ mod tests {
             "acme/app#1 PR 1  https://github.com/acme/app/pull/1\nacme/app#3 PR 3  https://github.com/acme/app/pull/3\n"
         );
         assert_eq!(queue_lines(&[]), "no queued requests\n");
+    }
+
+    #[test]
+    fn queue_shows_an_older_request_again_unless_a_newer_one_is_still_queued() {
+        for (name, newer_status, expected) in [
+            ("newer_launched", Status::Launched, "acme/app#12@10"),
+            ("newer_withdrawn", Status::Withdrawn, "acme/app#12@10"),
+            ("newer_queued", Status::Queued, "acme/app#12@20"),
+        ] {
+            let mut state = ReviewState::default();
+            let at = |text: &str| text.parse::<Timestamp>().expect("parse the time");
+            state.apply_poll(vec![found(12, 10)], at("2026-11-12T00:00:00Z"), false);
+            state.apply_poll(vec![found(12, 20)], at("2026-11-12T01:00:00Z"), false);
+            // GitHub names the direct event again once the team's request is removed.
+            state.apply_poll(vec![found(12, 10)], at("2026-11-12T02:00:00Z"), false);
+            state
+                .requests
+                .get_mut("acme/app#12@20")
+                .expect("request")
+                .status = newer_status;
+
+            let keys = queue(&state)
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect::<Vec<_>>();
+
+            assert_eq!(keys, [expected], "case: {name}");
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::{Timestamp, Zoned, civil::Weekday};
 use serde::{Deserialize, Serialize};
 
-use super::{config::Batches, one_line, selection::Selected, state::Found};
+use super::{config::Batches, one_line, state::Found};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slot {
@@ -56,9 +56,6 @@ pub(crate) struct NowRequest {
     // `owner/repo#number` of the one PR to start; every queued request when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pr: Option<String>,
-    // A review without this field refuses the request instead of reading it as the whole queue.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) selected: Option<Selected>,
 }
 
 // With the owner, this many reviewers means others are expected to review first.

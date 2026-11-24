@@ -22,9 +22,7 @@ use crate::{
             notice::{Notice, Selection, Size},
             one_line,
             request::request_queries,
-            selection::{
-                self, QueueEntry, Selected, SelectionRecord, SelectionReport, is_selection_id,
-            },
+            selection::{self, QueueEntry, SelectionRecord, SelectionReport, is_selection_id},
             state::{Found, ReviewState, Status},
             with_worktree,
         },
@@ -413,15 +411,8 @@ pub(crate) fn request_now(
         ));
     }
     let pr = pr.map(|pr| startable_pr(&env.paths, pr)).transpose()?;
-    review_record::request_now(
-        &env.paths,
-        &NowRequest {
-            pr: pr.clone(),
-            selected: None,
-        },
-        at,
-    )
-    .map_err(|error| error.to_string())?;
+    review_record::request_now(&env.paths, &NowRequest { pr: pr.clone() }, at)
+        .map_err(|error| error.to_string())?;
     Ok(pr.map_or_else(
         || "handed the queued requests to the running review".to_owned(),
         |pr| format!("handed {pr} to the running review"),
@@ -485,33 +476,12 @@ pub(crate) fn select(
     let run = review_record::load_run(&env.paths)
         .map_err(|error| error.to_string())?
         .ok_or("the running review has not recorded its run; restart it with `pr-wake review stop` and `pr-wake review start`")?;
-    // Written before the handoff, so the reader always finds this record or the review's own across the review taking the request.
+    // The record appears whole or not at all and is never replaced here, so it is the one handoff whichever caller of the id wins.
     let record = SelectionRecord {
-        run: run.clone(),
+        run,
         ..SelectionRecord::of(keys)
     };
-    let created = review_record::create_selection(&env.paths, id, &record)
-        .map_err(|error| error.to_string())?;
-    if !created {
-        return await_selection(&env.paths, id, pause, waits);
-    }
-    let handed = review_record::hand_over_selection(
-        &env.paths,
-        id,
-        &NowRequest {
-            pr: None,
-            selected: Some(Selected {
-                id: id.to_owned(),
-                keys: keys.to_vec(),
-                run,
-            }),
-        },
-    );
-    // Nothing was handed over, so the same id may be submitted again.
-    if let Err(error) = handed {
-        let _ = review_record::remove_selection(&env.paths, id);
-        return Err(error.to_string());
-    }
+    review_record::create_selection(&env.paths, id, &record).map_err(|error| error.to_string())?;
     await_selection(&env.paths, id, pause, waits)
 }
 
@@ -879,7 +849,7 @@ fn await_selection(
         let record = review_record::load_selection(paths, id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
-                format!("no selection {id}; it may have been read to the end already")
+                format!("no selection {id}; it was never submitted or is past its retention")
             })?;
         if record.complete || wait == waits || !pause(SELECTION_CHECK) {
             break record;
@@ -1530,8 +1500,7 @@ mod tests {
                     assert_eq!(
                         taken,
                         [Ok(NowRequest {
-                            pr: pr.map(str::to_owned),
-                            selected: None,
+                            pr: pr.map(str::to_owned)
                         })],
                         "case: {name}"
                     );
@@ -1652,8 +1621,8 @@ mod tests {
         .expect("hand over the selection");
         let repeated = select(&home.env, id, &["acme/app#4@4".to_owned()], &|_| true, 0)
             .expect("read the same selection");
-        // Taken by the review, which has not recorded its acceptance yet.
-        let taken = review_record::take_now_requests(&home.env.paths).expect("take it");
+        let submitted = review_record::load_selection(&home.env.paths, id).expect("read it");
+        let spooled = review_record::take_now_requests(&home.env.paths).expect("read the spool");
         let waiting = selection_outcome(&home.env, id, &|_| true, 0).expect("read the selection");
         let mut record = SelectionRecord::of(&keys);
         record.accepted = true;
@@ -1683,7 +1652,19 @@ mod tests {
                 }])
             );
         }
-        assert_eq!(taken.len(), 1, "a repeated id is handed over once");
+        assert_eq!(
+            submitted,
+            Some(SelectionRecord {
+                run: "run-1".to_owned(),
+                ..SelectionRecord::of(&keys)
+            }),
+            "a repeated id leaves the first submission as it was"
+        );
+        assert_eq!(
+            spooled.len(),
+            0,
+            "a selection never goes through the legacy spool"
+        );
         assert!(done.complete);
         assert_eq!(
             done.requests[0].link.as_deref(),

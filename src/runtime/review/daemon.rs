@@ -18,7 +18,7 @@ use crate::{
         request::{
             SearchHit, current_request, pending_requests, pr_key, request_queries, still_requested,
         },
-        selection::{Selected, SelectedOutcome, SelectionRecord, is_selection_id},
+        selection::{SelectedOutcome, SelectionRecord, is_selection_id},
         state::{PendingDigest, Request, ReviewState, Status},
     },
     infra::{
@@ -184,7 +184,10 @@ impl<'deps> Daemon<'deps> {
             );
         }
         let pending = pending_requests(hits, &cache, &login, &config.teams, |hit| {
-            github.review_requests(&hit.repo, hit.number)
+            Ok((
+                github.review_requests(&hit.repo, hit.number)?,
+                github.live_request(&hit.repo, hit.number)?,
+            ))
         })
         .map_err(|error| self.record_error(error))?;
 
@@ -261,45 +264,17 @@ impl<'deps> Daemon<'deps> {
         };
         match review_record::take_now_requests(self.deps.paths) {
             Ok(requests) => {
-                // An earlier request may run for minutes, so each selection is marked taken before any of them starts.
-                for request in &requests {
-                    if let Ok(NowRequest {
-                        pr: None,
-                        selected: Some(selected),
-                    }) = request
-                        && is_selection_id(&selected.id)
-                        && selected.run == self.deps.run
-                    {
-                        self.save_selection(&selected.id, &accepted(selected));
-                    }
-                }
                 for request in requests {
                     match request {
-                        Ok(NowRequest {
-                            pr: None,
-                            selected: Some(selected),
-                        }) => self.start_selected(&selected),
-                        Ok(NowRequest {
-                            pr: Some(pr),
-                            selected: None,
-                        }) => self.start_now(&pr),
-                        Ok(NowRequest {
-                            pr: None,
-                            selected: None,
-                        }) => self.run_batch((self.deps.now)()),
-                        // Either reading could start what the owner did not choose, so neither is taken.
-                        Ok(NowRequest {
-                            pr: Some(pr),
-                            selected: Some(_),
-                        }) => self.log(&format!(
-                            "review now: refused a request naming both {pr} and selected requests"
-                        )),
+                        Ok(NowRequest { pr: Some(pr) }) => self.start_now(&pr),
+                        Ok(NowRequest { pr: None }) => self.run_batch((self.deps.now)()),
                         Err(error) => self.log(&format!("review now: {error}")),
                     }
                 }
             }
             Err(error) => self.log(&format!("review now: {error}")),
         }
+        self.take_selections();
 
         let now = (self.deps.now)().to_zoned(self.deps.zone.clone());
         let mut state = self.lock_state();
@@ -377,29 +352,44 @@ impl<'deps> Daemon<'deps> {
         self.keep_digest(&mut None, (self.deps.now)(), &digest);
     }
 
-    // Only the chosen requests still queued go through the batch's decision, so a stale choice never starts a second review.
-    fn start_selected(&self, selected: &Selected) {
-        let id = &selected.id;
-        if !is_selection_id(id) {
-            self.log(&format!("review now: refused the selection id {id:?}"));
-            return;
+    // A selection's record is its own handoff, so the caller's one write is all it takes and a caller that dies after it loses nothing.
+    fn take_selections(&self) {
+        let ids = match review_record::selection_ids(self.deps.paths) {
+            Ok(ids) => ids,
+            Err(error) => {
+                self.log(&format!("selections: {error}"));
+                return;
+            }
+        };
+        for (id, _) in ids {
+            if self.deps.stop.is_requested() {
+                return;
+            }
+            // An unreadable record is reported to whoever reads it, so it is not logged here every second.
+            if let Ok(Some(record)) = review_record::load_selection(self.deps.paths, &id)
+                && !record.accepted
+                && !record.complete
+                && is_selection_id(&id)
+            {
+                self.start_selected(&id, record);
+            }
         }
-        // A selection handed to an earlier run waited while no review ran, so it is closed with nothing started.
-        if selected.run != self.deps.run {
-            let mut record = SelectionRecord {
-                run: selected.run.clone(),
-                ..SelectionRecord::of(&selected.keys)
-            };
+    }
+
+    // Only the chosen requests still queued go through the batch's decision, so a stale choice never starts a second review.
+    fn start_selected(&self, id: &str, mut record: SelectionRecord) {
+        // A selection made for an earlier run waited while no review ran, so it is closed with nothing started.
+        if record.run != self.deps.run {
             record.close(&SelectedOutcome::Stopped);
             self.log(&format!(
-                "selection {id}: handed to the earlier run {}, so nothing is started",
-                selected.run
+                "selection {id}: made for the earlier run {}, so nothing is started",
+                record.run
             ));
             self.save_selection(id, &record);
             return;
         }
-        let mut record = accepted(selected);
-        // Nothing starts untracked, so a selection whose receipt cannot be written is left for the restart to close.
+        record.accepted = true;
+        // Nothing starts untracked, so a selection whose acceptance cannot be written stays waiting.
         if let Err(error) = review_record::save_selection(self.deps.paths, id, &record) {
             self.log(&format!("selection {id}: not started: {error}"));
             return;
@@ -411,22 +401,31 @@ impl<'deps> Daemon<'deps> {
             if self.deps.stop.is_requested() {
                 break;
             }
-            let outcome = if let Err(outcome) = self.verify_selected(&key, &login) {
-                outcome
-            } else {
-                record.in_flight = Some(key.clone());
-                if let Err(error) = review_record::save_selection(self.deps.paths, id, &record) {
-                    self.log(&format!("selection {id}: {key} not started: {error}"));
-                    record.in_flight = None;
-                    break;
-                }
-                match self.claim_selected(&key) {
-                    Ok(request) => {
-                        let outcome = self.plan_and_start(&request, &login, &mut digest);
-                        self.keep_digest(&mut pending, (self.deps.now)(), &digest);
+            let outcome = match self.queued_request(&key) {
+                Err(outcome) => outcome,
+                Ok(request) => {
+                    // The plan reads GitHub while the request stays queued, so a poll meanwhile can still withdraw or replace it.
+                    let plan = self.plan(&request, &login);
+                    if let Err(outcome) = self.verify_selected(&key, &login) {
                         outcome
+                    } else {
+                        record.in_flight = Some(key.clone());
+                        if let Err(error) =
+                            review_record::save_selection(self.deps.paths, id, &record)
+                        {
+                            self.log(&format!("selection {id}: {key} not started: {error}"));
+                            record.in_flight = None;
+                            break;
+                        }
+                        match self.claim_selected(&key) {
+                            Ok(request) => {
+                                let outcome = self.apply_plan(&request, plan, &mut digest);
+                                self.keep_digest(&mut pending, (self.deps.now)(), &digest);
+                                outcome
+                            }
+                            Err(outcome) => outcome,
+                        }
                     }
-                    Err(outcome) => outcome,
                 }
             };
             self.log(&format!("selection {id}: {key}: {outcome:?}"));
@@ -438,23 +437,23 @@ impl<'deps> Daemon<'deps> {
         self.save_selection(id, &record);
     }
 
+    fn queued_request(&self, key: &str) -> Result<Request, SelectedOutcome> {
+        let state = self.lock_state();
+        let newer = state.newer_request(key).map(str::to_owned);
+        match state.requests.get(key) {
+            Some(request) if request.status == Status::Queued && newer.is_none() => {
+                Ok(request.clone())
+            }
+            request => Err(SelectedOutcome::NotQueued {
+                status: request.map(|request| request.status),
+                newer,
+            }),
+        }
+    }
+
     // Reads GitHub without the poll's cache, as the queue the owner chose from may predate a withdrawal or a re-request.
     fn verify_selected(&self, key: &str, login: &str) -> Result<(), SelectedOutcome> {
-        let found = {
-            let state = self.lock_state();
-            let newer = state.newer_request(key).map(str::to_owned);
-            match state.requests.get(key) {
-                Some(request) if request.status == Status::Queued && newer.is_none() => {
-                    request.found.clone()
-                }
-                request => {
-                    return Err(SelectedOutcome::NotQueued {
-                        status: request.map(|request| request.status),
-                        newer,
-                    });
-                }
-            }
-        };
+        let found = self.queued_request(key)?.found;
         let unverified = |error: String| SelectedOutcome::Failed {
             error: format!("could not check the request on GitHub, so it stays queued: {error}"),
             thread: None,
@@ -476,7 +475,7 @@ impl<'deps> Daemon<'deps> {
             title: found.title.clone(),
             updated_at: String::new(),
         };
-        let current = current_request(&events, &hit, login, teams);
+        let current = current_request(&events, &live, &hit, login, teams);
         if current.key != found.key {
             return Err(SelectedOutcome::NotQueued {
                 status: None,
@@ -542,8 +541,8 @@ impl<'deps> Daemon<'deps> {
                 }
                 continue;
             }
-            // One still waiting is closed when it is taken, and one naming this run is still being handed over.
-            if record.run == self.deps.run || review_record::selection_waits(self.deps.paths, &id) {
+            // One made for this run is still to be taken.
+            if record.run == self.deps.run {
                 continue;
             }
             // A request the recovery queued again never reached its launch, so only another may have started.
@@ -644,8 +643,12 @@ impl<'deps> Daemon<'deps> {
         login: &str,
         digest: &mut Digest,
     ) -> SelectedOutcome {
+        self.apply_plan(request, self.plan(request, login), digest)
+    }
+
+    fn apply_plan(&self, request: &Request, plan: Plan, digest: &mut Digest) -> SelectedOutcome {
         let key = &request.found.key;
-        match self.plan(request, login) {
+        match plan {
             Plan::Report(reason) => {
                 self.log_saved(self.update(key, |request| request.status = Status::Reported));
                 self.log(&format!("{key}: only reported ({reason:?})"));
@@ -1082,14 +1085,6 @@ impl Wake {
     }
 }
 
-fn accepted(selected: &Selected) -> SelectionRecord {
-    SelectionRecord {
-        run: selected.run.clone(),
-        accepted: true,
-        ..SelectionRecord::of(&selected.keys)
-    }
-}
-
 // Rate limits and outages are waited out with a growing delay instead of stopping the review.
 fn backoff(interval: Duration, failures: u32) -> Duration {
     let mut delay = interval;
@@ -1126,6 +1121,7 @@ mod tests {
             PullRequest,
             batch::ReportReason,
             config::{Batches, ConfigFile, ReviewConfig},
+            selection::queue,
             state::Found,
             with_worktree,
         },
@@ -2092,7 +2088,6 @@ mod tests {
                 &fixture.paths,
                 &NowRequest {
                     pr: pr.map(str::to_owned),
-                    selected: None,
                 },
                 Timestamp::now(),
             )
@@ -2467,30 +2462,144 @@ mod tests {
     }
 
     #[test]
-    fn selection_handed_to_an_earlier_run_is_closed_unstarted_when_a_later_run_takes_it() {
+    fn poll_during_the_reviewer_lookup_still_withdraws_or_replaces_a_selected_request() {
+        for (name, events_after, newer) in [
+            ("withdrawn", None, None),
+            (
+                "replaced",
+                Some(vec![requested(30, "sato"), requested(31, "sato")]),
+                Some("acme/app#12@31"),
+            ),
+        ] {
+            let fixture = Fixture::batched();
+            fixture.save_queued(&[(12, 30)]);
+            // Seen before the test's clock, so a request the poll adds is the later one.
+            let mut state = fixture.state();
+            state
+                .requests
+                .get_mut("acme/app#12@30")
+                .expect("request")
+                .first_seen = tokyo("2026-11-20T12:00:00");
+            review_record::save_state(&fixture.paths, &state).expect("save the state");
+            fixture.request("acme/app", 12, &[requested(30, "sato")]);
+            let looking = Arc::new(AtomicBool::new(false));
+            let released = Arc::new(AtomicBool::new(false));
+            let (looked, release) = (Arc::clone(&looking), Arc::clone(&released));
+            fixture.answer_with(
+                "gh api repos/acme/app/pulls/12/requested_reviewers",
+                move |_| {
+                    looked.store(true, Ordering::SeqCst);
+                    wait_for(|| release.load(Ordering::SeqCst));
+                    Ok(br#"{"users":[]}"#.to_vec())
+                },
+            );
+            fixture.select("one", &["acme/app#12@30"]);
+            let now = || tokyo("2026-11-21T12:00:00");
+
+            fixture.with_daemon(
+                &Setup {
+                    now: Some(&now),
+                    ..Setup::default()
+                },
+                |daemon, _| {
+                    thread::scope(|scope| {
+                        let batch = scope.spawn(|| daemon.batch_once());
+                        wait_for(|| looking.load(Ordering::SeqCst));
+                        match &events_after {
+                            Some(events) => fixture.request("acme/app", 12, events),
+                            None => {
+                                fixture.events.lock().expect("drop the PR").clear();
+                            }
+                        }
+                        daemon.poll_once().expect("poll during the lookup");
+                        released.store(true, Ordering::SeqCst);
+                        batch.join().expect("join the batch");
+                    });
+                },
+            );
+
+            assert_eq!(
+                fixture.selection("one").outcomes.get("acme/app#12@30"),
+                Some(&SelectedOutcome::NotQueued {
+                    status: Some(Status::Withdrawn),
+                    newer: newer.map(str::to_owned),
+                }),
+                "case: {name}"
+            );
+            assert!(
+                fixture.opened().is_empty() && fixture.started().is_empty(),
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn removal_of_one_of_simultaneous_direct_and_team_requests_lists_and_starts_the_one_left() {
+        let mut fixture = Fixture::batched();
+        fixture.config.teams = vec!["acme/backend".to_owned()];
+        let direct = requested(10, "tanaka");
+        let team =
+            json!({"id": 20, "event": "review_requested", "requested_team": {"slug": "backend"}})
+                .to_string();
+        let removed =
+            json!({"id": 21, "event": "review_request_removed", "requested_team": {"slug": "backend"}})
+                .to_string();
+        let now = || tokyo("2026-11-21T12:00:00");
+        let setup = Setup {
+            now: Some(&now),
+            ..Setup::default()
+        };
+        let queued = |fixture: &Fixture| {
+            queue(&fixture.state())
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect::<Vec<_>>()
+        };
+
+        let (both, one_left) = fixture.with_daemon(&setup, |daemon, _| {
+            daemon.poll_once().expect("baseline poll");
+            fixture.set_live(live("open", &["me"], &["backend"]));
+            fixture.request("acme/app", 12, &[direct.clone(), team.clone()]);
+            daemon.poll_once().expect("poll both requests");
+            let both = queued(&fixture);
+            fixture.set_live(live("open", &["me"], &[]));
+            fixture.request("acme/app", 12, &[direct, team, removed]);
+            daemon.poll_once().expect("poll after the team's removal");
+            (both, queued(&fixture))
+        });
+        fixture.select("chosen", &["acme/app#12@20", "acme/app#12@10"]);
+        fixture.take_selections();
+
+        assert_eq!(both, ["acme/app#12@20"]);
+        assert_eq!(one_left, ["acme/app#12@10"]);
+        let record = fixture.selection("chosen");
+        assert_eq!(
+            record.outcomes.get("acme/app#12@20"),
+            Some(&SelectedOutcome::NotQueued {
+                status: Some(Status::Withdrawn),
+                newer: None
+            }),
+            "the key shown for the team does not start the direct request"
+        );
+        assert!(matches!(
+            record.outcomes.get("acme/app#12@10"),
+            Some(SelectedOutcome::Opened { .. })
+        ));
+        assert_eq!(fixture.opened().len(), 1);
+    }
+
+    #[test]
+    fn selection_made_for_an_earlier_run_is_closed_unstarted() {
         let fixture = Fixture::batched();
         fixture.save_queued(&[(12, 30)]);
         fixture.request("acme/app", 12, &[requested(30, "sato")]);
         fixture.select_for("run-0", "yesterday", &["acme/app#12@30"]);
-        let now = || tokyo("2026-11-21T12:00:00");
 
-        let open_after_the_recovery = fixture.with_daemon(
-            &Setup {
-                now: Some(&now),
-                ..Setup::default()
-            },
-            |daemon, _| {
-                daemon.recover().expect("recover");
-                let open = !fixture.selection("yesterday").complete;
-                daemon.batch_once();
-                open
-            },
-        );
+        fixture.with_daemon(&Setup::default(), |daemon, _| {
+            daemon.recover().expect("recover");
+        });
+        fixture.take_selections();
 
-        assert!(
-            open_after_the_recovery,
-            "a selection still waiting is left to be taken"
-        );
         let closed = fixture.selection("yesterday");
         assert!(closed.complete && !closed.accepted);
         assert_eq!(
@@ -2502,35 +2611,52 @@ mod tests {
     }
 
     #[test]
-    fn selection_whose_receipt_cannot_be_written_starts_nothing() {
+    fn selection_of_a_caller_that_died_after_submitting_starts_once_whatever_repeats_its_id() {
         let fixture = Fixture::batched();
         fixture.save_queued(&[(12, 30)]);
         fixture.request("acme/app", 12, &[requested(30, "sato")]);
-        review_record::hand_over_selection(
-            &fixture.paths,
-            "one",
-            &NowRequest {
-                pr: None,
-                selected: Some(Selected {
-                    id: "one".to_owned(),
-                    keys: vec!["acme/app#12@30".to_owned()],
-                    run: "run-1".to_owned(),
-                }),
-            },
-        )
-        .expect("hand over the selection");
-        // A file where the records' directory belongs makes every write of a receipt fail.
-        std::fs::write(fixture.paths.state.join("selections"), "").expect("block the receipts");
-        let now = || tokyo("2026-11-21T12:00:00");
 
-        fixture.with_daemon(
-            &Setup {
-                now: Some(&now),
-                ..Setup::default()
-            },
-            |daemon, _| daemon.batch_once(),
+        let first = fixture.select("one", &["acme/app#12@30"]);
+        fixture.take_selections();
+        let repeated = fixture.select("one", &["acme/app#12@30"]);
+        fixture.take_selections();
+
+        assert!(
+            first && !repeated,
+            "only the first write of an id is the handoff"
         );
+        let record = fixture.selection("one");
+        assert!(record.complete && record.accepted);
+        assert_eq!(
+            record.outcomes.get("acme/app#12@30"),
+            Some(&SelectedOutcome::Opened {
+                reason: Some("no harnexus in the test".to_owned())
+            })
+        );
+        assert_eq!(fixture.opened().len(), 1, "started once");
+    }
 
+    #[test]
+    fn selection_whose_acceptance_cannot_be_written_starts_nothing_and_stays_waiting() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = Fixture::batched();
+        fixture.save_queued(&[(12, 30)]);
+        fixture.request("acme/app", 12, &[requested(30, "sato")]);
+        fixture.select("one", &["acme/app#12@30"]);
+        let selections = fixture.paths.state.join("selections");
+        let permissions = |mode| {
+            std::fs::set_permissions(&selections, std::fs::Permissions::from_mode(mode))
+                .expect("set the mode");
+        };
+        // A directory that cannot be written to makes the acceptance's atomic replacement fail.
+        permissions(0o500);
+
+        fixture.take_selections();
+
+        permissions(0o700);
+        let waiting = fixture.selection("one");
+        assert!(!waiting.accepted && !waiting.complete);
         assert_eq!(fixture.status("acme/app#12@30"), Status::Queued);
         assert!(fixture.opened().is_empty() && fixture.started().is_empty());
     }
@@ -2889,31 +3015,18 @@ mod tests {
             review_record::save_state(&self.paths, &state).expect("save the state");
         }
 
-        fn select(&self, id: &str, keys: &[&str]) {
-            self.select_for("run-1", id, keys);
+        fn select(&self, id: &str, keys: &[&str]) -> bool {
+            self.select_for("run-1", id, keys)
         }
 
-        // As the caller hands a selection over, with its receipt first.
-        fn select_for(&self, run: &str, id: &str, keys: &[&str]) {
+        // As the caller hands a selection over, with its one write; `false` when the id is taken.
+        fn select_for(&self, run: &str, id: &str, keys: &[&str]) -> bool {
             let keys = keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
             let record = SelectionRecord {
                 run: run.to_owned(),
                 ..SelectionRecord::of(&keys)
             };
-            review_record::create_selection(&self.paths, id, &record).expect("write the receipt");
-            review_record::hand_over_selection(
-                &self.paths,
-                id,
-                &NowRequest {
-                    pr: None,
-                    selected: Some(Selected {
-                        id: id.to_owned(),
-                        keys,
-                        run: run.to_owned(),
-                    }),
-                },
-            )
-            .expect("hand over the selection");
+            review_record::create_selection(&self.paths, id, &record).expect("write the selection")
         }
 
         fn selection(&self, id: &str) -> SelectionRecord {

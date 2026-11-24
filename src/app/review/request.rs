@@ -55,7 +55,7 @@ pub(crate) fn pending_requests<E>(
     cache: &BTreeMap<String, CachedPr>,
     login: &str,
     teams: &[String],
-    mut requests_of: impl FnMut(&SearchHit) -> Result<Vec<ReviewRequest>, E>,
+    mut requests_of: impl FnMut(&SearchHit) -> Result<(Vec<ReviewRequest>, LiveRequest), E>,
 ) -> Result<Pending, E> {
     // A later search may answer for the same PR again, so the hits are keyed by PR and the later one is kept.
     let hits = hits
@@ -75,7 +75,8 @@ pub(crate) fn pending_requests<E>(
         let found = if let Some(found) = cached {
             found
         } else {
-            current_request(&requests_of(&hit)?, &hit, login, teams)
+            let (requests, live) = requests_of(&hit)?;
+            current_request(&requests, &live, &hit, login, teams)
         };
 
         pending.found.push(Found {
@@ -93,22 +94,49 @@ pub(crate) fn pending_requests<E>(
     Ok(pending)
 }
 
+// The latest event whose target is still asked names the request, as a withdrawn team or login keeps its old event.
 // No event names a request the search still lists, so it is kept under a PR-level key.
 #[must_use]
 pub(crate) fn current_request(
     requests: &[ReviewRequest],
+    live: &LiveRequest,
     hit: &SearchHit,
     login: &str,
     teams: &[String],
 ) -> Found {
-    latest_request(requests, hit, login, teams).unwrap_or_else(|| Found {
-        key: format!("{}{UNKNOWN}", pr_key(&hit.repo, hit.number)),
-        repo: hit.repo.clone(),
-        number: hit.number,
-        title: hit.title.clone(),
-        requester: None,
-        team: None,
-    })
+    let asked = requests
+        .iter()
+        .filter(|request| is_asked(request, live, login))
+        .cloned()
+        .collect::<Vec<_>>();
+    let owner = hit
+        .repo
+        .split_once('/')
+        .map_or(hit.repo.as_str(), |(owner, _)| owner);
+    let monitored_asked = live
+        .users
+        .iter()
+        .any(|user| user.eq_ignore_ascii_case(login))
+        || live
+            .teams
+            .iter()
+            .any(|slug| configured_team(teams, owner, slug).is_some());
+    latest_request(&asked, hit, login, teams)
+        // The reviewers can lag the search, so only when they ask no monitored target does the latest event stand, as before.
+        // A target asked without its own event is the unknown request, never another target's withdrawn event.
+        .or_else(|| {
+            (!monitored_asked)
+                .then(|| latest_request(requests, hit, login, teams))
+                .flatten()
+        })
+        .unwrap_or_else(|| Found {
+            key: format!("{}{UNKNOWN}", pr_key(&hit.repo, hit.number)),
+            repo: hit.repo.clone(),
+            number: hit.number,
+            title: hit.title.clone(),
+            requester: None,
+            team: None,
+        })
 }
 
 // Whether an open PR still asks for the review the request's event made.
@@ -185,6 +213,23 @@ pub(crate) fn latest_request(
         requester: latest.requester.clone(),
         team: team.map(str::to_owned),
     })
+}
+
+fn is_asked(request: &ReviewRequest, live: &LiveRequest, login: &str) -> bool {
+    let direct = request
+        .reviewer
+        .as_deref()
+        .is_some_and(|reviewer| reviewer.eq_ignore_ascii_case(login))
+        && live
+            .users
+            .iter()
+            .any(|user| user.eq_ignore_ascii_case(login));
+    let team = request.team_slug.as_deref().is_some_and(|slug| {
+        live.teams
+            .iter()
+            .any(|asked| asked.eq_ignore_ascii_case(slug))
+    });
+    direct || team
 }
 
 #[must_use]
@@ -385,9 +430,9 @@ mod tests {
     fn events_are_read_again_only_for_updated_prs() {
         let events = RefCell::new(vec![direct(7, "tanaka", "me")]);
         let reads = RefCell::new(0);
-        let read = |_: &SearchHit| -> Result<Vec<ReviewRequest>, String> {
+        let read = |_: &SearchHit| -> Result<(Vec<ReviewRequest>, LiveRequest), String> {
             *reads.borrow_mut() += 1;
-            Ok(events.borrow().clone())
+            Ok((events.borrow().clone(), asked(&["me"], &[])))
         };
 
         let first = pending_requests(
@@ -432,7 +477,7 @@ mod tests {
             &BTreeMap::new(),
             "me",
             &[],
-            |_| Ok::<_, String>(Vec::new()),
+            |_| Ok::<_, String>((Vec::new(), asked(&["me"], &[]))),
         )
         .expect("poll");
 
@@ -450,7 +495,7 @@ mod tests {
             &BTreeMap::new(),
             "me",
             &[],
-            |_| Ok::<_, String>(vec![direct(7, "tanaka", "me")]),
+            |_| Ok::<_, String>((vec![direct(7, "tanaka", "me")], asked(&["me"], &[]))),
         )
         .expect("poll");
 
@@ -465,10 +510,62 @@ mod tests {
             &BTreeMap::new(),
             "me",
             &[],
-            |_| Err::<Vec<ReviewRequest>, _>("HTTP 502".to_owned()),
+            |_| Err::<(Vec<ReviewRequest>, LiveRequest), _>("HTTP 502".to_owned()),
         );
 
         assert_eq!(pending, Err("HTTP 502".to_owned()));
+    }
+
+    #[test]
+    fn request_is_named_by_the_latest_event_whose_target_is_still_asked() {
+        let teams = vec!["acme/backend".to_owned()];
+        let history = [
+            direct(10, "tanaka", "me"),
+            team_request(20, "sato", "backend"),
+        ];
+        for (name, users, asked_teams, expected) in [
+            ("both_asked", &["me"][..], &["backend"][..], "acme/app#3@20"),
+            ("team_withdrawn", &["me"][..], &[][..], "acme/app#3@10"),
+            (
+                "direct_withdrawn",
+                &[][..],
+                &["backend"][..],
+                "acme/app#3@20",
+            ),
+            // The reviewers may lag the search, so the latest event stands as before.
+            ("neither_asked_yet", &[][..], &[][..], "acme/app#3@20"),
+        ] {
+            let found = current_request(
+                &history,
+                &asked(users, asked_teams),
+                &hit("acme/app", 3, "u"),
+                "me",
+                &teams,
+            );
+
+            assert_eq!(found.key, expected, "case: {name}");
+        }
+
+        let direct_without_its_event = current_request(
+            &[team_request(20, "sato", "backend")],
+            &asked(&["me"], &[]),
+            &hit("acme/app", 3, "u"),
+            "me",
+            &teams,
+        );
+
+        assert_eq!(
+            direct_without_its_event.key, "acme/app#3@unknown",
+            "a withdrawn team's event does not name the direct request"
+        );
+    }
+
+    fn asked(users: &[&str], teams: &[&str]) -> LiveRequest {
+        LiveRequest {
+            open: true,
+            users: users.iter().map(|user| (*user).to_owned()).collect(),
+            teams: teams.iter().map(|slug| (*slug).to_owned()).collect(),
+        }
     }
 
     fn direct(id: u64, requester: &str, reviewer: &str) -> ReviewRequest {

@@ -232,6 +232,7 @@ impl ReviewState {
     }
 
     // A later request of the same PR, which a review of this one would duplicate.
+    // Only a queued one is still owed a review, so a withdrawn or already handled newer event never hides an older one GitHub names again.
     #[must_use]
     pub(crate) fn newer_request(&self, key: &str) -> Option<&str> {
         let request = self.requests.get(key)?;
@@ -239,7 +240,8 @@ impl ReviewState {
         self.requests
             .values()
             .filter(|other| {
-                pr_key(&other.found.repo, other.found.number) == pr
+                other.status == Status::Queued
+                    && pr_key(&other.found.repo, other.found.number) == pr
                     && (other.first_seen, &other.found.key)
                         > (request.first_seen, &request.found.key)
             })

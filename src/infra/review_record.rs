@@ -223,24 +223,6 @@ pub(crate) fn selection_ids(
         .collect())
 }
 
-// Named after the selection, so whether it still waits for the review is one look at the file.
-pub(crate) fn hand_over_selection(
-    paths: &ReviewPaths,
-    id: &str,
-    request: &NowRequest,
-) -> Result<(), RecordError> {
-    record::save_json(
-        &paths.state.join(NOW).join(format!("{id}.json")),
-        request,
-        JsonLayout::TwoSpacesAndNewline,
-    )
-}
-
-#[must_use]
-pub(crate) fn selection_waits(paths: &ReviewPaths, id: &str) -> bool {
-    paths.state.join(NOW).join(format!("{id}.json")).exists()
-}
-
 // Written by each review as it starts, so a selection names the run it was handed to.
 pub(crate) fn record_run(paths: &ReviewPaths, run: &str) -> Result<(), RecordError> {
     record::save_json(
@@ -377,7 +359,6 @@ mod tests {
         let at = |text: &str| text.parse::<Timestamp>().expect("parse the time");
         let one_pr = NowRequest {
             pr: Some("acme/app#12".to_owned()),
-            selected: None,
         };
         request_now(&paths, &one_pr, at("2026-11-18T01:00:01Z")).expect("ask for one PR");
         request_now(&paths, &NowRequest::default(), at("2026-11-18T01:00:00Z"))
