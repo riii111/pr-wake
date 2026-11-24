@@ -264,7 +264,14 @@ mod tests {
             written,
             "{\n \"repo\": \"org/pay\",\n \"number\": 7,\n \"url\": \"https://github.com/org/pay/pull/7\",\n \"worker\": \"worker\",\n \"linkedAt\": \"2026-10-20T00:00:00.000Z\"\n}"
         );
-        assert_eq!(load_link(root.path(), &pay(7)).expect("load"), Some(link));
+        let mixed_case = PrRef {
+            repo: "ORG/Pay".to_owned(),
+            number: 7,
+        };
+        assert_eq!(
+            load_link(root.path(), &mixed_case).expect("load"),
+            Some(link)
+        );
         assert_eq!(load_link(root.path(), &pay(8)).expect("load"), None);
     }
 
