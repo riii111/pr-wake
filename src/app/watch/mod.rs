@@ -8,7 +8,7 @@ pub(crate) mod reviewers;
 pub(crate) mod state;
 pub(crate) mod worker;
 
-use jiff::{SignedDuration, Timestamp, Zoned};
+use jiff::{SignedDuration, Timestamp, ZonedDateTime};
 use serde_json::{Map, Value};
 
 use self::{
@@ -266,7 +266,7 @@ pub(crate) fn hold_for_sender(state: &mut WatchState, missing: &str) -> bool {
 pub(crate) fn deliver(
     state: &mut WatchState,
     view: WorkerView,
-    now: &Zoned,
+    now: &ZonedDateTime,
     config: &WatchConfig,
 ) -> Delivery {
     let WorkerView::Present { busy, answer } = view else {
@@ -486,7 +486,7 @@ fn is_queued(pending: &[WatchEvent], event: &WatchEvent) -> bool {
     )
 }
 
-fn in_quiet_hours(now: &Zoned, quiet: Option<QuietHours>) -> bool {
+fn in_quiet_hours(now: &ZonedDateTime, quiet: Option<QuietHours>) -> bool {
     let Some(QuietHours { start, end }) = quiet else {
         return false;
     };
@@ -1718,7 +1718,7 @@ mod tests {
         time.parse().expect("parse the time")
     }
 
-    fn zoned(time: &str) -> Zoned {
-        at(time).to_zoned(TimeZone::UTC)
+    fn zoned(time: &str) -> ZonedDateTime {
+        at(time).to_zoned_datetime(TimeZone::UTC)
     }
 }

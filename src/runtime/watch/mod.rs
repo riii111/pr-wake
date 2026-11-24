@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use jiff::{Timestamp, Zoned};
+use jiff::{Timestamp, ZonedDateTime};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -283,7 +283,7 @@ fn daemon(env: Env<'_>, paths: &WatchPaths) -> Result<(), Failure> {
             paths,
             github: &mut github,
             workers: &mut workers,
-            now: &Zoned::now,
+            now: &ZonedDateTime::now,
             log: &log,
             notify: &|subtitle, message| {
                 alerter::notify_outcome(&run_tool, Path::new(OSASCRIPT), subtitle, message, &stop)
@@ -1626,11 +1626,11 @@ mod tests {
         }
     }
 
-    fn noon() -> Zoned {
+    fn noon() -> ZonedDateTime {
         "2026-10-23T12:00:00Z"
             .parse::<Timestamp>()
             .expect("parse the time")
-            .to_zoned(TimeZone::UTC)
+            .to_zoned_datetime(TimeZone::UTC)
     }
 
     fn copy_directory(from: &Path, to: &Path) {

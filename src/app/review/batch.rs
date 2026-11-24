@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use jiff::{Timestamp, Zoned, civil::Weekday};
+use jiff::{Timestamp, ZonedDateTime, civil::Weekday};
 use serde::{Deserialize, Serialize};
 
 use super::{config::Batches, one_line, state::Found};
@@ -79,7 +79,11 @@ const MAX_TITLE_CHARS: usize = 30;
 
 // The latest slot of today that has started and not run yet, so a slot missed while asleep runs once, late.
 #[must_use]
-pub(crate) fn due_slot(batches: &Batches, now: &Zoned, last: Option<Timestamp>) -> Option<Slot> {
+pub(crate) fn due_slot(
+    batches: &Batches,
+    now: &ZonedDateTime,
+    last: Option<Timestamp>,
+) -> Option<Slot> {
     if matches!(now.weekday(), Weekday::Saturday | Weekday::Sunday) {
         return None;
     }
@@ -91,7 +95,7 @@ pub(crate) fn due_slot(batches: &Batches, now: &Zoned, last: Option<Timestamp>) 
             let ready = now
                 .date()
                 .to_datetime(*ready)
-                .to_zoned(now.time_zone().clone())
+                .to_zoned_datetime(now.time_zone().clone())
                 .ok()?
                 .timestamp();
             let start = ready.checked_sub(batches.lead).ok()?;
@@ -519,10 +523,10 @@ mod tests {
         }
     }
 
-    fn local(text: &str) -> Zoned {
+    fn local(text: &str) -> ZonedDateTime {
         text.parse::<jiff::civil::DateTime>()
             .expect("parse the time")
-            .to_zoned(TimeZone::fixed(jiff::tz::offset(9)))
+            .to_zoned_datetime(TimeZone::fixed(jiff::tz::offset(9)))
             .expect("a local time")
     }
 
