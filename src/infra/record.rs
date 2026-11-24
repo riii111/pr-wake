@@ -305,10 +305,6 @@ fn acquire_lock(path: &Path) -> io::Result<Option<ProcessLock>> {
 }
 
 fn prepare_directory(directory: &Path) -> io::Result<()> {
-    // sync_all is a full flush to the device on macOS, so the parent is flushed only for a directory created here.
-    if directory.is_dir() {
-        return Ok(());
-    }
     DirBuilder::new()
         .recursive(true)
         .mode(OWNER_ONLY_DIRECTORY)
