@@ -146,7 +146,6 @@ impl Display for Node {
 }
 
 fn summary_fields(bots: &[ReviewBot]) -> String {
-    // Each bot's progress is read under an alias by its place in the list.
     let contexts = bots
         .iter()
         .enumerate()
@@ -192,12 +191,12 @@ fn thread_node() -> String {
     format!("id isResolved comments(first: 100) {{ nodes {{ {COMMENT_NODE} }} {PAGE_INFO} }}")
 }
 
-// An issue comment has no state, so only reviews ask for it.
 fn review_node() -> String {
+    // An issue comment has no state, so only reviews ask for it.
     format!("{PLAIN_NODE} state")
 }
 
-// JSON's string escapes are valid GraphQL, so a name is quoted as a JSON string.
 fn quoted(text: &str) -> String {
+    // JSON's string escapes are valid GraphQL, so a name is quoted as a JSON string.
     Value::from(text).to_string()
 }

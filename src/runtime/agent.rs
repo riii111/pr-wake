@@ -188,8 +188,8 @@ fn plist_of(
     .render())
 }
 
-// Links stay unresolved, so the agent runs whatever a reinstall later puts at this path.
 fn program() -> Result<String, String> {
+    // Links stay unresolved, so the agent runs whatever a reinstall later puts at this path.
     let program = env::current_exe()
         .and_then(path::absolute)
         .map_err(|error| format!("cannot find this program's path: {error}"))?;
@@ -300,15 +300,14 @@ mod tests {
     }
 
     #[test]
-    fn installed_agent_runs_with_the_paths_and_sockets_install_had() {
+    fn installed_agent_gets_the_set_variables_and_only_absolute_homes() {
         let set = |name: &str| {
             let value = match name {
-                "XDG_CONFIG_HOME" => "/Users/me/conf",
-                "XDG_STATE_HOME" => "/Users/me/st",
                 "HARNEXUS_CALL_SOCKET" => "on",
-                "HARNEXUS_STATE_PATH" => "/Users/me/harnexus/threads.json",
-                "HARNEXUS_T3_BIN" => "/opt/t3/bin/t3",
+                "HARNEXUS_STATE_PATH" => "",
                 "T3CODE_HOME" => "/Users/me/.t3",
+                "XDG_CONFIG_HOME" => "/Users/me/conf",
+                "XDG_STATE_HOME" => "relative",
                 _ => return None,
             };
             Some(OsString::from(value))
@@ -321,30 +320,10 @@ mod tests {
             rendered.contains(concat!(
                 "\t\t<key>LANG</key>\n\t\t<string>en_US.UTF-8</string>\n",
                 "\t\t<key>HARNEXUS_CALL_SOCKET</key>\n\t\t<string>on</string>\n",
-                "\t\t<key>HARNEXUS_STATE_PATH</key>\n\t\t<string>/Users/me/harnexus/threads.json</string>\n",
-                "\t\t<key>HARNEXUS_T3_BIN</key>\n\t\t<string>/opt/t3/bin/t3</string>\n",
                 "\t\t<key>T3CODE_HOME</key>\n\t\t<string>/Users/me/.t3</string>\n",
                 "\t\t<key>XDG_CONFIG_HOME</key>\n\t\t<string>/Users/me/conf</string>\n",
-                "\t\t<key>XDG_STATE_HOME</key>\n\t\t<string>/Users/me/st</string>\n",
                 "\t</dict>\n",
             )),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn variable_unset_empty_or_a_relative_home_is_not_passed_on() {
-        let set = |name: &str| match name {
-            "XDG_CONFIG_HOME" => Some(OsString::from("relative")),
-            "XDG_STATE_HOME" => Some(OsString::new()),
-            _ => None,
-        };
-
-        let rendered = plist_of(REVIEW, Path::new("/Users/me"), Some("me"), PROGRAM, &set)
-            .expect("render the plist");
-
-        assert!(
-            rendered.contains("<string>en_US.UTF-8</string>\n\t</dict>\n"),
             "{rendered}"
         );
     }

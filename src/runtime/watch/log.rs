@@ -31,9 +31,9 @@ impl Entry {
         self
     }
 
-    // As the TypeScript watch wrote them, the time and the event lead and the fields keep their given order.
     #[must_use]
     pub(crate) fn line(&self, at: Timestamp) -> String {
+        // As the TypeScript watch wrote them, the time and the event lead and the fields keep their given order.
         let fields = [
             ("time", Value::from(time::format_timestamp(at))),
             ("event", Value::from(self.event)),

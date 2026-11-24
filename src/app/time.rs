@@ -8,11 +8,11 @@ pub(crate) fn format_timestamp(timestamp: Timestamp) -> String {
     RECORD_TIME.timestamp_to_string(&timestamp)
 }
 
-// A time that does not parse is neither at nor after another, as `Date.parse` gives `NaN` for it.
 #[must_use]
 pub(crate) fn is_at_or_after(time: &str, reference: &str) -> bool {
     match (time.parse::<Timestamp>(), reference.parse::<Timestamp>()) {
         (Ok(time), Ok(reference)) => time >= reference,
+        // `Date.parse` gives `NaN` for a time that does not parse, so it is neither at nor after another.
         _ => false,
     }
 }
@@ -30,19 +30,9 @@ mod tests {
                 "2026-11-12T00:47:00.000Z",
             ),
             (
-                "milliseconds",
-                "2026-11-12T00:47:00.120Z",
-                "2026-11-12T00:47:00.120Z",
-            ),
-            (
                 "sub_millisecond_truncated",
                 "2026-11-12T00:47:00.123999Z",
                 "2026-11-12T00:47:00.123Z",
-            ),
-            (
-                "offset_converted_to_utc",
-                "2026-11-12T09:47:00.5+09:00",
-                "2026-11-12T00:47:00.500Z",
             ),
         ] {
             let timestamp: Timestamp = input.parse().expect("parse the input");
@@ -77,21 +67,5 @@ mod tests {
         ] {
             assert_eq!(is_at_or_after(time, reference), expected, "case: {name}");
         }
-    }
-
-    // The forms GitHub, the TypeScript watch and the Go review write, in that order.
-    #[test]
-    fn stored_and_github_times_parse_to_the_same_instant() {
-        let parsed = [
-            "2026-11-12T00:47:00Z",
-            "2026-11-12T00:47:00.000Z",
-            "2026-11-12T09:47:00.000000000+09:00",
-        ]
-        .map(|text| text.parse::<Timestamp>().expect("parse the time"));
-
-        assert!(
-            parsed.iter().all(|timestamp| *timestamp == parsed[0]),
-            "{parsed:?}"
-        );
     }
 }

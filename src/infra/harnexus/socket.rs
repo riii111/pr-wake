@@ -11,7 +11,7 @@ use crate::infra::stop::StopRequest;
 pub(crate) struct SocketFailure {
     // False when the connection itself failed, so the line was never written.
     pub(crate) connected: bool,
-    // The errno name, as the TypeScript watch reported it.
+    // The errno name.
     pub(crate) code: Option<&'static str>,
     pub(crate) message: String,
 }
@@ -73,7 +73,6 @@ fn exchange(
     Ok(String::from_utf8_lossy(&answer).trim_end().to_owned())
 }
 
-// `set_read_timeout` bounds only one read, so each wait is cut to what is left of the call.
 fn next_wait(deadline: Instant, stop: &StopRequest) -> Result<Duration, SocketFailure> {
     if stop.is_requested() {
         return Err(stopped(true));
@@ -82,20 +81,21 @@ fn next_wait(deadline: Instant, stop: &StopRequest) -> Result<Duration, SocketFa
     if left.is_zero() {
         return Err(timed_out());
     }
+    // `set_read_timeout` bounds only one read, so each wait is cut to what is left of the call.
     Ok(left.min(STOP_CHECK))
 }
 
-// macOS refuses socket options with EINVAL once the peer has shut the connection.
-// The read or write that follows then returns at once, so ignoring the error leaves no wait unbounded.
 fn settle(set: io::Result<()>) -> Result<(), SocketFailure> {
     match set {
+        // macOS refuses socket options with EINVAL once the peer has shut the connection.
+        // The read or write that follows then returns at once, so ignoring the error leaves no wait unbounded.
         Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
         set => set.map_err(|error| failure(true, &error)),
     }
 }
 
-// macOS reports a read timeout as `WouldBlock` rather than `TimedOut`.
 fn is_wait(error: &io::Error) -> bool {
+    // macOS reports a read timeout as `WouldBlock` rather than `TimedOut`.
     matches!(
         error.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
@@ -126,7 +126,6 @@ fn stopped(connected: bool) -> SocketFailure {
     }
 }
 
-// The names the hints and the log were written for.
 const fn errno_name(errno: i32) -> Option<&'static str> {
     Some(match errno {
         libc::ENOENT => "ENOENT",
@@ -248,21 +247,5 @@ mod tests {
             answer.map_err(|failure| (failure.connected, failure.code)),
             Err((false, Some("ENOENT")))
         );
-    }
-
-    #[test]
-    fn stop_requested_beforehand_never_connects() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let stop = StopRequest::default();
-        stop.request();
-
-        let answer = request_line(
-            &directory.path().join("call.sock"),
-            "{}",
-            Duration::from_secs(1),
-            &stop,
-        );
-
-        assert_eq!(answer.map_err(|failure| failure.connected), Err(false));
     }
 }

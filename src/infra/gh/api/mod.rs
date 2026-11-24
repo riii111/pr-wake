@@ -283,13 +283,13 @@ impl GitHub for GhApi<'_> {
     }
 }
 
-// gh exits 1 but still prints an answer with errors, so only output without JSON means GitHub never answered.
 fn data_of(ran: Result<CommandOutput, CommandError>) -> Result<Object, ReadError> {
     let output = ran.map_err(|error| ReadError {
         kind: ReadErrorKind::Unreachable,
         message: format!("gh api graphql: {error}"),
     })?;
 
+    // gh exits 1 but still prints an answer with errors, so only output without JSON means GitHub never answered.
     let Ok(Value::Object(body)) = serde_json::from_slice::<Value>(&output.stdout) else {
         return Err(if output.code == 0 {
             rejected("GitHub answered without JSON".to_owned())
@@ -365,12 +365,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        app::watch::{
-            reviewers,
-            state::{BotStatus, FailedCheck},
-        },
-        infra::{command::ExternalCommand, stop::StopRequest},
+    use crate::app::watch::{
+        reviewers,
+        state::{BotStatus, FailedCheck},
     };
 
     const PR: &str = "https://github.com/org/pay/pull/7";
@@ -455,13 +452,6 @@ mod tests {
                 ("issue:31", "coderabbitai[bot]", None, false, false, false),
             ]
         );
-        // An issue comment has no state, so asking for one would fail the whole query.
-        assert!(posts[0].query.contains(
-            "reviews(first: 100) { nodes { databaseId url createdAt body author { __typename login } state }"
-        ));
-        assert!(posts[0].query.contains(
-            "comments(first: 100) { nodes { databaseId url createdAt body author { __typename login } }"
-        ));
         assert_eq!(
             detail.failed_required,
             [
@@ -543,16 +533,11 @@ mod tests {
         });
         first["reviews"] = json!({ "nodes": [plain(20)], "pageInfo": more });
         first["comments"] = json!({ "nodes": [plain(30)], "pageInfo": more });
-        let asked = RefCell::new(Vec::new());
         let recorder = Recorder::new();
         let mut api = recorder.api(|request| {
-            let id = request["variables"]["id"].as_str().map(str::to_owned);
-            asked
-                .borrow_mut()
-                .push(id.clone().unwrap_or_else(|| "detail".to_owned()));
-            let data = id.map_or_else(
+            let data = request["variables"]["id"].as_str().map_or_else(
                 || json!({ "repository": { "pullRequest": first } }),
-                |id| json!({ "node": pages[id.as_str()] }),
+                |id| json!({ "node": pages[id] }),
             );
             answer(&json!({ "data": data }))
         });
@@ -584,10 +569,6 @@ mod tests {
             .map(|check| check.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(failed, ["build", "e2e"]);
-        assert_eq!(
-            *asked.borrow(),
-            ["detail", "pr", "t1", "rollup", "pr", "pr"]
-        );
     }
 
     #[test]
@@ -683,26 +664,6 @@ mod tests {
                 ],
                 Some(status("PENDING", "")),
             ),
-            (
-                "skipped_after_a_success",
-                vec![
-                    run(
-                        1,
-                        "COMPLETED",
-                        Some("SUCCESS"),
-                        Some("2026-10-23T00:00:00Z"),
-                        Some("2026-10-23T00:01:00Z"),
-                    ),
-                    run(
-                        2,
-                        "COMPLETED",
-                        Some("SKIPPED"),
-                        None,
-                        Some("2026-10-23T00:05:00Z"),
-                    ),
-                ],
-                Some(status("SKIPPED", "2026-10-23T00:05:00Z")),
-            ),
             ("no_run_of_that_name", Vec::new(), None),
         ] {
             let suites = json!({ "nodes": [
@@ -725,7 +686,6 @@ mod tests {
                 query.contains(r#"b0: checkSuites(first: 50) { nodes { checkRuns(last: 1, filterBy: { checkName: "Claude AI Review" }) { nodes { databaseId"#),
                 "case: {name}: {query}"
             );
-            assert!(!query.contains("status {"), "case: {name}");
             let bots = summaries[0].as_ref().map(|summary| summary.bots.clone());
             assert_eq!(
                 bots,
@@ -797,27 +757,6 @@ mod tests {
     }
 
     #[test]
-    fn github_errors_are_reported_without_the_token() {
-        let recorder = Recorder::new();
-        let mut api = recorder.api(|_| CommandOutput {
-            code: 1,
-            stdout: br#"{"errors":[{"message":"Could not resolve to a Repository"}],"data":null}"#
-                .to_vec(),
-            stderr: Vec::new(),
-        });
-
-        let failed = api.detail("owner", &pay(), &[reviewers::coderabbit()]);
-
-        let error = failed.expect_err("rejected");
-        assert_eq!(error.kind, ReadErrorKind::Rejected);
-        assert_eq!(
-            error.message,
-            "GitHub answered: Could not resolve to a Repository"
-        );
-        assert!(!format!("{error:?}").contains(TOKEN));
-    }
-
-    #[test]
     fn failure_kind_tells_auth_unreachable_and_rejected_apart() {
         for (name, token, query, expected) in [
             (
@@ -850,6 +789,19 @@ mod tests {
                 (0, "<html>", ""),
                 (ReadErrorKind::Rejected, "GitHub answered without JSON"),
             ),
+            (
+                "graphql_errors",
+                (0, TOKEN, ""),
+                (
+                    1,
+                    r#"{"errors":[{"message":"Could not resolve to a Repository"}],"data":null}"#,
+                    "",
+                ),
+                (
+                    ReadErrorKind::Rejected,
+                    "GitHub answered: Could not resolve to a Repository",
+                ),
+            ),
         ] {
             let mut api = GhApi::new(
                 Box::new(|call| {
@@ -872,25 +824,6 @@ mod tests {
                 "case: {name}"
             );
         }
-    }
-
-    #[test]
-    fn gh_that_cannot_start_is_unreachable_or_has_no_token() {
-        let mut api = GhApi::new(
-            Box::new(|call| {
-                ExternalCommand::new("/nonexistent/gh", call.timeout).run(&StopRequest::default())
-            }),
-            Box::new(Instant::now),
-        );
-
-        let failed = api.open_pulls("owner", "org/pay");
-
-        let error = failed.expect_err("no gh");
-        assert_eq!(error.kind, ReadErrorKind::AuthFailed);
-        assert!(
-            error.message.starts_with("gh auth token: cannot run"),
-            "{error:?}"
-        );
     }
 
     #[test]

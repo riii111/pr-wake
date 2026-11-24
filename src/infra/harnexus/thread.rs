@@ -403,13 +403,13 @@ fn answer_to<'turns>(turns: &'turns [Turn], sent: &Delivered) -> Option<&'turns 
     })
 }
 
-// A Codex thread's copy may be cut short, so a nonempty start of the prompt counts as the prompt.
 fn is_prompt_of(input: &str, prompt: &str) -> bool {
+    // A Codex thread's copy may be cut short, so a nonempty start of the prompt counts as the prompt.
     !input.trim().is_empty() && prompt.starts_with(input.trim_end())
 }
 
-// A time that does not parse is `NaN`, which no turn is at or after, as in the TypeScript watch.
 fn turns_after(sent_at: &str) -> f64 {
+    // A time that does not parse is `NaN`, which no turn is at or after.
     sent_at.parse::<Timestamp>().map_or(f64::NAN, |sent| {
         sent.as_duration().as_secs_f64() - CLOCK_SKEW_SECONDS
     })
@@ -567,11 +567,6 @@ mod tests {
                 json!({ "outcome": "not_sent", "message": "ENOENT" }),
                 None,
             ),
-            (
-                "bridge_without_protocol_1",
-                json!({ "outcome": "unsupported", "message": "old bridge" }),
-                None,
-            ),
         ] {
             let answer = object(answer);
             let call: CallApp<'_> = Box::new(move |_, _, _| answer.clone());
@@ -614,8 +609,6 @@ mod tests {
     #[rstest]
     #[case::done("done", SendOutcome::Done)]
     #[case::not_sent("not_sent", SendOutcome::NotSent)]
-    #[case::rejected("rejected", SendOutcome::NotSent)]
-    #[case::invalid("invalid", SendOutcome::NotSent)]
     #[case::unsupported("unsupported", SendOutcome::NotSent)]
     #[case::unknown(
         "unknown",

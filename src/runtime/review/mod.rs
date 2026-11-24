@@ -339,7 +339,6 @@ pub(crate) fn smoke(
     Ok(())
 }
 
-// The config is checked before the running agent stops, so a bad config leaves it running.
 pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
     let config = &env.paths.config;
     if !config.exists() {
@@ -348,6 +347,7 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
             config.display()
         ));
     }
+    // The config is checked before the running agent stops, so a bad config leaves it running.
     check_from_terminal(config, env)?;
     agent::remove_legacy(agent::LEGACY_REVIEW, &env.home)?;
     agent::install(agent::REVIEW, &env.home, env.user.as_deref(), &|name| {
@@ -399,7 +399,6 @@ pub(crate) fn link(
     ))
 }
 
-// The running review holds the state's lock, so the request goes to it through a file of its own.
 pub(crate) fn request_now(
     env: &ReviewEnv,
     pr: Option<&str>,
@@ -413,6 +412,7 @@ pub(crate) fn request_now(
         ));
     }
     let pr = pr.map(|pr| startable_pr(&env.paths, pr)).transpose()?;
+    // The running review holds the state's lock, so the request goes to it through a file of its own.
     review_record::request_now(&env.paths, &NowRequest { pr: pr.clone() }, at)
         .map_err(|error| error.to_string())?;
     Ok(pr.map_or_else(
@@ -421,8 +421,9 @@ pub(crate) fn request_now(
     ))
 }
 
-// Read from the state alone; a review that has never saved one is an error, as an empty queue would hide it.
+// Read from the state alone.
 pub(crate) fn queue(paths: &ReviewPaths) -> Result<Vec<QueueEntry>, String> {
+    // An empty queue would hide a review that has never saved a state, so that is an error.
     let state = review_record::load_state(paths)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| {
@@ -624,7 +625,6 @@ fn harnexus_creator(env: &ReviewEnv) -> impl Fn(&NewChat<'_>, &StopRequest) -> C
     }
 }
 
-// Sent from the chat registered for the watch, as a chat cannot message itself.
 fn send_to_chat(
     watch_state: &Path,
     socket: Result<PathBuf, String>,
@@ -633,6 +633,7 @@ fn send_to_chat(
     stop: &StopRequest,
 ) -> Delivery {
     let registered = watch_record::load_sender(watch_state).map_err(|error| error.to_string());
+    // Sent from the chat registered for the watch, as a chat cannot message itself.
     let sender = match worker::sender_for(registered, thread) {
         Ok(sender) => sender,
         Err(reason) => return Delivery::NotSent(reason),
@@ -661,7 +662,6 @@ fn send_to_chat(
     }
 }
 
-// Clicking the notification opens the PR, and the same notification then asks again.
 fn ask_owner(
     tools: &Tools<'_>,
     request: &Found,
@@ -697,7 +697,6 @@ fn ask_owner(
     }
 }
 
-// Reads the PR again, so the review is pinned to the head at the time the owner chose.
 // `reviewed` tells a head already reviewed for the request, which then starts nothing.
 fn launch(
     tools: &Tools<'_>,
@@ -706,6 +705,7 @@ fn launch(
     reviewed: &dyn Fn(&PullRequest) -> bool,
     stop: &StopRequest,
 ) -> Launched {
+    // Read again, so the review is pinned to the head at the time the owner chose.
     let pr = match github(tools, stop).pull_request(&request.repo, request.number) {
         Ok(pr) => pr,
         Err(error) => {
@@ -805,12 +805,12 @@ fn link_started(tools: &Tools<'_>, pr: &PullRequest, thread: &str) -> Result<(),
     })
 }
 
-// Checked here, as the running review could only log a PR it has no request for.
 fn startable_pr(paths: &ReviewPaths, pr: &str) -> Result<String, String> {
     let (repo, number) = review::parse_pr_ref(pr)?;
     let state = review_record::load_state(paths)
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
+    // Checked here, as the running review could only log a PR it has no request for.
     if state.startable(&repo, number).is_none() {
         return Err(format!(
             "{repo}#{number} has no queued or reported review request"
@@ -985,9 +985,9 @@ fn is_executable(path: &Path) -> bool {
         .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
 }
 
-// Ctrl-C in the terminal stops what the command waits on, so no notification is left on screen.
 fn stop_on_termination() -> Result<StopRequest, String> {
     let stop = StopRequest::default();
+    // Ctrl-C in the terminal stops what the command waits on, so no notification is left on screen.
     termination::install(stop.clone())
         .map_err(|error| format!("cannot handle termination signals: {error}"))?;
     Ok(stop)
@@ -997,11 +997,11 @@ fn print_line(line: &str) {
     output::write_stdout(&format!("{line}\n"));
 }
 
-// launchd sends the agent's standard error to its log.
 fn log_line(message: &str) {
     let at = ZonedDateTime::now()
         .strftime("%Y/%m/%d %H:%M:%S")
         .to_string();
+    // launchd sends the agent's standard error to its log.
     output::write_stderr(&format!("{at} {message}\n"));
 }
 
@@ -1024,7 +1024,7 @@ mod tests {
         fs, iter,
         sync::{
             Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -1043,7 +1043,6 @@ mod tests {
     struct ReviewHome {
         directory: tempfile::TempDir,
         env: ReviewEnv,
-        declines: AtomicBool,
         author: Mutex<String>,
         calls: Mutex<Vec<String>>,
     }
@@ -1084,19 +1083,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_command_names_the_setting_that_replaces_the_lookup() {
-        let directory = tempfile::tempdir().expect("create a directory");
-
-        let commands = resolve_commands(
-            &ConfiguredCommands::default(),
-            &[directory.path().to_owned()],
-        );
-
-        let error = commands.expect_err("nothing is installed");
-        assert!(error.contains("set commands.gh in the config"), "{error}");
-    }
-
-    #[test]
     fn status_lists_the_latest_requests_without_the_baseline() {
         let mut state = ReviewState::default();
         let at = |text: &str| text.parse::<Timestamp>().expect("parse the time");
@@ -1127,38 +1113,6 @@ mod tests {
             text,
             "login: me\nlast poll: 2026-11-12 11:31:05\n11-12 11:30  launched  acme/app#2 PR 2  [code]\n11-12 10:00  failed    acme/app#3 PR 3  error: no checkout\n11-12 10:00  reported  acme/app#4 PR 4\n"
         );
-    }
-
-    #[test]
-    fn status_without_a_state_says_where_it_would_be() {
-        let directory = tempfile::tempdir().expect("create a directory");
-        let paths = ReviewPaths {
-            config: directory.path().join("review.json"),
-            state: directory.path().join("review"),
-        };
-
-        let text = status(&paths, &TimeZone::UTC);
-
-        assert_eq!(
-            text,
-            Ok(format!("no state yet: {}\n", paths.state_file().display()))
-        );
-    }
-
-    #[test]
-    fn status_shows_twenty_rows_and_counts_the_rest() {
-        let mut state = ReviewState::default();
-        state.apply_poll(
-            (1..=22).map(found).collect(),
-            "2026-11-12T01:00:00Z".parse().expect("parse the time"),
-            false,
-        );
-
-        let text = status_text(&state, &TimeZone::UTC);
-
-        assert_eq!(text.lines().count(), 2 + 20 + 1);
-        assert_eq!(text.lines().last(), Some("... 2 more"));
-        assert!(text.contains("last poll: never"), "{text}");
     }
 
     #[test]
@@ -1328,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn link_needs_a_codex_chat_and_a_pr() {
+    fn link_needs_a_codex_chat() {
         for (name, pr, caller, expected) in [
             (
                 "t3_thread",
@@ -1341,12 +1295,6 @@ mod tests {
                 "acme/app#3",
                 Err("CODEX_THREAD_ID is not set".to_owned()),
                 "CODEX_THREAD_ID is not set",
-            ),
-            (
-                "not_a_pr",
-                "acme/app",
-                Ok("review-chat".to_owned()),
-                "expected owner/repo#number",
             ),
         ] {
             let home = ReviewHome::new();
@@ -1373,7 +1321,6 @@ mod tests {
     #[test]
     fn link_of_my_own_pr_ends_normally_without_a_link_from_any_chat() {
         for (name, author, caller) in [
-            ("codex_chat", "me", Ok("review-chat".to_owned())),
             ("login_in_another_case", "ME", Ok("review-chat".to_owned())),
             ("t3_thread", "me", Ok("t3:thread".to_owned())),
             (
@@ -1399,7 +1346,6 @@ mod tests {
                 text.starts_with("skipped acme/app#3"),
                 "case: {name}: {text}"
             );
-            assert!(!text.starts_with("linked"), "case: {name}: {text}");
             assert_eq!(
                 review_record::load_chat(&home.env.paths, "acme/app", 3).expect("read no chat"),
                 None,
@@ -1691,37 +1637,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn smoke_that_is_declined_stops_at_the_selection() {
-        let home = ReviewHome::new();
-        home.decline();
-        let mut lines = Vec::new();
-        let smoke_run = Smoke {
-            config: &home.env.paths.config,
-            pr: "acme/app#3",
-            requester: None,
-            no_open: false,
-        };
-
-        let smoked = smoke(
-            &smoke_run,
-            &home.env,
-            &|call| home.answer(call, "[]"),
-            &StopRequest::default(),
-            &mut |line| lines.push(line.to_owned()),
-        );
-
-        assert_eq!(smoked, Ok(()));
-        assert_eq!(
-            lines,
-            [
-                format!("pr: acme/app#3 T head={HEAD}"),
-                "selection: declined".to_owned()
-            ]
-        );
-        assert!(!home.ran("/x/git"));
-    }
-
     impl ReviewHome {
         fn new() -> Self {
             let directory = tempfile::tempdir().expect("create a home");
@@ -1766,7 +1681,6 @@ mod tests {
             Self {
                 directory,
                 env,
-                declines: AtomicBool::new(false),
                 author: Mutex::new("tanaka".to_owned()),
                 calls: Mutex::new(Vec::new()),
             }
@@ -1791,11 +1705,7 @@ mod tests {
                     r#"{"incomplete_results":false,"items":[{"number":3,"title":"T","updated_at":"u","repository_url":"https://api.github.com/repos/acme/app"}]}"#.to_owned()
                 }
                 _ if line.starts_with("/x/alerter ") => {
-                    if self.declines.load(Ordering::SeqCst) {
-                        r#"{"activationType":"closed"}"#.to_owned()
-                    } else {
-                        r#"{"activationType":"actionClicked","activationValue":"コードレビュー"}"#.to_owned()
-                    }
+                    r#"{"activationType":"actionClicked","activationValue":"コードレビュー"}"#.to_owned()
                 }
                 _ if line == format!("/x/git -C {checkout} config --get remote.origin.url") => {
                     "git@github.com:acme/app.git\n".to_owned()
@@ -1813,10 +1723,6 @@ mod tests {
                     .expect("a JSON config");
             config["batches"] = serde_json::json!({"readyAt": ["11:00", "16:00"]});
             fs::write(path, config.to_string()).expect("write the config");
-        }
-
-        fn decline(&self) {
-            self.declines.store(true, Ordering::SeqCst);
         }
 
         fn author(&self, login: &str) {

@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
-// A failed write to a closed stream leaves nowhere to report it, so the error is dropped.
 pub(crate) fn write_stdout(text: &str) {
     let mut stdout = io::stdout().lock();
+    // A failed write to a closed stream leaves nowhere to report it, so the error is dropped.
     let _ = stdout
         .write_all(text.as_bytes())
         .and_then(|()| stdout.flush());

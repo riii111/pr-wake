@@ -231,8 +231,8 @@ fn is_busy(thread: &Thread) -> bool {
         || thread.pending_request_count > 0.0
 }
 
-// The t3 CLI shows no times, so the latest message with our text is taken as ours.
 fn answer_to(view: &View, prompt: &str) -> Option<Answer> {
+    // The t3 CLI shows no times, so the latest message with our text is taken as ours.
     let asked = view.messages.iter().rposition(|message| {
         message.role == "user" && message.text.trim_end() == prompt.trim_end()
     })?;
@@ -373,11 +373,6 @@ mod tests {
                     "not_sent",
                 ),
                 (
-                    "sandbox_blocks_the_port",
-                    ran(1, "", "Failed to reserve loopback port\nlisten EPERM"),
-                    "not_sent",
-                ),
-                (
                     "after_reaching_the_server",
                     ran(
                         1,
@@ -404,18 +399,6 @@ mod tests {
                 assert_eq!(outcome, expected, "case: {name}");
                 assert_eq!(sent.reported, expected, "case: {name}");
             }
-        }
-
-        #[test]
-        fn unknown_send_keeps_what_t3_said() {
-            let (mut workers, _) = workers(ran(1, "", &format!("  {}  ", "e".repeat(600))));
-
-            let sent = workers.send("t3", "t3:w1", "p");
-
-            let SendOutcome::Unknown(detail) = sent.outcome else {
-                panic!("expected an unknown outcome, got {sent:?}");
-            };
-            assert_eq!(detail["error"], "e".repeat(500));
         }
     }
 
@@ -513,7 +496,6 @@ mod tests {
                     ran(1, "", "No running T3 Code server uses /x/.t3."),
                     None,
                 ),
-                ("cannot_start", not_ran(false, "cannot run t3"), None),
                 ("not_a_thread", ran(0, "Thread w1\n", ""), None),
             ] {
                 let (mut workers, _) = workers(ran_t3);

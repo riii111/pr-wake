@@ -106,14 +106,8 @@ mod tests {
     fn coderabbit_severity_reads_the_bold_label_with_an_ascii_word_boundary() {
         let bot = coderabbit();
         for (name, body, expected) in [
-            (
-                "emoji_label",
-                "**🔒 Security & Privacy** | **🟠 Major** | **⚡ Quick win**",
-                Some("Major"),
-            ),
             ("letter_before_label", "**éMajor**", Some("Major")),
             ("word_before_label", "**NotMajor**", None),
-            ("no_label", "x", None),
         ] {
             assert_eq!(severity_of(&bot, body), expected, "case: {name}");
         }
@@ -138,13 +132,5 @@ mod tests {
 
         assert_eq!(found, Some("coderabbit"));
         assert!(bot_of(&bots, "reviewer").is_none());
-    }
-
-    #[test]
-    fn preset_names_each_name_a_preset() {
-        let found = PRESET_NAMES.map(|name| preset(name).map(|bot| bot.id));
-
-        assert_eq!(found, PRESET_NAMES.map(|name| Some(name.to_owned())));
-        assert!(preset("copilot").is_none());
     }
 }

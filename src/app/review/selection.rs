@@ -123,9 +123,9 @@ pub(crate) enum Pending {
 
 const MAX_ID_CHARS: usize = 64;
 
-// The id names a file, so it is kept to the characters the caller generates.
 #[must_use]
 pub(crate) fn is_selection_id(id: &str) -> bool {
+    // The id names a file, so it is kept to the characters the caller generates.
     (1..=MAX_ID_CHARS).contains(&id.len())
         && id
             .chars()
@@ -325,7 +325,6 @@ mod tests {
             let at = |text: &str| text.parse::<Timestamp>().expect("parse the time");
             state.apply_poll(vec![found(12, 10)], at("2026-11-12T00:00:00Z"), false);
             state.apply_poll(vec![found(12, 20)], at("2026-11-12T01:00:00Z"), false);
-            // GitHub names the direct event again once the team's request is removed.
             state.apply_poll(vec![found(12, 10)], at("2026-11-12T02:00:00Z"), false);
             state
                 .requests

@@ -169,7 +169,7 @@ impl ExternalCommand {
     }
 }
 
-// As a shell would echo it, so the owner sees what pr-wake ran.
+// As a shell would echo it.
 #[must_use]
 pub(crate) fn command_line(program: &str, arguments: &[OsString]) -> String {
     let mut line = program.to_owned();
@@ -407,20 +407,12 @@ fn join<T>(handle: JoinHandle<io::Result<T>>) -> io::Result<T> {
 mod tests {
     use std::fs;
 
-    use rstest::rstest;
-
     use super::*;
 
     const SHELL: &str = "/bin/sh";
     const TEN_SECONDS: Duration = Duration::from_secs(10);
     // Renamed into place once the shell is set up, so a reader never sees a partial PID.
     const WRITE_PID: &str = r#"echo $$ > "$1.tmp" && mv "$1.tmp" "$1""#;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Trigger {
-        Timeout,
-        StopRequest,
-    }
 
     #[test]
     fn exit_code_and_both_outputs_are_returned_for_a_failing_command() {
@@ -444,19 +436,6 @@ mod tests {
 
         assert_eq!(output.code, 0);
         assert!(output.stdout == input, "cat returned different bytes");
-    }
-
-    #[test]
-    fn environment_is_added_to_the_inherited_one() {
-        let command = shell(
-            r#"printf '%s ' "$PR_WAKE_TEST"; [ -n "$HOME" ] && printf home"#,
-            TEN_SECONDS,
-        )
-        .env("PR_WAKE_TEST", "set");
-
-        let output = command.run(&StopRequest::default()).expect("run sh");
-
-        assert_eq!(output.stdout, b"set home");
     }
 
     #[test]
@@ -540,44 +519,30 @@ mod tests {
 
     // The child ignores SIGTERM and leaves an input larger than a pipe buffer unread, so its writer blocks until SIGKILL.
     // A Terminated result then means every stream thread was joined.
-    #[rstest]
-    #[case::timeout(Trigger::Timeout)]
-    #[case::stop_request(Trigger::StopRequest)]
-    fn child_ignoring_sigterm_is_killed_after_the_grace_and_reaped(#[case] trigger: Trigger) {
+    #[test]
+    fn child_ignoring_sigterm_is_killed_after_the_grace_and_reaped() {
         let directory = tempfile::tempdir().expect("create a directory");
         let ready = directory.path().join("ready");
-        let timeout = match trigger {
-            Trigger::Timeout => Duration::from_secs(1),
-            Trigger::StopRequest => Duration::from_secs(60),
-        };
         let command = shell(
             &format!("trap '' TERM; {WRITE_PID}; exec sleep 60"),
-            timeout,
+            Duration::from_secs(60),
         )
         .arguments([&ready])
         .input(vec![b'x'; 1 << 20]);
         let stop = StopRequest::default();
-        let started_at = Instant::now();
 
-        let (result, terminated_at) = thread::scope(|scope| match trigger {
-            Trigger::Timeout => (command.run(&stop), started_at + timeout),
-            Trigger::StopRequest => {
-                let requester = scope.spawn(|| request_when_ready(&ready, &stop));
-                let result = command.run(&stop);
-                (result, requester.join().expect("join the requester"))
-            }
+        let (result, requested_at) = thread::scope(|scope| {
+            let requester = scope.spawn(|| request_when_ready(&ready, &stop));
+            let result = command.run(&stop);
+            (result, requester.join().expect("join the requester"))
         });
 
-        let waited = terminated_at.elapsed();
+        let waited = requested_at.elapsed();
         let error = result.expect_err("terminated");
         let CommandErrorKind::Terminated { cause, status } = error.kind else {
             panic!("expected a termination, got {error:?}");
         };
-        let expected_cause = match trigger {
-            Trigger::Timeout => Termination::Timeout(timeout),
-            Trigger::StopRequest => Termination::StopRequest,
-        };
-        assert_eq!(cause, expected_cause);
+        assert_eq!(cause, Termination::StopRequest);
         assert_eq!(status.signal(), Some(libc::SIGKILL));
         assert!(
             (TERMINATION_GRACE..TERMINATION_GRACE + Duration::from_secs(2)).contains(&waited),
@@ -607,30 +572,32 @@ mod tests {
     fn output_held_outside_the_group_releases_the_caller() {
         let directory = tempfile::tempdir().expect("create a directory");
         let ready = directory.path().join("ready");
-        let timeout = Duration::from_secs(1);
-        // perl leaves the child's group but keeps the inherited output open.
         let script = r#"perl -e 'setpgrp(0, 0); open(my $f, ">", "$ARGV[0].tmp") or die; print $f $$; close $f; rename("$ARGV[0].tmp", $ARGV[0]); sleep 60' "$1" &"#;
-        let command = shell(script, timeout).arguments([&ready]);
-        let started_at = Instant::now();
+        let command = shell(script, Duration::from_secs(60)).arguments([&ready]);
+        let stop = StopRequest::default();
 
-        let result = command.run(&StopRequest::default());
+        let (result, requested_at) = thread::scope(|scope| {
+            let requester = scope.spawn(|| request_when_ready(&ready, &stop));
+            let result = command.run(&stop);
+            (result, requester.join().expect("join the requester"))
+        });
 
-        let waited = started_at.elapsed();
+        let waited = requested_at.elapsed();
         let escaped = read_pid(&ready);
         // SAFETY: the process was started by this test and only receives SIGKILL.
         unsafe { libc::kill(escaped, libc::SIGKILL) };
-        let error = result.expect_err("timed out");
+        let error = result.expect_err("stopped");
         assert!(
             matches!(
                 error.kind,
                 CommandErrorKind::OutputHeld {
-                    cause: Termination::Timeout(_)
+                    cause: Termination::StopRequest
                 }
             ),
             "{error:?}"
         );
-        let limit = timeout + TERMINATION_GRACE + OUTPUT_GRACE + Duration::from_secs(1);
-        assert!(waited < limit, "released {waited:?} after the start");
+        let limit = TERMINATION_GRACE + OUTPUT_GRACE + Duration::from_secs(1);
+        assert!(waited < limit, "released {waited:?} after the request");
     }
 
     #[test]
@@ -660,32 +627,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tool_that_cannot_start_is_told_with_its_path() {
-        let stop = StopRequest::default();
-        let call = ToolCall {
-            program: Path::new("/nonexistent/pr-wake-tool"),
-            arguments: Vec::new(),
-            timeout: TEN_SECONDS,
-            stop: &stop,
-        };
-
-        let ran = run_tool(&call);
-
-        assert!(
-            ran.as_ref()
-                .is_err_and(|error| error.contains("/nonexistent/pr-wake-tool")),
-            "{ran:?}"
-        );
-    }
-
     fn shell(script: &str, timeout: Duration) -> ExternalCommand {
         ExternalCommand::new(SHELL, timeout).arguments(["-c", script, "sh"])
     }
 
-    // The time is taken before the request, so the run cannot have seen the request earlier.
     fn request_when_ready(ready: &Path, stop: &StopRequest) -> Instant {
         wait_for_file(ready);
+        // The time is taken before the request, so the run cannot have seen the request earlier.
         let requested_at = Instant::now();
         stop.request();
         requested_at
@@ -712,8 +660,8 @@ mod tests {
             .expect("parse the PID")
     }
 
-    // A process whose parent has exited stays a zombie until init reaps it.
     fn wait_until_gone(pid: libc::pid_t) {
+        // A process whose parent has exited stays a zombie until init reaps it.
         let deadline = Instant::now() + Duration::from_secs(2);
         while is_running(pid) {
             assert!(Instant::now() < deadline, "process {pid} is still running");

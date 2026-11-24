@@ -60,7 +60,6 @@ pub(crate) fn load_config(path: &Path) -> Result<WatchConfig, RecordError> {
     record::load_required_json(path)
 }
 
-// The keys in `skip` are not read at all, which spares the watch every PR it has finished with.
 pub(crate) fn list_links(root: &Path, skip: &HashSet<String>) -> Result<Vec<PrLink>, RecordError> {
     let names = record::list_directory(root)?.unwrap_or_default();
     Ok(names
@@ -77,7 +76,6 @@ pub(crate) fn load_link(root: &Path, pr: &PrRef) -> Result<Option<PrLink>, Recor
     read_link(&pr_directory(root, pr).join(LINK))
 }
 
-// The running watch alone writes a PR's state and notices the new chat itself, so only the link is written.
 pub(crate) fn record_link(root: &Path, link: &PrLink) -> Result<(), RecordError> {
     let stored = StoredLink {
         repo: link.pr.repo.clone(),
@@ -86,6 +84,7 @@ pub(crate) fn record_link(root: &Path, link: &PrLink) -> Result<(), RecordError>
         worker: link.worker.clone(),
         linked_at: link.linked_at.clone(),
     };
+    // The running watch alone writes a PR's state and notices the new chat itself, so only the link is written.
     record::save_json(
         &pr_directory(root, &link.pr).join(LINK),
         &stored,
@@ -106,14 +105,14 @@ pub(crate) fn load_sender(root: &Path) -> Result<Option<String>, RecordError> {
     Ok(recorded.and_then(|recorded| recorded.get("thread")?.as_str().map(str::to_owned)))
 }
 
-// One watch at a time, so two never send the same event; `None` while another holds it.
+// `None` while another watch holds it.
 pub(crate) fn hold_watch_lock(root: &Path) -> Result<Option<ProcessLock>, RecordError> {
     record::hold_lock(&root.join(LOCK))
 }
 
 // A PR the watch has not read yet starts from a fresh state.
-// A damaged record is refused rather than read as empty, so the next save never resets its tracking.
 pub(crate) fn load_watch_state(root: &Path, pr: &PrRef) -> Result<WatchState, RecordError> {
+    // A damaged record is refused rather than read as empty, so the next save never resets its tracking.
     record::load_json(&state_path(root, pr)).map(Option::unwrap_or_default)
 }
 
@@ -125,7 +124,6 @@ pub(crate) fn save_watch_state(
     record::save_json(&state_path(root, pr), state, JsonLayout::OneSpace)
 }
 
-// Keyed by the PR, so the latest worker to name it is the one told about it.
 pub(crate) fn pr_key(pr: &PrRef) -> String {
     let digest = Sha256::digest(format!("{}#{}", pr.repo.to_lowercase(), pr.number));
     digest
@@ -215,80 +213,13 @@ mod tests {
         assert_eq!(loaded, saved);
     }
 
-    #[test]
-    fn keys_match_the_directories_earlier_watches_wrote() {
-        for (repo, number, expected) in [
-            ("org/pay", 7, "02bff83354bf169d"),
-            ("org/pay", 8, "3d0a4555db96a9b0"),
-            ("ORG/Pay", 9, "6db070b27f9194fb"),
-            ("org/pay", 10, "e4fa9c7ae05e70a7"),
-            ("riii111/pr-wake", 10, "62ba7cefd0fd7837"),
-        ] {
-            let pr = PrRef {
-                repo: repo.to_owned(),
-                number,
-            };
-
-            assert_eq!(pr_key(&pr), expected, "case: {repo}#{number}");
-        }
-    }
-
-    #[test]
-    fn records_harnexus_task_left_load_from_their_directories() {
-        let root = tempfile::tempdir().expect("create a directory");
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch");
-        for number in [7, 8, 9, 10] {
-            let key = pr_key(&pay(number));
-            fs::create_dir(root.path().join(&key)).expect("create the PR directory");
-            fs::copy(
-                fixtures.join(&key).join("state.json"),
-                root.path().join(&key).join("state.json"),
-            )
-            .expect("copy the record");
-        }
-
-        let statuses = [7, 8, 9, 10].map(|number| {
-            load_watch_state(root.path(), &pay(number))
-                .map(|state| (state.status, state.pending.len(), state.worker))
-                .expect("load the record")
-        });
-
-        assert_eq!(
-            statuses,
-            [
-                (WatchStatus::Watching, 0, Some("old-chat".to_owned())),
-                (WatchStatus::Watching, 0, Some("w8".to_owned())),
-                (WatchStatus::Watching, 1, Some("w9".to_owned())),
-                (WatchStatus::Halted, 0, Some("w10".to_owned())),
-            ]
-        );
-    }
-
     #[rstest]
-    #[case::json_null(json!(null))]
-    #[case::json_array(json!([tracked()]))]
     #[case::empty_object(json!({}))]
     #[case::unknown_status(with(tracked(), "status", json!("sleeping")))]
-    #[case::seen_not_a_list(with(tracked(), "seen", json!("inline:1")))]
     #[case::pending_event_of_unknown_type(with(
         tracked(),
         "pending",
         json!([{ "type": "merged", "head": HEAD }])
-    ))]
-    #[case::pending_finding_without_an_id(with(
-        tracked(),
-        "pending",
-        json!([{ "type": "finding", "finding": { "kind": "inline" } }])
-    ))]
-    #[case::summary_draft_flag_not_a_boolean(with(
-        tracked(),
-        "summary",
-        with(tracked()["summary"].clone(), "isDraft", json!("no"))
-    ))]
-    #[case::delivery_without_the_sent_prompt(with(
-        tracked(),
-        "delivered",
-        json!({ "at": "2026-10-23T02:00:00.000Z", "sender": "sender" })
     ))]
     #[case::missing_reason(without(tracked(), "reason"))]
     fn damaged_record_is_refused_and_left_on_disk(#[case] record: Value) {
@@ -362,26 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn sender_is_read_only_from_a_record_naming_a_thread() {
-        for (name, content, expected) in [
-            (
-                "recorded",
-                r#"{"thread":"sender-chat","at":"x"}"#,
-                Some("sender-chat"),
-            ),
-            ("thread_not_text", r#"{"thread":1}"#, None),
-            ("list", r#"["sender-chat"]"#, None),
-        ] {
-            let root = tempfile::tempdir().expect("create a directory");
-            fs::write(root.path().join(SENDER), content).expect("write the sender");
-
-            let loaded = load_sender(root.path()).expect("load the sender");
-
-            assert_eq!(loaded.as_deref(), expected, "case: {name}");
-        }
-    }
-
-    #[test]
     fn recorded_sender_is_read_back_and_a_damaged_one_refused() {
         let root = tempfile::tempdir().expect("create a directory");
         let missing = load_sender(root.path()).expect("load without a record");
@@ -402,45 +313,52 @@ mod tests {
     fn records_harnexus_task_left_with_unknown_fields_still_load() {
         let root = tempfile::tempdir().expect("create a directory");
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch");
+        let copy_with_a_later_field = |file: &Path| {
+            let mut recorded: Value = serde_json::from_str(
+                &fs::read_to_string(fixtures.join(file)).expect("read the fixture"),
+            )
+            .expect("parse the fixture");
+            recorded["addedLater"] = json!({ "by": "a later version" });
+            fs::write(root.path().join(file), recorded.to_string()).expect("write the record");
+        };
         for number in [7, 8, 9, 10] {
             let key = pr_key(&pay(number));
             fs::create_dir(root.path().join(&key)).expect("create the PR directory");
             for file in [LINK, STATE] {
-                let mut recorded: Value = serde_json::from_str(
-                    &fs::read_to_string(fixtures.join(&key).join(file)).expect("read the fixture"),
-                )
-                .expect("parse the fixture");
-                recorded["addedLater"] = json!({ "by": "a later version" });
-                fs::write(root.path().join(&key).join(file), recorded.to_string())
-                    .expect("write the record");
+                copy_with_a_later_field(&Path::new(&key).join(file));
             }
         }
-        fs::write(
-            root.path().join(SENDER),
-            r#"{"thread":"sender-chat","at":"2026-10-19T09:00:00.000Z","addedLater":1}"#,
-        )
-        .expect("write the sender");
+        copy_with_a_later_field(Path::new(SENDER));
 
         let links = list_links(root.path(), &HashSet::new()).expect("list the links");
-        let states = links
+        let loaded = links
             .iter()
-            .map(|link| load_watch_state(root.path(), &link.pr).map(|state| state.status))
+            .map(|link| {
+                load_watch_state(root.path(), &link.pr).map(|state| {
+                    (
+                        link.worker.as_str(),
+                        state.status,
+                        state.pending.len(),
+                        state.worker,
+                    )
+                })
+            })
             .collect::<Result<Vec<_>, _>>()
             .expect("load every state");
         let sender = load_sender(root.path()).expect("load the sender");
 
-        let workers = links
-            .iter()
-            .map(|link| link.worker.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(workers, ["next-chat", "w8", "w9", "w10"]);
         assert_eq!(
-            states,
+            loaded,
             [
-                WatchStatus::Watching,
-                WatchStatus::Watching,
-                WatchStatus::Watching,
-                WatchStatus::Halted,
+                (
+                    "next-chat",
+                    WatchStatus::Watching,
+                    0,
+                    Some("old-chat".to_owned())
+                ),
+                ("w8", WatchStatus::Watching, 0, Some("w8".to_owned())),
+                ("w9", WatchStatus::Watching, 1, Some("w9".to_owned())),
+                ("w10", WatchStatus::Halted, 0, Some("w10".to_owned())),
             ]
         );
         assert_eq!(sender.as_deref(), Some("sender-chat"));

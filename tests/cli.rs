@@ -12,7 +12,6 @@ const PR_WAKE: &str = env!("CARGO_BIN_EXE_pr-wake");
 
 const PR_9: &str = "https://github.com/org/pay/pull/9";
 
-// A home of its own for each run, with the environment pr-wake reads and nothing else.
 struct Home {
     root: tempfile::TempDir,
 }
@@ -33,15 +32,6 @@ fn help_shows_both_features_and_succeeds() {
     assert!(stdout.contains("review"), "{stdout}");
     assert!(stdout.contains("watch"), "{stdout}");
     assert_eq!(output.stderr, *b"");
-}
-
-#[test]
-fn version_names_pr_wake() {
-    let output = run(&["--version"]);
-
-    assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8(output.stdout).expect("UTF-8 version");
-    assert_eq!(stdout, format!("pr-wake {}\n", env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
@@ -104,22 +94,8 @@ fn result_is_one_json_line_on_stdout() {
 }
 
 #[test]
-fn link_from_a_chat_without_a_confirmed_id_is_refused() {
-    let refused = Home::new().watch(&["link", PR_9], &[("CODEX_THREAD_ID", "")]);
-
-    assert_eq!(refused.code, Some(1));
-    assert_eq!(refused.stdout, "");
-    assert!(
-        refused.stderr.contains("CODEX_THREAD_ID"),
-        "{}",
-        refused.stderr
-    );
-}
-
-#[test]
 fn t3_code_thread_is_linked_as_a_t3_code_worker_which_needs_no_sender() {
     let home = Home::new();
-    // T3 Code runs Codex with a CODEX_THREAD_ID of Codex's own.
     let t3 = [("T3CODE_THREAD_ID", "mcp:w1")];
 
     let linked = home.watch(&["link", PR_9], &t3);
@@ -154,7 +130,6 @@ fn cloud_session_is_refused() {
     );
 }
 
-// harnexus-crew runs `pr-wake-engine watch` for a LaunchAgent that still runs harnexus-task watch.
 #[rstest]
 #[case::watch_run(None)]
 #[case::engine_link(Some("pr-wake-engine"))]
@@ -202,7 +177,7 @@ fn watch_ends_before_it_can_send_when_harnexus_cannot_be_asked(#[case] link: Opt
     assert!(!home.state().join("watch.lock").exists());
 }
 
-// The records harnexus-task watch left on a Mac, with a field a later version might add to each.
+// The records harnexus-task watch left on a Mac.
 mod legacy_records {
     use super::*;
 

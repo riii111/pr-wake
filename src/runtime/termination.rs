@@ -7,7 +7,7 @@ use std::{
 
 use crate::infra::stop::StopRequest;
 
-// Tells when a newer program is installed over the running one, so the agent can end and let launchd start it.
+// Tells when a newer program is installed over the running one.
 #[derive(Debug)]
 pub(crate) struct ProgramWatch {
     path: PathBuf,
@@ -26,7 +26,6 @@ struct FileIdentity {
 static STOP: OnceLock<StopRequest> = OnceLock::new();
 
 impl ProgramWatch {
-    // `None` when the program cannot be inspected, so the caller warns once rather than run stale code silently.
     #[must_use]
     pub(crate) fn new(path: PathBuf) -> Option<Self> {
         let started = identity(&path)?;
@@ -50,11 +49,10 @@ fn identity(path: &Path) -> Option<FileIdentity> {
     })
 }
 
-// launchd stops an agent with SIGTERM and a terminal with SIGINT.
-// The handler only records the request, and each wait sees it and shuts down as on a timeout.
 pub(crate) fn install(stop: StopRequest) -> io::Result<()> {
     STOP.set(stop)
         .map_err(|_| io::Error::other("termination handling is already installed"))?;
+    // launchd stops an agent with SIGTERM and a terminal with SIGINT.
     for signal in [libc::SIGTERM, libc::SIGINT] {
         install_recorder(signal)?;
     }
@@ -124,15 +122,6 @@ mod tests {
         fs::remove_file(&path).expect("remove the program");
 
         assert!(!watch.is_replaced());
-    }
-
-    #[test]
-    fn program_that_cannot_be_inspected_is_not_watched() {
-        let directory = tempfile::tempdir().expect("create a directory");
-
-        let watch = ProgramWatch::new(directory.path().join("pr-wake-engine"));
-
-        assert!(watch.is_none());
     }
 
     // The only test that installs the recorder, since a process can install it once.

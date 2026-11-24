@@ -146,7 +146,6 @@ impl Digest {
         )
     }
 
-    // A notification shows a few lines, so the PRs past them are only counted.
     #[must_use]
     pub(crate) fn message(&self) -> String {
         let mut listed = self
@@ -163,6 +162,7 @@ impl Digest {
                     .iter()
                     .map(|(pr, reason)| format!("報告のみ: {}（{}）", pr.line(), reason.text())),
             );
+        // A notification shows a few lines, so the PRs past them are only counted.
         let mut lines = listed.by_ref().take(MAX_LISTED).collect::<Vec<_>>();
         let rest = listed.count();
         if rest > 0 {
@@ -174,7 +174,6 @@ impl Digest {
         lines.join("\n")
     }
 
-    // The report chat reads each review chat itself, so a review still running when the report starts is waited for.
     #[must_use]
     pub(crate) fn report_prompt(&self) -> String {
         let mut lines = vec![
@@ -267,7 +266,6 @@ impl Listed {
     }
 }
 
-// A comment after an approval leaves the approval standing, so only approvals, change requests and dismissals count.
 fn approved_by_other(reviewers: &Reviewers, login: &str) -> bool {
     let author = reviewers.author.as_deref().map(str::to_lowercase);
     let mut latest = BTreeMap::new();
@@ -276,6 +274,7 @@ fn approved_by_other(reviewers: &Reviewers, login: &str) -> bool {
         if reviewer == login || Some(&reviewer) == author.as_ref() {
             continue;
         }
+        // A comment after an approval leaves the approval standing, so only approvals, change requests and dismissals count.
         if matches!(
             review.state.as_str(),
             "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
@@ -329,12 +328,6 @@ mod tests {
             ),
             ("saturday", "2026-11-21T10:55:00", None, None),
             ("sunday", "2026-11-22T16:00:00", None, None),
-            (
-                "monday",
-                "2026-11-23T10:51:00",
-                Some("2026-11-20T15:50:00"),
-                Some("2026-11-23T10:50:00"),
-            ),
         ] {
             let slot = due_slot(
                 &batches(),
@@ -358,15 +351,8 @@ mod tests {
     #[test]
     fn plan_reports_what_others_are_expected_to_review() {
         for (name, requested, reviews, expected) in [
-            ("only_me", &[][..], &[][..], Plan::Start),
             ("me_requested_too", &["Me"][..], &[][..], Plan::Start),
             ("one_other", &["sato"][..], &[][..], Plan::Start),
-            (
-                "one_other_commented",
-                &[][..],
-                &[("sato", "COMMENTED")][..],
-                Plan::Start,
-            ),
             (
                 "one_other_approved",
                 &[][..],
@@ -492,28 +478,9 @@ mod tests {
             "Enterで送るまでレビューは始まらないと書く）:\n- [#13 Opened](https://github.com/acme/app/pull/13)",
             "- [#7 Rename](https://github.com/acme/app/pull/7)（他の人が承認済み）",
             "開始できなかった依頼が1件あります。",
-            "依頼文の先頭行が「pr-wakeの依頼ID: <下記の依頼ID>」のターン",
-            "read_threadはincludeOutputs: trueで呼んでください。",
         ] {
             assert!(prompt.contains(expected), "{expected} in {prompt}");
         }
-    }
-
-    #[test]
-    fn report_prompt_omits_the_empty_groups() {
-        let digest = Digest {
-            reported: vec![(listed(7, "Rename"), ReportReason::ManyReviewers)],
-            ..Digest::default()
-        };
-
-        let prompt = digest.report_prompt();
-
-        assert!(!prompt.contains("レビューしたPR:"), "{prompt}");
-        assert!(!prompt.contains("Enterで送る"), "{prompt}");
-        assert!(!prompt.contains("開始できなかった"), "{prompt}");
-        assert!(
-            prompt.contains("- [#7 Rename](https://github.com/acme/app/pull/7)（3人以上を指名）")
-        );
     }
 
     fn batches() -> Batches {

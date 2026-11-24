@@ -29,8 +29,8 @@ impl Tail {
         command::command_line(PROGRAM, &self.arguments)
     }
 
-    // The terminal gets the output and its Ctrl-C ends a follow, so no timeout or own process group is given.
     pub(crate) fn run(&self) -> Result<(), String> {
+        // The terminal gets the output and its Ctrl-C ends a follow, so no timeout or own process group is given.
         let status = Command::new(PROGRAM)
             .args(&self.arguments)
             .stdin(Stdio::null())
