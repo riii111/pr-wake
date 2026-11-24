@@ -16,6 +16,7 @@ use crate::{
         notice::Selection,
         parse_pr_ref,
         request::{pending_requests, pr_key, request_queries},
+        selection::{Selected, SelectedOutcome, SelectionRecord, is_selection_id},
         state::{PendingDigest, Request, ReviewState, Status},
     },
     infra::{
@@ -62,11 +63,14 @@ struct ShownNotice {
     replacing: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
-    SentToLinked,
-    Started,
-    Failed,
+    SentToLinked(String),
+    Started(String),
+    // The reason no chat could be started, so the prompt waits in a new chat's composer.
+    Opened(Option<String>),
+    // The chat is kept when the review went to one, as a started chat exists even if its link failed.
+    Failed { error: String, chat: Option<String> },
 }
 
 // A wake-up that is kept until the notify loop takes it, as a channel of one would be.
@@ -246,10 +250,38 @@ impl<'deps> Daemon<'deps> {
         };
         match review_record::take_now_requests(self.deps.paths) {
             Ok(requests) => {
+                // An earlier request may run for minutes, so each selection is marked taken before any of them starts.
+                for request in &requests {
+                    if let Ok(NowRequest {
+                        pr: None,
+                        selected: Some(selected),
+                    }) = request
+                        && is_selection_id(&selected.id)
+                    {
+                        self.save_selection(&selected.id, &accepted(&selected.keys));
+                    }
+                }
                 for request in requests {
                     match request {
-                        Ok(NowRequest { pr: Some(pr) }) => self.start_now(&pr),
-                        Ok(NowRequest { pr: None }) => self.run_batch((self.deps.now)()),
+                        Ok(NowRequest {
+                            pr: None,
+                            selected: Some(selected),
+                        }) => self.start_selected(&selected),
+                        Ok(NowRequest {
+                            pr: Some(pr),
+                            selected: None,
+                        }) => self.start_now(&pr),
+                        Ok(NowRequest {
+                            pr: None,
+                            selected: None,
+                        }) => self.run_batch((self.deps.now)()),
+                        // Either reading could start what the owner did not choose, so neither is taken.
+                        Ok(NowRequest {
+                            pr: Some(pr),
+                            selected: Some(_),
+                        }) => self.log(&format!(
+                            "review now: refused a request naming both {pr} and selected requests"
+                        )),
                         Err(error) => self.log(&format!("review now: {error}")),
                     }
                 }
@@ -295,15 +327,7 @@ impl<'deps> Daemon<'deps> {
             let Some(request) = self.claim_key(request.found.key, &[Status::Queued]) else {
                 continue;
             };
-            let key = &request.found.key;
-            match self.plan(&request, &login) {
-                Plan::Report(reason) => {
-                    self.log_saved(self.update(key, |request| request.status = Status::Reported));
-                    self.log(&format!("{key}: only reported ({reason:?})"));
-                    digest.reported.push((Listed::of(&request.found), reason));
-                }
-                Plan::Start => self.start_listed(&request, &mut digest),
-            }
+            self.plan_and_start(&request, &login, &mut digest);
             // Saved after each request, so a stop in the middle still shows what was done.
             self.keep_digest(&mut pending, ready, &digest);
         }
@@ -339,6 +363,73 @@ impl<'deps> Daemon<'deps> {
         let mut digest = Digest::default();
         self.start_listed(&request, &mut digest);
         self.keep_digest(&mut None, (self.deps.now)(), &digest);
+    }
+
+    // Only the chosen requests still queued go through the batch's decision, so a stale choice never starts a second review.
+    fn start_selected(&self, selected: &Selected) {
+        let id = &selected.id;
+        if !is_selection_id(id) {
+            self.log(&format!("review now: refused the selection id {id:?}"));
+            return;
+        }
+        let login = self.lock_state().login.clone().unwrap_or_default();
+        let mut record = accepted(&selected.keys);
+        let mut digest = Digest::default();
+        let mut pending = None;
+        for key in record.keys.clone() {
+            let outcome = if self.deps.stop.is_requested() {
+                SelectedOutcome::Stopped
+            } else {
+                match self.claim_selected(&key) {
+                    Ok(request) => {
+                        let outcome = self.plan_and_start(&request, &login, &mut digest);
+                        self.keep_digest(&mut pending, (self.deps.now)(), &digest);
+                        outcome
+                    }
+                    Err(outcome) => outcome,
+                }
+            };
+            self.log(&format!("selection {id}: {key}: {outcome:?}"));
+            record.outcomes.insert(key, outcome);
+            self.save_selection(id, &record);
+        }
+        record.complete = true;
+        self.save_selection(id, &record);
+    }
+
+    fn claim_selected(&self, key: &str) -> Result<Request, SelectedOutcome> {
+        let not_queued = |newer: Option<String>| {
+            let status = self
+                .lock_state()
+                .requests
+                .get(key)
+                .map(|request| request.status);
+            SelectedOutcome::NotQueued { status, newer }
+        };
+        let newer = self.lock_state().newer_request(key).map(str::to_owned);
+        if newer.is_some() {
+            return Err(not_queued(newer));
+        }
+        // A poll that supersedes or withdraws the request takes it out of the queue under the same lock, so the claim refuses it.
+        if let Some(request) = self.claim_key(key.to_owned(), &[Status::Queued]) {
+            return Ok(request);
+        }
+        match not_queued(None) {
+            SelectedOutcome::NotQueued {
+                status: Some(Status::Queued),
+                ..
+            } => Err(SelectedOutcome::Failed {
+                error: "the state could not be saved, so it stays queued".to_owned(),
+                thread: None,
+            }),
+            outcome => Err(outcome),
+        }
+    }
+
+    fn save_selection(&self, id: &str, record: &SelectionRecord) {
+        if let Err(error) = review_record::save_selection(self.deps.paths, id, record) {
+            self.log(&format!("selection {id}: {error}"));
+        }
     }
 
     // Only the batch thread adds or removes digests, so the index stays valid while the batch runs.
@@ -410,16 +501,44 @@ impl<'deps> Daemon<'deps> {
         }
     }
 
-    fn start_listed(&self, request: &Request, digest: &mut Digest) {
+    fn plan_and_start(
+        &self,
+        request: &Request,
+        login: &str,
+        digest: &mut Digest,
+    ) -> SelectedOutcome {
+        let key = &request.found.key;
+        match self.plan(request, login) {
+            Plan::Report(reason) => {
+                self.log_saved(self.update(key, |request| request.status = Status::Reported));
+                self.log(&format!("{key}: only reported ({reason:?})"));
+                digest.reported.push((Listed::of(&request.found), reason));
+                SelectedOutcome::Reported { reason }
+            }
+            Plan::Start => match self.start_listed(request, digest) {
+                Outcome::Started(thread) => SelectedOutcome::Started { thread },
+                Outcome::SentToLinked(thread) => SelectedOutcome::SentToLinked { thread },
+                Outcome::Opened(reason) => SelectedOutcome::Opened { reason },
+                Outcome::Failed { error, chat } => SelectedOutcome::Failed {
+                    error,
+                    thread: chat,
+                },
+            },
+        }
+    }
+
+    fn start_listed(&self, request: &Request, digest: &mut Digest) -> Outcome {
         let choices = &self.deps.tools.config.choices;
         // No notification asks for a choice in a batch, so a linked PR keeps its earlier one and any other takes the first, which the config always has.
         let choice = self.linked_choice(request).unwrap_or(&choices[0]);
-        match self.start(request, choice) {
-            Outcome::Failed => digest.failed += 1,
-            Outcome::SentToLinked | Outcome::Started => {
+        let outcome = self.start(request, choice);
+        match outcome {
+            Outcome::Failed { .. } => digest.failed += 1,
+            Outcome::SentToLinked(_) | Outcome::Started(_) | Outcome::Opened(_) => {
                 digest.started.push(Listed::of(&request.found));
             }
         }
+        outcome
     }
 
     fn notify_digest(&self, digest: &Digest) -> Result<(), String> {
@@ -587,7 +706,7 @@ impl<'deps> Daemon<'deps> {
             "{}: re-request of a linked PR, sent with {} without asking",
             request.found.key, choice.id
         ));
-        if self.start(request, choice) == Outcome::SentToLinked {
+        if matches!(self.start(request, choice), Outcome::SentToLinked(_)) {
             self.report(request, "再レビューを紐づけ済みのチャットへ送りました");
         }
     }
@@ -604,7 +723,7 @@ impl<'deps> Daemon<'deps> {
         if let Err(error) = launching {
             self.log(&format!("{key}: not launched: {error}"));
             self.report_failure(request, &error);
-            return Outcome::Failed;
+            return Outcome::Failed { error, chat: None };
         }
 
         self.log(&format!("{key}: chose {}", choice.id));
@@ -645,22 +764,32 @@ impl<'deps> Daemon<'deps> {
                 self.log(&format!(
                     "{key}: sent to chat {chat} for {worktree} at {head}"
                 ));
-                return Outcome::SentToLinked;
+                Outcome::SentToLinked(chat)
             }
             (Ok(()), Some(Route::Started(chat))) => {
                 self.log(&format!("{key}: started chat {chat} at {head}"));
+                Outcome::Started(chat)
             }
-            (Ok(()), Some(Route::Opened(reason))) => self.log(&format!(
-                "{key}: opened {worktree} at {head}, as no chat could be started: {reason}"
-            )),
-            (Ok(()), None) => self.log(&format!("{key}: opened {worktree} at {head}")),
-            (Err(error), _) => {
+            (Ok(()), Some(Route::Opened(reason))) => {
+                self.log(&format!(
+                    "{key}: opened {worktree} at {head}, as no chat could be started: {reason}"
+                ));
+                Outcome::Opened(Some(reason))
+            }
+            (Ok(()), None) => {
+                self.log(&format!("{key}: opened {worktree} at {head}"));
+                Outcome::Opened(None)
+            }
+            (Err(error), route) => {
                 self.log(&format!("{key}: launch failed: {error}"));
                 self.report_failure(request, &error);
-                return Outcome::Failed;
+                let chat = match route {
+                    Some(Route::Linked(chat) | Route::Started(chat)) => Some(chat),
+                    Some(Route::Opened(_)) | None => None,
+                };
+                Outcome::Failed { error, chat }
             }
         }
-        Outcome::Started
     }
 
     // The oldest queued request becomes notifying, saved before it is shown.
@@ -816,6 +945,13 @@ impl Wake {
     }
 }
 
+fn accepted(keys: &[String]) -> SelectionRecord {
+    SelectionRecord {
+        accepted: true,
+        ..SelectionRecord::of(keys)
+    }
+}
+
 // Rate limits and outages are waited out with a growing delay instead of stopping the review.
 fn backoff(interval: Duration, failures: u32) -> Duration {
     let mut delay = interval;
@@ -850,6 +986,7 @@ mod tests {
     use crate::{
         app::review::{
             PullRequest,
+            batch::ReportReason,
             config::{Batches, ConfigFile, ReviewConfig},
             state::Found,
             with_worktree,
@@ -1814,6 +1951,7 @@ mod tests {
                 &fixture.paths,
                 &NowRequest {
                     pr: pr.map(str::to_owned),
+                    selected: None,
                 },
                 Timestamp::now(),
             )
@@ -1835,6 +1973,163 @@ mod tests {
                     .expect("read the requests")
                     .len(),
                 0,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_starts_only_its_queued_requests_by_the_batch_rules_and_records_each_outcome() {
+        let fixture = Fixture::batched();
+        fixture.save_queued(&[(1, 10), (2, 20), (3, 30), (3, 31), (4, 40), (5, 50)]);
+        let mut state = fixture.state();
+        state
+            .requests
+            .get_mut("acme/app#2@20")
+            .expect("request")
+            .status = Status::Launched;
+        review_record::save_state(&fixture.paths, &state).expect("save the state");
+        fixture.answer_with("gh api repos/acme/app/pulls/4/requested_reviewers", |_| {
+            Ok(br#"{"users":[{"login":"sato"},{"login":"suzuki"}]}"#.to_vec())
+        });
+        fixture.set_creation(Created::Started("chat-1".to_owned()));
+        let keys = [
+            "acme/app#1@10",
+            "acme/app#1@10",
+            "acme/app#2@20",
+            "acme/app#3@30",
+            "acme/app#4@40",
+            "acme/app#9@90",
+        ];
+        // A Saturday, so no scheduled batch runs beside the selection.
+        let now = || tokyo("2026-11-21T12:00:00");
+        let setup = Setup {
+            now: Some(&now),
+            ..Setup::default()
+        };
+
+        fixture.select("first", &keys);
+        fixture.with_daemon(&setup, |daemon, _| daemon.batch_once());
+        fixture.select("again", &keys[..1]);
+        fixture.with_daemon(&setup, |daemon, _| daemon.batch_once());
+
+        let first = review_record::load_selection(&fixture.paths, "first")
+            .expect("read the selection")
+            .expect("a recorded selection");
+        assert!(first.complete);
+        assert_eq!(first.keys.len(), 5, "a key chosen twice is handled once");
+        assert_eq!(
+            first.outcomes,
+            BTreeMap::from([
+                (
+                    "acme/app#1@10".to_owned(),
+                    SelectedOutcome::Started {
+                        thread: "chat-1".to_owned()
+                    }
+                ),
+                (
+                    "acme/app#2@20".to_owned(),
+                    SelectedOutcome::NotQueued {
+                        status: Some(Status::Launched),
+                        newer: None
+                    }
+                ),
+                (
+                    "acme/app#3@30".to_owned(),
+                    SelectedOutcome::NotQueued {
+                        status: Some(Status::Queued),
+                        newer: Some("acme/app#3@31".to_owned())
+                    }
+                ),
+                (
+                    "acme/app#4@40".to_owned(),
+                    SelectedOutcome::Reported {
+                        reason: ReportReason::ManyReviewers
+                    }
+                ),
+                (
+                    "acme/app#9@90".to_owned(),
+                    SelectedOutcome::NotQueued {
+                        status: None,
+                        newer: None
+                    }
+                ),
+            ])
+        );
+        let again = review_record::load_selection(&fixture.paths, "again")
+            .expect("read the selection")
+            .expect("a recorded selection");
+        assert_eq!(
+            again.outcomes.get("acme/app#1@10"),
+            Some(&SelectedOutcome::NotQueued {
+                status: Some(Status::Launched),
+                newer: None
+            })
+        );
+        assert_eq!(fixture.started().len(), 1, "one review of the chosen PR");
+        assert_eq!(
+            ["acme/app#3@31", "acme/app#5@50"].map(|key| fixture.status(key)),
+            [Status::Queued, Status::Queued],
+            "requests not chosen stay for the scheduled batch"
+        );
+        assert_eq!(
+            fixture.count_calls("#1 PR 1\n報告のみ: #4 PR 4（3人以上を指名） pr-wake レビュー 2件"),
+            1
+        );
+    }
+
+    #[test]
+    fn selection_records_the_chat_a_review_went_to_and_none_for_a_draft() {
+        for (name, linked, creation, expected) in [
+            (
+                "linked_re_request",
+                true,
+                Created::NotSent("unused".to_owned()),
+                SelectedOutcome::SentToLinked {
+                    thread: "review-chat".to_owned(),
+                },
+            ),
+            (
+                "draft_only",
+                false,
+                Created::NotSent("no harnexus".to_owned()),
+                SelectedOutcome::Opened {
+                    reason: Some("no harnexus".to_owned()),
+                },
+            ),
+            (
+                "unconfirmed_chat",
+                false,
+                Created::Unknown("unknown: no answer".to_owned()),
+                SelectedOutcome::Failed {
+                    error: "the new review chat could not be confirmed; check Codex App before choosing again: unknown: no answer".to_owned(),
+                    thread: None,
+                },
+            ),
+        ] {
+            let fixture = Fixture::batched();
+            fixture.save_queued(&[(12, 30)]);
+            if linked {
+                fixture.link_chat("acme/app", 12, "review-chat");
+            }
+            fixture.set_creation(creation);
+            let now = || tokyo("2026-11-21T12:00:00");
+
+            fixture.select("one", &["acme/app#12@30"]);
+            fixture.with_daemon(
+                &Setup {
+                    now: Some(&now),
+                    ..Setup::default()
+                },
+                |daemon, _| daemon.batch_once(),
+            );
+
+            let record = review_record::load_selection(&fixture.paths, "one")
+                .expect("read the selection")
+                .expect("a recorded selection");
+            assert_eq!(
+                record.outcomes.get("acme/app#12@30"),
+                Some(&expected),
                 "case: {name}"
             );
         }
@@ -2178,6 +2473,21 @@ mod tests {
             state.login = Some("me".to_owned());
             state.last_poll = Some(now);
             review_record::save_state(&self.paths, &state).expect("save the state");
+        }
+
+        fn select(&self, id: &str, keys: &[&str]) {
+            review_record::request_now(
+                &self.paths,
+                &NowRequest {
+                    pr: None,
+                    selected: Some(Selected {
+                        id: id.to_owned(),
+                        keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+                    }),
+                },
+                Timestamp::now(),
+            )
+            .expect("hand over the selection");
         }
 
         fn state(&self) -> ReviewState {

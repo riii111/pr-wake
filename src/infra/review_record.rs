@@ -15,6 +15,7 @@ use crate::app::{
     review::{
         batch::NowRequest,
         config::{ConfigFile, ReviewConfig},
+        selection::SelectionRecord,
         state::ReviewState,
     },
     watch::pr::PrRef,
@@ -40,6 +41,7 @@ const STATE: &str = "state.json";
 const LOCK: &str = "lock";
 const CHATS: &str = "chats";
 const NOW: &str = "now";
+const SELECTIONS: &str = "selections";
 
 impl ReviewPaths {
     #[must_use]
@@ -154,6 +156,34 @@ pub(crate) fn take_now_requests(
             request
         })
         .collect())
+}
+
+// The caller of a selection waits on its own file, which the running review rewrites as each request ends.
+pub(crate) fn save_selection(
+    paths: &ReviewPaths,
+    id: &str,
+    record: &SelectionRecord,
+) -> Result<(), RecordError> {
+    record::save_json(
+        &selection_path(paths, id),
+        record,
+        JsonLayout::TwoSpacesAndNewline,
+    )
+}
+
+pub(crate) fn load_selection(
+    paths: &ReviewPaths,
+    id: &str,
+) -> Result<Option<SelectionRecord>, RecordError> {
+    record::load_json(&selection_path(paths, id))
+}
+
+pub(crate) fn remove_selection(paths: &ReviewPaths, id: &str) -> Result<(), RecordError> {
+    record::remove_record(&selection_path(paths, id))
+}
+
+fn selection_path(paths: &ReviewPaths, id: &str) -> PathBuf {
+    paths.state.join(SELECTIONS).join(format!("{id}.json"))
 }
 
 fn chat_path(paths: &ReviewPaths, repo: &str, number: u64) -> PathBuf {
@@ -275,6 +305,7 @@ mod tests {
         let at = |text: &str| text.parse::<Timestamp>().expect("parse the time");
         let one_pr = NowRequest {
             pr: Some("acme/app#12".to_owned()),
+            selected: None,
         };
         request_now(&paths, &one_pr, at("2026-11-18T01:00:01Z")).expect("ask for one PR");
         request_now(&paths, &NowRequest::default(), at("2026-11-18T01:00:00Z"))

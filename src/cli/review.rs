@@ -33,6 +33,19 @@ pub(super) enum ReviewCommand {
         )]
         pr: Option<String>,
     },
+    #[command(about = "List the requests queued for the next batch")]
+    Queue(JsonFlag),
+    // Called by the pr-wake-review-queue Skill, which reads its JSON; `queue` is the command for people.
+    #[command(hide = true)]
+    Select {
+        #[arg(required = true, value_name = "KEY")]
+        keys: Vec<String>,
+    },
+    #[command(hide = true)]
+    Outcome {
+        #[arg(value_name = "SELECTION")]
+        id: String,
+    },
     #[command(about = "Check the config, then start the LaunchAgent")]
     Install,
     #[command(about = "Stop and remove the LaunchAgent")]
@@ -53,6 +66,12 @@ pub(super) struct ConfigFlag {
         help = "The config file instead of the usual one"
     )]
     config: Option<PathBuf>,
+}
+
+#[derive(Debug, PartialEq, Eq, Args)]
+pub(super) struct JsonFlag {
+    #[arg(long, help = "Print one line of JSON instead of text")]
+    json: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Args)]
@@ -101,6 +120,9 @@ pub(super) fn run(command: ReviewCommand) -> Result<(), String> {
         }
         ReviewCommand::Link { pr } => review::link_from_chat(&env()?, &pr),
         ReviewCommand::Now { pr } => review::request_now_from_terminal(&env()?, pr.as_deref()),
+        ReviewCommand::Queue(flag) => review::queue_from_terminal(&env()?, flag.json),
+        ReviewCommand::Select { keys } => review::select_from_skill(&env()?, &keys),
+        ReviewCommand::Outcome { id } => review::selection_outcome_from_skill(&env()?, &id),
         ReviewCommand::Install => review::install(&env()?),
         ReviewCommand::Uninstall => agent::uninstall(agent::REVIEW, &env()?.home),
         ReviewCommand::Start => agent::start(agent::REVIEW, &env()?.home),
@@ -150,6 +172,25 @@ mod tests {
                 &["review", "now", "--pr", PR],
                 ReviewCommand::Now {
                     pr: Some(PR.to_owned()),
+                },
+            ),
+            (
+                "queue_as_json",
+                &["review", "queue", "--json"],
+                ReviewCommand::Queue(JsonFlag { json: true }),
+            ),
+            (
+                "select_two",
+                &["review", "select", "acme/app#1@10", "acme/app#2@20"],
+                ReviewCommand::Select {
+                    keys: vec!["acme/app#1@10".to_owned(), "acme/app#2@20".to_owned()],
+                },
+            ),
+            (
+                "outcome",
+                &["review", "outcome", "7-1"],
+                ReviewCommand::Outcome {
+                    id: "7-1".to_owned(),
                 },
             ),
             (

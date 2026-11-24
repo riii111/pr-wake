@@ -231,6 +231,24 @@ impl ReviewState {
             })
     }
 
+    // A later request of the same PR, which a review of this one would duplicate.
+    #[must_use]
+    pub(crate) fn newer_request(&self, key: &str) -> Option<&str> {
+        let request = self.requests.get(key)?;
+        let pr = pr_key(&request.found.repo, request.found.number);
+        self.requests
+            .values()
+            .filter(|other| {
+                pr_key(&other.found.repo, other.found.number) == pr
+                    && (other.first_seen, &other.found.key)
+                        > (request.first_seen, &request.found.key)
+            })
+            .max_by(|left, right| {
+                (left.first_seen, &left.found.key).cmp(&(right.first_seen, &right.found.key))
+            })
+            .map(|other| other.found.key.as_str())
+    }
+
     #[must_use]
     pub(crate) fn tracked_prs(&self, now: Timestamp) -> HashSet<String> {
         self.requests

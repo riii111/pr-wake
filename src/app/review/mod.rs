@@ -4,6 +4,7 @@ pub(crate) mod inbox;
 pub(crate) mod notice;
 pub(crate) mod prompt;
 pub(crate) mod request;
+pub(crate) mod selection;
 pub(crate) mod state;
 
 use std::{

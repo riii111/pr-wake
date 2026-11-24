@@ -5,7 +5,7 @@ use std::{
     env,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
-    thread,
+    process, thread,
     time::{Duration, Instant},
 };
 
@@ -22,6 +22,9 @@ use crate::{
             notice::{Notice, Selection, Size},
             one_line,
             request::request_queries,
+            selection::{
+                self, QueueEntry, Selected, SelectionRecord, SelectionReport, is_selection_id,
+            },
             state::{Found, ReviewState, Status},
             with_worktree,
         },
@@ -127,6 +130,9 @@ enum Route {
 // Well under the one second within which a wait must notice a stop request.
 const STOP_CHECK: Duration = Duration::from_millis(500);
 const STATUS_ROWS: usize = 20;
+// A selection's caller checks this often for 5 minutes, and a selection still running then is left to `review outcome`.
+const SELECTION_CHECK: Duration = Duration::from_millis(500);
+const SELECTION_WAITS: u32 = 600;
 
 // Runs until a stop request, or until the program is replaced so that launchd starts the new one.
 pub(crate) fn run(config: &Path, env: &ReviewEnv) -> Result<(), String> {
@@ -404,12 +410,119 @@ pub(crate) fn request_now(
         ));
     }
     let pr = pr.map(|pr| startable_pr(&env.paths, pr)).transpose()?;
-    review_record::request_now(&env.paths, &NowRequest { pr: pr.clone() }, at)
-        .map_err(|error| error.to_string())?;
+    review_record::request_now(
+        &env.paths,
+        &NowRequest {
+            pr: pr.clone(),
+            selected: None,
+        },
+        at,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(pr.map_or_else(
         || "handed the queued requests to the running review".to_owned(),
         |pr| format!("handed {pr} to the running review"),
     ))
+}
+
+// Read from the state alone; a review that has never saved one is an error, as an empty queue would hide it.
+pub(crate) fn queue(paths: &ReviewPaths) -> Result<Vec<QueueEntry>, String> {
+    let state = review_record::load_state(paths)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "no state yet: {}; is pr-wake review running?",
+                paths.state_file().display()
+            )
+        })?;
+    Ok(selection::queue(&state))
+}
+
+// Hands the chosen requests to the running review and waits for what it did with them, up to `waits` checks.
+pub(crate) fn select(
+    env: &ReviewEnv,
+    keys: &[String],
+    at: Timestamp,
+    pause: &dyn Fn(Duration) -> bool,
+    waits: u32,
+) -> Result<SelectionReport, String> {
+    let config = review_record::read_config(&env.paths.config, &env.home, &env.codex_home)?;
+    if config.batches.is_none() {
+        return Err(format!(
+            "pr-wake review select needs batches in {}",
+            env.paths.config.display()
+        ));
+    }
+    // A request left for a review that is not running would start whenever it next runs, long after the owner chose.
+    match review_record::hold_lock(&env.paths) {
+        Ok(Some(_lock)) => {
+            return Err(
+                "pr-wake review is not running; start it with `pr-wake review start`".to_owned(),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let id = format!("{}-{}", at.as_nanosecond(), process::id());
+    // Written before the handoff, so the reader always finds this record or the review's own across the review taking the request.
+    review_record::save_selection(&env.paths, &id, &SelectionRecord::of(keys))
+        .map_err(|error| error.to_string())?;
+    let handed = review_record::request_now(
+        &env.paths,
+        &NowRequest {
+            pr: None,
+            selected: Some(Selected {
+                id: id.clone(),
+                keys: keys.to_vec(),
+            }),
+        },
+        at,
+    );
+    if let Err(error) = handed {
+        let _ = review_record::remove_selection(&env.paths, &id);
+        return Err(error.to_string());
+    }
+    await_selection(&env.paths, &id, pause, waits)
+}
+
+pub(crate) fn selection_outcome(
+    env: &ReviewEnv,
+    id: &str,
+    pause: &dyn Fn(Duration) -> bool,
+    waits: u32,
+) -> Result<SelectionReport, String> {
+    if !is_selection_id(id) {
+        return Err(format!("not a selection id: {id}"));
+    }
+    await_selection(&env.paths, id, pause, waits)
+}
+
+pub(crate) fn queue_from_terminal(env: &ReviewEnv, json: bool) -> Result<(), String> {
+    let entries = queue(&env.paths)?;
+    if json {
+        print_json(&serde_json::json!({ "requests": entries }))
+    } else {
+        output::write_stdout(&selection::queue_lines(&entries));
+        Ok(())
+    }
+}
+
+pub(crate) fn select_from_skill(env: &ReviewEnv, keys: &[String]) -> Result<(), String> {
+    let stop = stop_on_termination()?;
+    let report = select(
+        env,
+        keys,
+        Timestamp::now(),
+        &|wait| pause(&stop, wait),
+        SELECTION_WAITS,
+    )?;
+    print_json(&report)
+}
+
+pub(crate) fn selection_outcome_from_skill(env: &ReviewEnv, id: &str) -> Result<(), String> {
+    let stop = stop_on_termination()?;
+    let report = selection_outcome(env, id, &|wait| pause(&stop, wait), SELECTION_WAITS)?;
+    print_json(&report)
 }
 
 pub(crate) fn request_now_from_terminal(env: &ReviewEnv, pr: Option<&str>) -> Result<(), String> {
@@ -731,6 +844,41 @@ fn startable_pr(paths: &ReviewPaths, pr: &str) -> Result<String, String> {
     Ok(format!("{repo}#{number}"))
 }
 
+fn await_selection(
+    paths: &ReviewPaths,
+    id: &str,
+    pause: &dyn Fn(Duration) -> bool,
+    waits: u32,
+) -> Result<SelectionReport, String> {
+    let mut wait = 0;
+    let record = loop {
+        let record = review_record::load_selection(paths, id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!("no selection {id}; it may have been read to the end already")
+            })?;
+        if record.complete || wait == waits || !pause(SELECTION_CHECK) {
+            break record;
+        }
+        wait += 1;
+    };
+    let state = review_record::load_state(paths)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let report = selection::report(id, &record, &state);
+    // Kept until read complete, so a caller that gave up can still read it; a file left by a failed removal holds only this report.
+    if report.complete {
+        let _ = review_record::remove_selection(paths, id);
+    }
+    Ok(report)
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
+    let line = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    print_line(&line);
+    Ok(())
+}
+
 fn is_own_pull_request(github: &GhRest<'_>, repo: &str, number: u64) -> Result<bool, String> {
     let login = github.current_login()?;
     let author = github.pull_request_author(repo, number)?;
@@ -900,13 +1048,16 @@ mod tests {
         fs, iter,
         sync::{
             Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
     use super::*;
     use crate::{
-        app::watch::pr::{PrLink, PrRef},
+        app::{
+            review::selection::SelectedOutcome,
+            watch::pr::{PrLink, PrRef},
+        },
         infra::command::ToolCall,
     };
 
@@ -1359,7 +1510,8 @@ mod tests {
                     assert_eq!(
                         taken,
                         [Ok(NowRequest {
-                            pr: pr.map(str::to_owned)
+                            pr: pr.map(str::to_owned),
+                            selected: None,
                         })],
                         "case: {name}"
                     );
@@ -1371,6 +1523,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn selection_needs_batches_and_a_running_review() {
+        for (name, batches, running, expected) in [
+            (
+                "without_batches",
+                false,
+                true,
+                "pr-wake review select needs batches",
+            ),
+            (
+                "review_not_running",
+                true,
+                false,
+                "pr-wake review is not running",
+            ),
+        ] {
+            let home = ReviewHome::new();
+            if batches {
+                home.add_batches();
+            }
+            let _review = running.then(|| {
+                review_record::hold_lock(&home.env.paths)
+                    .expect("lock")
+                    .expect("a free lock")
+            });
+
+            let selected = select(
+                &home.env,
+                &["acme/app#3@3".to_owned()],
+                Timestamp::UNIX_EPOCH,
+                &|_| true,
+                0,
+            );
+
+            let error = selected.expect_err(name);
+            assert!(error.contains(expected), "case: {name}: {error}");
+            assert_eq!(
+                review_record::take_now_requests(&home.env.paths)
+                    .expect("take the requests")
+                    .len(),
+                0,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_not_taken_in_time_is_pending_and_its_outcome_is_read_later_once() {
+        let home = ReviewHome::new();
+        home.add_batches();
+        let mut state = ReviewState::default();
+        state.apply_poll(vec![found(3)], Timestamp::UNIX_EPOCH, false);
+        review_record::save_state(&home.env.paths, &state).expect("save the state");
+        let _review = review_record::hold_lock(&home.env.paths)
+            .expect("lock")
+            .expect("a free lock");
+        let waits = AtomicUsize::new(0);
+        let keys = ["acme/app#3@3".to_owned()];
+
+        let handed = select(
+            &home.env,
+            &keys,
+            Timestamp::UNIX_EPOCH,
+            &|_| {
+                waits.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+            2,
+        )
+        .expect("hand over the selection");
+        let id = handed.selection.clone();
+        // Taken by the review, which has not recorded its acceptance yet.
+        let taken = review_record::take_now_requests(&home.env.paths).expect("take it");
+        let waiting = selection_outcome(&home.env, &id, &|_| true, 0).expect("read the selection");
+        let mut record = SelectionRecord::of(&keys);
+        record.accepted = true;
+        record.outcomes.insert(
+            keys[0].clone(),
+            SelectedOutcome::Started {
+                thread: "chat-1".to_owned(),
+            },
+        );
+        record.complete = true;
+        review_record::save_selection(&home.env.paths, &id, &record).expect("record it");
+        let done = selection_outcome(&home.env, &id, &|_| true, 0).expect("read the outcome");
+        let again = selection_outcome(&home.env, &id, &|_| true, 0);
+
+        assert_eq!(waits.load(Ordering::SeqCst), 2);
+        for report in [&handed, &waiting] {
+            assert!(!report.accepted && !report.complete, "{report:?}");
+            assert_eq!(
+                serde_json::to_value(&report.requests).expect("write the requests"),
+                serde_json::json!([{
+                    "key": "acme/app#3@3",
+                    "repo": "acme/app",
+                    "number": 3,
+                    "title": "PR 3",
+                    "url": "https://github.com/acme/app/pull/3",
+                    "outcome": "pending",
+                }])
+            );
+        }
+        assert_eq!(taken.len(), 1);
+        assert!(done.complete);
+        assert_eq!(
+            done.requests[0].link.as_deref(),
+            Some("codex://threads/chat-1")
+        );
+        let error = again.expect_err("a selection read to the end is gone");
+        assert!(error.starts_with(&format!("no selection {id}")), "{error}");
     }
 
     #[test]
