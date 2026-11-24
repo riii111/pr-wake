@@ -318,51 +318,27 @@ impl<'deps> Daemon<'deps> {
                 state.queued_in_order(),
             )
         };
-        // A checkout adds its worktrees one at a time anyway, so each checkout's requests take one thread in queue order.
-        let mut by_checkout = HashMap::<Option<PathBuf>, Vec<Request>>::new();
+        let mut kept = KeptDigest::default();
+        // One request at a time, so a stop cuts short at most the one in flight and the rest stay queued.
         for request in queued {
-            by_checkout
-                .entry(self.checkout_of(&request.found.repo))
-                .or_default()
-                .push(request);
-        }
-        let kept = Mutex::new(KeptDigest::default());
-        thread::scope(|scope| {
-            for requests in by_checkout.into_values() {
-                let (login, kept) = (&login, &kept);
-                scope.spawn(move || {
-                    for request in requests {
-                        // What is left stays queued for the next batch after the restart.
-                        if self.deps.stop.is_requested() {
-                            break;
-                        }
-                        let Some(request) = self.claim_key(request.found.key, &[Status::Queued])
-                        else {
-                            continue;
-                        };
-                        let outcome = match self.read_pull(&request.found) {
-                            Ok(pull) => {
-                                let reviews = self.read_reviews(&request.found);
-                                let plan = self.plan(&request.found, &pull, reviews, login);
-                                self.apply_plan(&request, plan, pull.pr)
-                            }
-                            Err(error) => self.start_listed(&request, Err(error), true),
-                        };
-                        // Saved after each request, so a stop in the middle still shows what was done.
-                        self.keep_digest(
-                            &mut kept.lock().unwrap_or_else(PoisonError::into_inner),
-                            &request.found,
-                            &outcome,
-                            ready,
-                        );
-                    }
-                });
+            if self.deps.stop.is_requested() {
+                break;
             }
-        });
-        let digest = kept
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner)
-            .digest;
+            let Some(request) = self.claim_key(request.found.key, &[Status::Queued]) else {
+                continue;
+            };
+            let outcome = match self.read_pull(&request.found) {
+                Ok(pull) => {
+                    let reviews = self.read_reviews(&request.found);
+                    let plan = self.plan(&request.found, &pull, reviews, &login);
+                    self.apply_plan(&request, plan, pull.pr)
+                }
+                Err(error) => self.start_listed(&request, Err(error), true),
+            };
+            // Saved after each request, so a stop in the middle still shows what was done.
+            self.keep_digest(&mut kept, &request.found, &outcome, ready);
+        }
+        let digest = kept.digest;
         self.log(&format!(
             "batch: {} started, {} reported, {} failed",
             digest.started.len(),
@@ -651,7 +627,7 @@ impl<'deps> Daemon<'deps> {
         let mut state = self.lock_state();
         let before = state.pending_digests.clone();
         let digests = &mut state.pending_digests;
-        // Every checkout's thread updates the batch's digest under its lock, and digests are removed only once every thread has ended, so the index stays valid.
+        // Only the batch thread adds or removes digests, so the index stays valid while the batch runs.
         if let Some(pending) = kept.pending.and_then(|index| digests.get_mut(index)) {
             pending.digest = kept.digest.clone();
         } else {
@@ -2121,40 +2097,6 @@ mod tests {
         assert_eq!(fixture.status("acme/app#1@10"), Status::Launched);
         assert_eq!(fixture.status("acme/app#5@50"), Status::Queued);
         assert_eq!(fixture.count_calls("osascript "), 1);
-    }
-
-    #[test]
-    fn batch_starts_the_requests_of_different_checkouts_side_by_side() {
-        let mut fixture = Fixture::batched();
-        let checkouts = fixture.home.path().join("src");
-        fixture
-            .config
-            .repositories
-            .insert("acme/web".to_owned(), checkouts.join("web"));
-        fixture.save_queued_in(&[("acme/app", 1, 10), ("acme/web", 2, 20)]);
-        // Each worktree is added only while the other checkout adds its own, so adding them one after the other never ends.
-        let adding = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
-        for (index, name) in ["app", "web"].into_iter().enumerate() {
-            let adding = Arc::clone(&adding);
-            fixture.answer_with(
-                &format!("git -C {}/{name} worktree add ", checkouts.display()),
-                move |_| {
-                    adding[index].store(true, Ordering::SeqCst);
-                    wait_for(|| adding[1 - index].load(Ordering::SeqCst));
-                    Ok(Vec::new())
-                },
-            );
-        }
-        review_record::request_now(&fixture.paths, &NowRequest { pr: None }, Timestamp::now())
-            .expect("ask for the batch");
-
-        fixture.take_selections();
-
-        assert_eq!(
-            ["acme/app#1@10", "acme/web#2@20"].map(|key| fixture.status(key)),
-            [Status::Launched, Status::Launched]
-        );
-        assert_eq!(fixture.opened().len(), 2);
     }
 
     #[test]
