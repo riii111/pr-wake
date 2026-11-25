@@ -185,7 +185,12 @@ impl Digest {
             "そのターンが終わっていなければ、wait_threadsで終わるまで待ってください。".to_owned(),
             "PRへの投稿や、レビューのスレッドへの送信はしないでください。".to_owned(),
             String::new(),
-            "PRごとに、PRへのリンク、判定（LGTM・修正必要など）、1〜2行の要点、`[スレッド](codex://threads/<スレッドID>)`の形のリンクを書いてください。".to_owned(),
+            "報告はMarkdownの表1つで、PRごとに1行で書いてください。".to_owned(),
+            "| PR | ステータス | 要点 | レビューチャット |".to_owned(),
+            "| --- | --- | --- | --- |".to_owned(),
+            "PR欄はPRへのリンク、ステータス欄は判定（LGTM・修正必要など）、要点欄は1〜2文にまとめてください。セル内の`|`はエスケープしてください。".to_owned(),
+            "レビューチャット欄は、読み取ったチャット名で`codex://threads/<スレッドID>`にリンクしてください。IDだけ分かる場合は「チャットを開く」をリンクにし、IDが分からなければ`-`と書いてください。".to_owned(),
+            "下書きを開いただけのPRは「送信待ち」、報告だけのPRは「報告のみ」として、理由や次の操作を要点欄に書いてください。".to_owned(),
         ];
         if !self.started.is_empty() {
             lines.push(String::new());
@@ -473,6 +478,7 @@ mod tests {
         let prompt = digest.report_prompt();
 
         for expected in [
+            "| PR | ステータス | 要点 | レビューチャット |",
             "- [#12 Fix the bug](https://github.com/acme/app/pull/12) スレッドID chat-12、依頼ID acme/app#12@30",
             "- [#14 Saved before](https://github.com/acme/app/pull/14) スレッドID不明",
             "Enterで送るまでレビューは始まらないと書く）:\n- [#13 Opened](https://github.com/acme/app/pull/13)",
