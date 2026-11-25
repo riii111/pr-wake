@@ -84,8 +84,20 @@ pub(super) fn render(
     } else {
         CHAT.width()
     };
-    let title_width = width.saturating_sub(pr_width + 4 + chat_width);
-    let compact = title_width < 16;
+    let fixed_width = pr_width + 4 + chat_width;
+    let available = width.saturating_sub(fixed_width);
+    let compact = available < 16;
+    let titles: Vec<_> = entries
+        .iter()
+        .map(|entry| one_line(&entry.title).replace(char::is_control, ""))
+        .collect();
+    let title_width = titles
+        .iter()
+        .map(|title| title.width())
+        .max()
+        .unwrap_or(0)
+        .max("Title".width())
+        .min(available);
     if !compact {
         let _ = writeln!(
             out,
@@ -93,10 +105,9 @@ pub(super) fn render(
             " ".repeat(pr_width - 2),
             " ".repeat(title_width - "Title".width())
         );
-        let _ = writeln!(out, "{}", "-".repeat(width));
+        let _ = writeln!(out, "{}", "-".repeat(fixed_width + title_width));
     }
-    for (index, (entry, pr)) in entries.iter().zip(prs).enumerate() {
-        let title = one_line(&entry.title).replace(char::is_control, "");
+    for (index, ((entry, pr), title)) in entries.iter().zip(prs).zip(titles).enumerate() {
         let chat = entry.review_thread.as_ref().map_or_else(
             || "-".into(),
             |id| link(OPEN_CHAT, &format!("codex://threads/{id}"), color),
