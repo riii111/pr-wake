@@ -77,6 +77,8 @@ pub(crate) struct QueueEntry {
     pub(crate) url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) requester: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) review_thread: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -146,6 +148,7 @@ pub(crate) fn queue(state: &ReviewState) -> Vec<QueueEntry> {
             title: request.found.title.clone(),
             url: pr_url(&request.found.repo, request.found.number),
             requester: request.found.requester.clone(),
+            review_thread: None,
         })
         .collect()
 }

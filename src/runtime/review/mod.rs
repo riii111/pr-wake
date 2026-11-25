@@ -421,7 +421,6 @@ pub(crate) fn request_now(
     ))
 }
 
-// Read from the state alone.
 pub(crate) fn queue(paths: &ReviewPaths) -> Result<Vec<QueueEntry>, String> {
     // An empty queue would hide a review that has never saved a state, so that is an error.
     let state = review_record::load_state(paths)
@@ -439,7 +438,15 @@ pub(crate) fn queue(paths: &ReviewPaths) -> Result<Vec<QueueEntry>, String> {
             |error| format!("the review could not poll GitHub yet: {error}"),
         ));
     }
-    Ok(selection::queue(&state))
+    let mut entries = selection::queue(&state);
+    for entry in &mut entries {
+        // An unreadable chat record should still let the queued request be listed.
+        entry.review_thread = review_record::load_chat(paths, &entry.repo, entry.number)
+            .ok()
+            .flatten()
+            .map(|chat| chat.thread);
+    }
+    Ok(entries)
 }
 
 // Hands the chosen requests to the running review under the caller's id and waits for what it did with them, up to `waits` checks.
@@ -1477,6 +1484,31 @@ mod tests {
                 "case: {name}"
             );
         }
+    }
+
+    #[test]
+    fn queue_includes_the_linked_review_chat_for_its_pr() {
+        let home = ReviewHome::new();
+        let mut state = ReviewState::default();
+        state.apply_poll(vec![found(3), found(4)], Timestamp::UNIX_EPOCH, false);
+        state.last_poll = Some(Timestamp::UNIX_EPOCH);
+        review_record::save_state(&home.env.paths, &state).expect("save the state");
+        review_record::record_chat(
+            &home.env.paths,
+            &ReviewChat {
+                repo: "acme/app".to_owned(),
+                number: 3,
+                thread: "chat-1".to_owned(),
+                linked_at: "1970-01-01T00:00:00Z".to_owned(),
+            },
+        )
+        .expect("link the chat");
+
+        let entries = queue(&home.env.paths).expect("list the requests");
+        let json = serde_json::to_value(entries).expect("serialize the queue");
+
+        assert_eq!(json[0]["reviewThread"], "chat-1");
+        assert!(json[1].get("reviewThread").is_none());
     }
 
     #[test]
