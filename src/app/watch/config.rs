@@ -13,7 +13,7 @@ use serde_json::Value;
 use super::{
     field,
     pr::ItemKind,
-    reviewers::{self, BotProgress, PRESET_NAMES, ReviewBot, Severity},
+    reviewers::{self, BotProgress, PRESETS, ReviewBot, Severity},
 };
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -216,7 +216,7 @@ impl<'de> Deserialize<'de> for ConfiguredBot {
             Value::String(name) => reviewers::preset(&name).map(Self).ok_or_else(|| {
                 D::Error::custom(format!(
                     "unknown preset {name:?}, expected one of {}",
-                    PRESET_NAMES.join(", ")
+                    PRESETS.map(|(preset, _)| preset).join(", ")
                 ))
             }),
             // Read on its own, so an error inside the bot still names the field it is in.

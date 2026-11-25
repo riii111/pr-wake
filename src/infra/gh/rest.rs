@@ -5,8 +5,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::{
     app::review::{
-        PullRequest,
-        batch::{Reviewers, SubmittedReview},
+        PullDetails, PullRequest,
+        batch::SubmittedReview,
         inbox::InboxThread,
         is_repo_name,
         notice::Size,
@@ -71,36 +71,18 @@ struct Pull {
     number: u64,
     title: String,
     html_url: String,
-    head: Head,
-    base: Base,
-}
-
-#[derive(Deserialize)]
-struct PullRequested {
     state: String,
     #[serde(default)]
-    requested_reviewers: Vec<Account>,
-    #[serde(default)]
-    requested_teams: Vec<Team>,
-}
-
-#[derive(Deserialize)]
-struct PullSize {
+    user: Option<Account>,
+    head: Head,
+    base: Base,
     additions: u64,
     deletions: u64,
     changed_files: u64,
-}
-
-#[derive(Deserialize)]
-struct PullAuthor {
     #[serde(default)]
-    user: Option<Account>,
-}
-
-#[derive(Deserialize)]
-struct RequestedReviewers {
+    requested_reviewers: Vec<Actor>,
     #[serde(default)]
-    users: Vec<Actor>,
+    requested_teams: Vec<Team>,
 }
 
 #[derive(Deserialize)]
@@ -237,7 +219,7 @@ impl GhRest<'_> {
             .collect())
     }
 
-    pub(crate) fn pull_request(&self, repo: &str, number: u64) -> Result<PullRequest, String> {
+    pub(crate) fn pull_request(&self, repo: &str, number: u64) -> Result<PullDetails, String> {
         let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
         let pull = serde_json::from_slice::<Pull>(&output)
             .map_err(|error| format!("pull request {repo}#{number}: {error}"))?;
@@ -255,94 +237,61 @@ impl GhRest<'_> {
             ));
         }
 
-        Ok(PullRequest {
-            repo: pull.base.repo.full_name,
-            number,
-            title: pull.title,
-            url: pull.html_url,
-            head_sha: pull.head.sha,
-            base_ref: pull.base.name,
-        })
-    }
-
-    pub(crate) fn live_request(&self, repo: &str, number: u64) -> Result<LiveRequest, String> {
-        let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
-        let pull = serde_json::from_slice::<PullRequested>(&output)
-            .map_err(|error| format!("review requests of {repo}#{number}: {error}"))?;
-        Ok(LiveRequest {
-            open: pull.state == "open",
-            users: pull
+        Ok(PullDetails {
+            author: pull.user.map(|user| user.login),
+            live: LiveRequest {
+                open: pull.state == "open",
+                users: pull
+                    .requested_reviewers
+                    .iter()
+                    .map(|user| user.login.clone())
+                    .collect(),
+                teams: pull
+                    .requested_teams
+                    .into_iter()
+                    .map(|team| team.slug)
+                    .collect(),
+            },
+            requested: pull
                 .requested_reviewers
                 .into_iter()
-                .map(|account| account.login)
+                .filter(|user| !user.is_bot())
+                .map(|user| user.login)
                 .collect(),
-            teams: pull
-                .requested_teams
-                .into_iter()
-                .map(|team| team.slug)
-                .collect(),
+            size: Size {
+                additions: pull.additions,
+                deletions: pull.deletions,
+                changed_files: pull.changed_files,
+            },
+            pr: PullRequest {
+                repo: pull.base.repo.full_name,
+                number,
+                title: pull.title,
+                url: pull.html_url,
+                head_sha: pull.head.sha,
+                base_ref: pull.base.name,
+            },
         })
     }
 
-    pub(crate) fn pull_request_size(&self, repo: &str, number: u64) -> Result<Size, String> {
-        let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
-        let pull = serde_json::from_slice::<PullSize>(&output)
-            .map_err(|error| format!("pull request {repo}#{number}: {error}"))?;
-        Ok(Size {
-            additions: pull.additions,
-            deletions: pull.deletions,
-            changed_files: pull.changed_files,
-        })
-    }
-
-    pub(crate) fn pull_request_author(
-        &self,
-        repo: &str,
-        number: u64,
-    ) -> Result<Option<String>, String> {
-        let output = self.api([format!("repos/{repo}/pulls/{number}").as_str()])?;
-        let pull = serde_json::from_slice::<PullAuthor>(&output)
-            .map_err(|error| format!("pull request {repo}#{number}: {error}"))?;
-        Ok(pull.user.map(|user| user.login))
-    }
-
-    pub(crate) fn pull_request_reviewers(
-        &self,
-        repo: &str,
-        number: u64,
-    ) -> Result<Reviewers, String> {
-        let author = self.pull_request_author(repo, number)?;
-        let output =
-            self.api([format!("repos/{repo}/pulls/{number}/requested_reviewers").as_str()])?;
-        let requested = serde_json::from_slice::<RequestedReviewers>(&output)
-            .map_err(|error| format!("requested reviewers of {repo}#{number}: {error}"))?;
+    pub(crate) fn reviews(&self, repo: &str, number: u64) -> Result<Vec<SubmittedReview>, String> {
         let output = self.api([
             "--paginate",
             &format!("repos/{repo}/pulls/{number}/reviews?per_page=100"),
         ])?;
         let reviews = decode_pages::<Vec<Review>>(&output)
             .map_err(|error| format!("reviews of {repo}#{number}: {error}"))?;
-
-        Ok(Reviewers {
-            author,
-            requested: requested
-                .users
-                .into_iter()
-                .filter(|user| !user.is_bot())
-                .map(|user| user.login)
-                .collect(),
-            reviews: reviews
-                .into_iter()
-                .flatten()
-                .filter_map(|review| {
-                    let user = review.user.filter(|user| !user.is_bot())?;
-                    Some(SubmittedReview {
-                        author: user.login,
-                        state: review.state,
-                    })
+        Ok(reviews
+            .into_iter()
+            .flatten()
+            .filter_map(|review| {
+                let user = review.user.filter(|user| !user.is_bot())?;
+                Some(SubmittedReview {
+                    author: user.login,
+                    state: review.state,
                 })
-                .collect(),
-        })
+            })
+            .collect())
     }
 
     pub(crate) fn unread_notifications(&self) -> Result<Vec<InboxThread>, String> {
@@ -523,22 +472,37 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_is_read_as_the_base_repository_names_it() {
+    fn pull_request_is_read_once_as_the_base_repository_names_it() {
         let gh = FakeGh::answering(pull_json("Acme/App", 12, HEAD));
 
-        let pr = gh.rest(|rest| rest.pull_request("acme/app", 12));
+        let pull = gh.rest(|rest| rest.pull_request("acme/app", 12));
 
         assert_eq!(
-            pr,
-            Ok(PullRequest {
-                repo: "Acme/App".to_owned(),
-                number: 12,
-                title: "T".to_owned(),
-                url: "https://github.com/Acme/App/pull/12".to_owned(),
-                head_sha: HEAD.to_owned(),
-                base_ref: "main".to_owned(),
+            pull,
+            Ok(PullDetails {
+                pr: PullRequest {
+                    repo: "Acme/App".to_owned(),
+                    number: 12,
+                    title: "T".to_owned(),
+                    url: "https://github.com/Acme/App/pull/12".to_owned(),
+                    head_sha: HEAD.to_owned(),
+                    base_ref: "main".to_owned(),
+                },
+                author: Some("tanaka".to_owned()),
+                live: LiveRequest {
+                    open: true,
+                    users: vec!["sato".to_owned(), "renovate[bot]".to_owned()],
+                    teams: vec!["backend".to_owned()],
+                },
+                requested: vec!["sato".to_owned()],
+                size: Size {
+                    additions: 12,
+                    deletions: 3,
+                    changed_files: 2,
+                },
             })
         );
+        assert_eq!(gh.asked(), [["api", "repos/acme/app/pulls/12"]]);
     }
 
     #[test]
@@ -557,54 +521,27 @@ mod tests {
     }
 
     #[test]
-    fn reviewers_are_the_requested_users_and_the_review_authors_without_bots() {
-        let stop = StopRequest::default();
-        let asked = Mutex::new(Vec::new());
-        let run = |call: &ToolCall<'_>| {
-            let arguments = call
-                .arguments
-                .iter()
-                .map(|argument| argument.to_string_lossy().into_owned())
-                .collect::<Vec<_>>();
-            let answer = match arguments.last().map(String::as_str) {
-                Some("repos/acme/app/pulls/12") => r#"{"user":{"login":"tanaka"}}"#,
-                Some("repos/acme/app/pulls/12/requested_reviewers") => {
-                    r#"{"users":[{"login":"sato","type":"User"},{"login":"renovate[bot]","type":"Bot"}],"teams":[{"slug":"backend"}]}"#
-                }
-                Some("repos/acme/app/pulls/12/reviews?per_page=100") => {
-                    r#"[{"user":{"login":"suzuki","type":"User"},"state":"APPROVED"},{"user":{"login":"copilot","type":"Bot"},"state":"COMMENTED"}][{"user":null,"state":"COMMENTED"}]"#
-                }
-                _ => return Err(format!("unexpected call: {arguments:?}")),
-            };
-            asked.lock().expect("note the call").push(arguments);
-            Ok(answer.as_bytes().to_vec())
-        };
+    fn reviews_are_read_from_every_page_without_bots() {
+        let first = r#"[{"user":{"login":"suzuki","type":"User"},"state":"APPROVED"},{"user":{"login":"copilot","type":"Bot"},"state":"COMMENTED"}]"#;
+        let second = r#"[{"user":null,"state":"COMMENTED"}]"#;
+        let gh = FakeGh::answering(format!("{first}{second}"));
 
-        let reviewers = GhRest {
-            run: &run,
-            gh: Path::new("gh"),
-            stop: &stop,
-        }
-        .pull_request_reviewers("acme/app", 12);
+        let reviews = gh.rest(|rest| rest.reviews("acme/app", 12));
 
         assert_eq!(
-            reviewers,
-            Ok(Reviewers {
-                author: Some("tanaka".to_owned()),
-                requested: vec!["sato".to_owned()],
-                reviews: vec![SubmittedReview {
-                    author: "suzuki".to_owned(),
-                    state: "APPROVED".to_owned(),
-                }],
-            })
+            reviews,
+            Ok(vec![SubmittedReview {
+                author: "suzuki".to_owned(),
+                state: "APPROVED".to_owned(),
+            }])
         );
         assert_eq!(
-            asked.into_inner().expect("read the calls")[2],
-            [
+            gh.asked(),
+            [[
                 "api",
                 "--paginate",
                 "repos/acme/app/pulls/12/reviews?per_page=100"
-            ]
+            ]]
         );
     }
 
@@ -710,7 +647,7 @@ mod tests {
 
     fn pull_json(repo: &str, number: u64, head: &str) -> String {
         format!(
-            r#"{{"number":{number},"title":"T","html_url":"https://github.com/{repo}/pull/{number}","head":{{"sha":"{head}"}},"base":{{"ref":"main","repo":{{"full_name":"{repo}"}}}}}}"#
+            r#"{{"number":{number},"title":"T","html_url":"https://github.com/{repo}/pull/{number}","state":"open","user":{{"login":"tanaka"}},"head":{{"sha":"{head}"}},"base":{{"ref":"main","repo":{{"full_name":"{repo}"}}}},"additions":12,"deletions":3,"changed_files":2,"requested_reviewers":[{{"login":"sato","type":"User"}},{{"login":"renovate[bot]","type":"Bot"}}],"requested_teams":[{{"slug":"backend"}}]}}"#
         )
     }
 }

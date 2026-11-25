@@ -4,15 +4,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::record::{self, BaseDirectories, JsonLayout, ProcessLock, RecordError};
-use crate::app::watch::{
-    config::WatchConfig,
-    pr::{PrLink, PrRef},
-    state::WatchState,
+use crate::app::{
+    time,
+    watch::{
+        config::WatchConfig,
+        pr::{PrLink, PrRef},
+        state::WatchState,
+    },
 };
 
 // The record directory is shared with harnexus-crew, which reads none of the PR states.
@@ -29,7 +33,8 @@ struct StoredLink {
     number: u64,
     url: String,
     worker: String,
-    linked_at: String,
+    #[serde(with = "time::record")]
+    linked_at: Timestamp,
 }
 
 #[derive(Serialize)]
@@ -82,7 +87,7 @@ pub(crate) fn record_link(root: &Path, link: &PrLink) -> Result<(), RecordError>
         number: link.pr.number,
         url: link.url.clone(),
         worker: link.worker.clone(),
-        linked_at: link.linked_at.clone(),
+        linked_at: link.linked_at,
     };
     // The running watch alone writes a PR's state and notices the new chat itself, so only the link is written.
     record::save_json(
@@ -222,6 +227,7 @@ mod tests {
         json!([{ "type": "merged", "head": HEAD }])
     ))]
     #[case::missing_reason(without(tracked(), "reason"))]
+    #[case::unreadable_time(with(tracked(), "checkedAt", json!("soon")))]
     fn damaged_record_is_refused_and_left_on_disk(#[case] record: Value) {
         let root = tempfile::tempdir().expect("create a directory");
         let directory = root.path().join(pr_key(&pay(7)));
@@ -258,14 +264,21 @@ mod tests {
             written,
             "{\n \"repo\": \"org/pay\",\n \"number\": 7,\n \"url\": \"https://github.com/org/pay/pull/7\",\n \"worker\": \"worker\",\n \"linkedAt\": \"2026-10-20T00:00:00.000Z\"\n}"
         );
-        assert_eq!(load_link(root.path(), &pay(7)).expect("load"), Some(link));
+        let mixed_case = PrRef {
+            repo: "ORG/Pay".to_owned(),
+            number: 7,
+        };
+        assert_eq!(
+            load_link(root.path(), &mixed_case).expect("load"),
+            Some(link)
+        );
         assert_eq!(load_link(root.path(), &pay(8)).expect("load"), None);
     }
 
     #[test]
     fn listing_skips_unreadable_links_skipped_keys_and_stray_files() {
         let root = tempfile::tempdir().expect("create a directory");
-        for number in [7, 8, 9] {
+        for number in [7, 8, 9, 12] {
             record_link(root.path(), &link_of(number, "worker")).expect("record the link");
         }
         let broken = root.path().join(pr_key(&pay(10)));
@@ -274,13 +287,21 @@ mod tests {
         let other_shape = root.path().join(pr_key(&pay(11)));
         fs::create_dir(&other_shape).expect("create the PR directory");
         fs::write(other_shape.join(LINK), r#"["org/pay", 11]"#).expect("write a list");
+        // harnexus-crew shares the directory and may add fields this version does not know.
+        let later = root.path().join(pr_key(&pay(12))).join(LINK);
+        let mut recorded: Value =
+            serde_json::from_str(&fs::read_to_string(&later).expect("read the link"))
+                .expect("parse the link");
+        recorded["addedLater"] = json!(true);
+        fs::write(&later, recorded.to_string()).expect("add a field");
         fs::write(root.path().join(SENDER), r#"{"thread":"s"}"#).expect("write the sender");
         let skip = HashSet::from([pr_key(&pay(8))]);
 
         let links = list_links(root.path(), &skip).expect("list the links");
 
-        let numbers = links.iter().map(|link| link.pr.number).collect::<Vec<_>>();
-        assert_eq!(numbers, [7, 9]);
+        let mut numbers = links.iter().map(|link| link.pr.number).collect::<Vec<_>>();
+        numbers.sort_unstable();
+        assert_eq!(numbers, [7, 9, 12]);
     }
 
     #[test]
@@ -306,68 +327,6 @@ mod tests {
         assert_eq!(missing, None);
         assert_eq!(recorded.as_deref(), Some("sender-chat"));
         assert!(damaged.is_err(), "{damaged:?}");
-    }
-
-    // A later TypeScript watch or harnexus-crew may write fields this version does not know.
-    #[test]
-    fn records_harnexus_task_left_with_unknown_fields_still_load() {
-        let root = tempfile::tempdir().expect("create a directory");
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch");
-        let copy_with_a_later_field = |file: &Path| {
-            let mut recorded: Value = serde_json::from_str(
-                &fs::read_to_string(fixtures.join(file)).expect("read the fixture"),
-            )
-            .expect("parse the fixture");
-            recorded["addedLater"] = json!({ "by": "a later version" });
-            fs::write(root.path().join(file), recorded.to_string()).expect("write the record");
-        };
-        for number in [7, 8, 9, 10] {
-            let key = pr_key(&pay(number));
-            fs::create_dir(root.path().join(&key)).expect("create the PR directory");
-            for file in [LINK, STATE] {
-                copy_with_a_later_field(&Path::new(&key).join(file));
-            }
-        }
-        copy_with_a_later_field(Path::new(SENDER));
-
-        let links = list_links(root.path(), &HashSet::new()).expect("list the links");
-        let loaded = links
-            .iter()
-            .map(|link| {
-                load_watch_state(root.path(), &link.pr).map(|state| {
-                    (
-                        link.worker.as_str(),
-                        state.status,
-                        state.pending.len(),
-                        state.worker,
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .expect("load every state");
-        let sender = load_sender(root.path()).expect("load the sender");
-        let mixed_case = PrRef {
-            repo: "ORG/Pay".to_owned(),
-            number: 9,
-        };
-        let found = load_link(root.path(), &mixed_case).expect("load the link");
-
-        assert_eq!(
-            loaded,
-            [
-                (
-                    "next-chat",
-                    WatchStatus::Watching,
-                    0,
-                    Some("old-chat".to_owned())
-                ),
-                ("w8", WatchStatus::Watching, 0, Some("w8".to_owned())),
-                ("w9", WatchStatus::Watching, 1, Some("w9".to_owned())),
-                ("w10", WatchStatus::Halted, 0, Some("w10".to_owned())),
-            ]
-        );
-        assert_eq!(sender.as_deref(), Some("sender-chat"));
-        assert_eq!(found.map(|link| link.worker).as_deref(), Some("w9"));
     }
 
     #[test]
@@ -402,7 +361,7 @@ mod tests {
             pr: pay(number),
             url: format!("https://github.com/org/pay/pull/{number}"),
             worker: worker.to_owned(),
-            linked_at: "2026-10-20T00:00:00.000Z".to_owned(),
+            linked_at: "2026-10-20T00:00:00Z".parse().expect("parse the time"),
         }
     }
 

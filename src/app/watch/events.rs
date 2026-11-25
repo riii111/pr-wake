@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use jiff::Timestamp;
+
 use super::{
     classify::{self, Verdict},
     config::WatchConfig,
@@ -24,7 +26,7 @@ const MERGEABLE: &str = "MERGEABLE";
 pub(crate) fn next_events(
     detail: &PrDetail,
     state: &WatchState,
-    linked_at: &str,
+    linked_at: Timestamp,
     // The owner's account is fixed per repository, so its comments are known without another request.
     owner: &str,
     config: &WatchConfig,
@@ -80,7 +82,7 @@ fn baseline(detail: &PrDetail, bots: &[ReviewBot]) -> Found {
 fn new_findings(
     detail: &PrDetail,
     seen: &mut Seen,
-    linked_at: &str,
+    linked_at: Timestamp,
     owner: &str,
     config: &WatchConfig,
 ) -> Vec<WatchEvent> {
@@ -119,7 +121,7 @@ fn review_done(
     detail: &PrDetail,
     bot: &ReviewBot,
     seen: &mut Seen,
-    linked_at: &str,
+    linked_at: Timestamp,
     findings: &[WatchEvent],
 ) -> Option<WatchEvent> {
     // A bot added after the first read starts from its reviews as they stand, as the first read does.
@@ -182,7 +184,7 @@ fn bot_baseline(detail: &PrDetail, bot: &ReviewBot) -> Vec<String> {
     keys
 }
 
-// The id leads, so keys recorded for CodeRabbit before bots were configurable still match.
+// Saved records hold these keys, so a new form would tell every finished review again.
 fn review_key(bot: &ReviewBot, head: &str) -> String {
     format!("{}:{head}", bot.id)
 }
@@ -269,7 +271,6 @@ mod tests {
 
     const PR: &str = "https://github.com/org/pay/pull/7";
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const LINKED_AT: &str = "2026-10-23T10:00:00.000Z";
 
     mod first_read {
         use super::*;
@@ -291,7 +292,7 @@ mod tests {
             let found = next_events(
                 &detail,
                 &WatchState::default(),
-                LINKED_AT,
+                linked_at(),
                 "owner",
                 &config(),
             );
@@ -310,6 +311,51 @@ mod tests {
                 }
             );
         }
+
+        #[test]
+        fn review_running_at_the_first_read_is_told_once_it_completes() {
+            let running = PrDetail {
+                summary: summary(Some(BotStatus {
+                    state: PENDING.to_owned(),
+                    ..completed()
+                })),
+                ..detail(vec![bot_comment(1, "**🟠 Major**")])
+            };
+            let first = next_events(
+                &running,
+                &WatchState::default(),
+                linked_at(),
+                "owner",
+                &config(),
+            );
+            let finished = PrDetail {
+                summary: summary(Some(completed())),
+                no_actionable: vec!["coderabbit".to_owned()],
+                ..running
+            };
+
+            let found = next_events(
+                &finished,
+                &WatchState {
+                    seen: first.seen,
+                    ..read_state(&[])
+                },
+                linked_at(),
+                "owner",
+                &config(),
+            );
+
+            assert_eq!(
+                found.events,
+                [WatchEvent::ReviewDone {
+                    bot: "coderabbit".to_owned(),
+                    name: "CodeRabbit".to_owned(),
+                    head: HEAD.to_owned(),
+                    findings: 0,
+                    summary_agrees: true,
+                }]
+            );
+        }
     }
 
     mod findings {
@@ -324,7 +370,7 @@ mod tests {
             ]);
             let state = read_state(&["bot:coderabbit", "inline:3"]);
 
-            let found = next_events(&detail, &state, LINKED_AT, "owner", &config());
+            let found = next_events(&detail, &state, linked_at(), "owner", &config());
 
             assert_eq!(finding_ids(&found.events), ["inline:2"]);
             assert_eq!(found.seen, ["bot:coderabbit", "inline:3", "inline:2"]);
@@ -347,7 +393,7 @@ mod tests {
             let found = next_events(
                 &detail,
                 &read_state(&["bot:coderabbit"]),
-                LINKED_AT,
+                linked_at(),
                 "owner",
                 &config(),
             );
@@ -367,14 +413,14 @@ mod tests {
             };
             let state = read_state(&["bot:coderabbit"]);
 
-            let first = next_events(&detail, &state, LINKED_AT, "owner", &config());
+            let first = next_events(&detail, &state, linked_at(), "owner", &config());
             let again = next_events(
                 &detail,
                 &WatchState {
                     seen: first.seen.clone(),
                     ..state
                 },
-                LINKED_AT,
+                linked_at(),
                 "owner",
                 &config(),
             );
@@ -420,7 +466,7 @@ mod tests {
                 let found = next_events(
                     &detail,
                     &read_state(&["bot:coderabbit"]),
-                    LINKED_AT,
+                    linked_at(),
                     "owner",
                     &config(),
                 );
@@ -467,7 +513,7 @@ mod tests {
                 let found = next_events(
                     &detail,
                     &read_state(&["bot:coderabbit"]),
-                    LINKED_AT,
+                    linked_at(),
                     "owner",
                     &config(),
                 );
@@ -483,7 +529,7 @@ mod tests {
                 ..detail(vec![bot_comment(1, "**🟠 Major**")])
             };
 
-            let found = next_events(&detail, &read_state(&[]), LINKED_AT, "owner", &config());
+            let found = next_events(&detail, &read_state(&[]), linked_at(), "owner", &config());
 
             assert_eq!(finding_ids(&found.events), ["inline:1"]);
             assert!(
@@ -525,7 +571,7 @@ mod tests {
             let found = next_events(
                 &detail,
                 &read_state(&["bot:claude"]),
-                LINKED_AT,
+                linked_at(),
                 "owner",
                 &config,
             );
@@ -561,7 +607,7 @@ mod tests {
                     ..read_state(&["bot:coderabbit"])
                 };
 
-                let found = next_events(&detail, &state, LINKED_AT, "owner", &config());
+                let found = next_events(&detail, &state, linked_at(), "owner", &config());
 
                 assert_eq!(
                     (
@@ -584,14 +630,14 @@ mod tests {
             };
             let state = read_state(&["bot:coderabbit"]);
 
-            let first = next_events(&detail, &state, LINKED_AT, "owner", &config());
+            let first = next_events(&detail, &state, linked_at(), "owner", &config());
             let again = next_events(
                 &detail,
                 &WatchState {
                     seen: first.seen.clone(),
                     ..state
                 },
-                LINKED_AT,
+                linked_at(),
                 "owner",
                 &config(),
             );
@@ -605,6 +651,10 @@ mod tests {
             );
             assert_eq!(again.events, []);
         }
+    }
+
+    fn linked_at() -> Timestamp {
+        "2026-10-23T10:00:00Z".parse().expect("parse the time")
     }
 
     fn config() -> WatchConfig {

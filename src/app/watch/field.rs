@@ -18,17 +18,3 @@ where
 {
     T::deserialize(deserializer).map(Some)
 }
-
-// A field that may be left out, told apart from one recorded as null.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) enum Recorded<T> {
-    #[default]
-    Absent,
-    Present(T),
-}
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Recorded<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        T::deserialize(deserializer).map(Self::Present)
-    }
-}

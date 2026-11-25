@@ -104,7 +104,7 @@ impl<'app> CodexWorkers<'app> {
         &mut self,
         caller: &str,
         thread: &str,
-        sent_at: Option<&str>,
+        sent_at: Option<Timestamp>,
     ) -> Lookup<ThreadView> {
         let first = match self.read_page(caller, thread, None) {
             Lookup::Found(page) => page,
@@ -171,7 +171,7 @@ impl Workers for CodexWorkers<'_> {
         awaited: Option<&Delivered>,
         now: Timestamp,
     ) -> Option<WorkerView> {
-        let view = match self.read_thread(sender, worker, awaited.map(|sent| sent.at.as_str())) {
+        let view = match self.read_thread(sender, worker, awaited.map(|sent| sent.at)) {
             Lookup::Found(view) => view,
             Lookup::Gone => return Some(WorkerView::Gone),
             Lookup::Unknown => return None,
@@ -394,7 +394,7 @@ fn is_busy(view: &ThreadView, now: Timestamp) -> bool {
 
 // The turn our message started: sent from our thread with our text, no earlier than we sent it.
 fn answer_to<'turns>(turns: &'turns [Turn], sent: &Delivered) -> Option<&'turns Turn> {
-    let after = turns_after(&sent.at);
+    let after = turns_after(sent.at);
     // Turns are listed newest first, so `rfind` takes the earliest turn that matches.
     turns.iter().rfind(|turn| {
         turn.delegation.as_ref().is_some_and(|delegation| {
@@ -408,11 +408,8 @@ fn is_prompt_of(input: &str, prompt: &str) -> bool {
     !input.trim().is_empty() && prompt.starts_with(input.trim_end())
 }
 
-fn turns_after(sent_at: &str) -> f64 {
-    // A time that does not parse is `NaN`, which no turn is at or after.
-    sent_at.parse::<Timestamp>().map_or(f64::NAN, |sent| {
-        sent.as_duration().as_secs_f64() - CLOCK_SKEW_SECONDS
-    })
+fn turns_after(sent_at: Timestamp) -> f64 {
+    sent_at.as_duration().as_secs_f64() - CLOCK_SKEW_SECONDS
 }
 
 fn answer_of(turn: &Turn) -> Answer {
@@ -444,7 +441,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::app::time;
 
     const NOW_SECONDS: f64 = 1_000_000.0;
 
@@ -534,6 +530,33 @@ mod tests {
             *cursors.borrow(),
             [None, Some("page:1".to_owned()), Some("page:2".to_owned())]
         );
+    }
+
+    #[test]
+    fn answer_is_the_turn_our_thread_started_with_our_message_once_it_was_sent() {
+        let sent = sent(100_000, "$task-worker\nPR");
+        for (name, turn, answered) in [
+            ("ours", delegated_turn(100.0, &sent.prompt), true),
+            (
+                "within_the_clock_skew",
+                delegated_turn(95.0, &sent.prompt),
+                true,
+            ),
+            ("before_the_send", delegated_turn(94.0, &sent.prompt), false),
+            ("another_message", delegated_turn(100.0, "hi"), false),
+            (
+                "another_thread",
+                delegated_turn_from("coordinator", 100.0, &sent.prompt),
+                false,
+            ),
+        ] {
+            let read = json!({ "thread": { "status": { "type": "idle" } }, "turns": [turn] });
+
+            let view = look(answering(read), Some(&sent));
+
+            let expected = answered.then(|| completed("answered"));
+            assert_eq!(view, Some(present(false, expected)), "case: {name}");
+        }
     }
 
     #[test]
@@ -692,12 +715,16 @@ mod tests {
     }
 
     fn delegated_turn(started_at: f64, input: &str) -> Value {
+        delegated_turn_from("reviewer", started_at, input)
+    }
+
+    fn delegated_turn_from(source: &str, started_at: f64, input: &str) -> Value {
         json!({
             "status": "completed",
             "startedAt": started_at,
             "completedAt": started_at,
             "items": [
-                { "type": "userMessage", "codexDelegation": { "sourceThreadId": "reviewer", "input": input } },
+                { "type": "userMessage", "codexDelegation": { "sourceThreadId": source, "input": input } },
                 { "type": "agentMessage", "phase": "final_answer", "text": "answered" },
             ],
         })
@@ -705,7 +732,7 @@ mod tests {
 
     fn sent(at_ms: i64, prompt: &str) -> Delivered {
         Delivered {
-            at: time::format_timestamp(Timestamp::from_millisecond(at_ms).expect("a valid time")),
+            at: Timestamp::from_millisecond(at_ms).expect("a valid time"),
             sender: "reviewer".to_owned(),
             prompt: prompt.to_owned(),
             findings: Vec::new(),

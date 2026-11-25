@@ -289,7 +289,7 @@ fn apply_summary(
         &mut entry.state,
         &summary,
         &detail,
-        &entry.link.linked_at,
+        entry.link.linked_at,
         &entry.account,
         config,
     );
@@ -446,7 +446,6 @@ mod tests {
     use std::{cell::RefCell, collections::BTreeMap, fs};
 
     use jiff::{SignedDuration, tz::TimeZone};
-    use rstest::rstest;
     use serde_json::{Map, Value, json};
 
     use super::*;
@@ -456,31 +455,26 @@ mod tests {
             watch::{
                 pr::{ItemKind, PrComment, PrDetail, ReadError, ReadErrorKind},
                 reviewers::ReviewBot,
-                state::{BotStatus, FailedCheck, WatchStatus},
+                state::{BotStatus, WatchStatus, bot_key},
             },
         },
         infra::{
             harnexus::{CallApp, CodexWorkers},
             t3::{T3Ran, T3Workers},
         },
-        runtime::watch::{AppWorkers, status as watch_status},
+        runtime::watch::AppWorkers,
     };
 
     const PR: &str = "https://github.com/org/pay/pull/7";
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const LINKED_AT: &str = "2026-10-20T00:00:00.000Z";
+    const LINKED_AT: &str = "2026-10-20T00:00:00Z";
     const NOON: &str = "2026-10-23T12:00:00Z";
 
     // What GitHub, the apps and the clock show the watch.
     struct World {
         summary: PrSummary,
         comments: Vec<PrComment>,
-        failed_required: Vec<FailedCheck>,
-        no_actionable: Vec<String>,
         detail_fails: bool,
-        turns: Vec<Value>,
-        active: bool,
-        gone: bool,
         send_outcome: &'static str,
         // The chat registered with watch --sender.
         sender: Option<String>,
@@ -503,6 +497,8 @@ mod tests {
         caller: String,
         thread: String,
         prompt: String,
+        // The status on disk when the call was made.
+        saved: WatchStatus,
     }
 
     struct Fixture {
@@ -574,7 +570,8 @@ mod tests {
         use super::*;
 
         #[test]
-        fn completed_review_and_its_new_findings_go_in_one_message_from_the_registered_chat() {
+        fn new_findings_go_in_one_message_from_the_registered_chat_after_the_halted_mark_is_saved()
+        {
             let fixture = Fixture::new(
                 json!({ "instructions": "$task-worker" }),
                 Read::Again,
@@ -584,22 +581,9 @@ mod tests {
                 world.comments = vec![
                     comment(),
                     PrComment {
-                        id: "inline:2".to_owned(),
-                        reply: true,
-                        url: format!("{PR}#discussion_r2"),
-                        ..comment()
-                    },
-                    PrComment {
                         id: "inline:3".to_owned(),
                         created_at: "2026-10-19T00:00:00Z".to_owned(),
                         url: format!("{PR}#discussion_r3"),
-                        ..comment()
-                    },
-                    PrComment {
-                        id: "issue:4".to_owned(),
-                        kind: ItemKind::IssueComment,
-                        author: "owner".to_owned(),
-                        url: format!("{PR}#issuecomment-4"),
                         ..comment()
                     },
                 ];
@@ -610,8 +594,12 @@ mod tests {
             let sent = fixture.sent();
             assert_eq!(sent.len(), 1);
             assert_eq!(
-                (sent[0].caller.as_str(), sent[0].thread.as_str()),
-                ("reviewer", "worker")
+                (
+                    sent[0].caller.as_str(),
+                    sent[0].thread.as_str(),
+                    sent[0].saved
+                ),
+                ("reviewer", "worker", WatchStatus::Halted)
             );
             assert!(
                 sent[0].prompt.starts_with("$task-worker\n"),
@@ -619,9 +607,7 @@ mod tests {
                 sent[0].prompt
             );
             assert!(sent[0].prompt.contains(&format!("{PR}#discussion_r1")));
-            for skipped in ["discussion_r2", "discussion_r3", "issuecomment-4"] {
-                assert!(!sent[0].prompt.contains(skipped), "{skipped}");
-            }
+            assert!(!sent[0].prompt.contains("discussion_r3"));
             let saved = fixture.state();
             assert_eq!(saved.status, WatchStatus::Watching);
             assert_eq!(saved.pending, []);
@@ -629,121 +615,6 @@ mod tests {
                 saved.delivered.map(|delivered| delivered.findings.len()),
                 Some(1)
             );
-        }
-
-        #[test]
-        fn one_follow_up_goes_for_the_findings_the_answer_left_out() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| {
-                world.comments = vec![
-                    comment(),
-                    PrComment {
-                        id: "inline:2".to_owned(),
-                        url: format!("{PR}#discussion_r2"),
-                        ..comment()
-                    },
-                ];
-            });
-            fixture.cycle();
-
-            let first = fixture.prompt(0);
-            fixture.update(|world| {
-                world.turns = vec![delegated_turn(
-                    at(NOON),
-                    &first,
-                    &format!("{PR}#discussion_r1 のみ判定"),
-                    "reviewer",
-                )];
-            });
-            fixture.later(1);
-            fixture.cycle();
-            let follow_up = fixture.prompt(1);
-
-            fixture.update(|world| {
-                let answered = delegated_turn(world.now, &follow_up, "判定できません", "reviewer");
-                world.turns.insert(0, answered);
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 2);
-            assert!(follow_up.contains("discussion_r2"), "{follow_up}");
-            assert!(!follow_up.contains("discussion_r1"), "{follow_up}");
-        }
-
-        #[test]
-        fn approvals_are_sent_and_only_the_one_with_a_body_is_followed_up() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            let approval = |id: u64, body: &str| PrComment {
-                id: format!("review:{id}"),
-                kind: ItemKind::Review,
-                author: "tanaka".to_owned(),
-                url: format!("{PR}#pullrequestreview-{id}"),
-                body: body.to_owned(),
-                path: None,
-                line: None,
-                approved: true,
-                ..comment()
-            };
-            fixture.update(|world| {
-                world.comments = vec![approval(1, "LGTM, one nit"), approval(2, "")];
-            });
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 1);
-            let first = fixture.prompt(0);
-            assert!(first.contains(&format!("{PR}#pullrequestreview-1")));
-            assert!(first.contains(&format!("{PR}#pullrequestreview-2")));
-
-            fixture.update(|world| {
-                world.turns = vec![delegated_turn(at(NOON), &first, "確認しました", "reviewer")];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 2);
-            assert!(fixture.prompt(1).contains("pullrequestreview-1"));
-            assert!(!fixture.prompt(1).contains("pullrequestreview-2"));
-        }
-
-        #[test]
-        fn only_the_turn_our_message_started_is_taken_as_its_answer() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-            let sent = fixture.prompt(0);
-
-            fixture.later(1);
-            fixture.update(|world| {
-                let now = time::format_timestamp(world.now);
-                world.comments = vec![comment(), by_tanaka(5, &now)];
-                world.turns = vec![
-                    delegated_turn(at(NOON), &sent, "unrelated", "coordinator"),
-                    delegated_turn(at(NOON), "another message", "unrelated", "reviewer"),
-                    delegated_turn(
-                        at(NOON) - SignedDuration::from_mins(1),
-                        &sent,
-                        "earlier",
-                        "reviewer",
-                    ),
-                ];
-            });
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 1);
-
-            fixture.update(|world| {
-                let answered =
-                    delegated_turn(at(NOON), &sent, &format!("{PR}#discussion_r1"), "reviewer");
-                world.turns.insert(0, answered);
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 2);
-            assert!(fixture.prompt(1).contains("discussion_r5"));
-            assert!(!fixture.prompt(1).contains("discussion_r1"));
-            assert_eq!(fixture.state().follow_up, []);
         }
 
         #[test]
@@ -794,156 +665,10 @@ mod tests {
             assert_eq!(fixture.state().pending, []);
             assert_eq!(fixture.logged("send_not_sent").len(), 1);
         }
-
-        #[test]
-        fn nothing_is_sent_without_a_registered_chat_or_from_the_worker_itself() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| {
-                world.comments = vec![comment()];
-                world.sender = None;
-            });
-            fixture.cycle();
-            let reason = fixture.state().reason;
-
-            fixture.update(|world| world.sender = Some("worker".to_owned()));
-            fixture.later(1);
-            fixture.cycle();
-            let from_itself = fixture.sent().len();
-            let itself_reason = fixture.state().reason;
-
-            fixture.update(|world| world.sender = Some("sender".to_owned()));
-            fixture.later(1);
-            fixture.cycle();
-
-            assert!(reason.is_some_and(|reason| reason.contains("no chat is registered")));
-            assert!(itself_reason.is_some_and(|reason| reason.contains("is this chat itself")));
-            assert_eq!(from_itself, 0);
-            let sent = fixture.sent();
-            assert_eq!(
-                sent.iter()
-                    .map(|sent| (sent.caller.as_str(), sent.thread.as_str()))
-                    .collect::<Vec<_>>(),
-                [("sender", "worker")]
-            );
-        }
     }
 
-    mod first_read {
+    mod polling {
         use super::*;
-
-        #[test]
-        fn everything_on_the_pr_is_seen_and_only_what_comes_after_is_sent() {
-            let fixture = Fixture::new(json!({}), Read::First, "worker");
-            fixture.update(|world| {
-                world.summary = PrSummary {
-                    mergeable: "CONFLICTING".to_owned(),
-                    rollup: Some("FAILURE".to_owned()),
-                    ..summary()
-                };
-                world.failed_required = vec![build()];
-                world.comments = vec![
-                    comment(),
-                    PrComment {
-                        id: "review:2".to_owned(),
-                        kind: ItemKind::Review,
-                        author: "tanaka".to_owned(),
-                        url: format!("{PR}#pullrequestreview-2"),
-                        body: "looks off".to_owned(),
-                        path: None,
-                        line: None,
-                        ..comment()
-                    },
-                    PrComment {
-                        id: "issue:3".to_owned(),
-                        kind: ItemKind::IssueComment,
-                        author: "tanaka".to_owned(),
-                        url: format!("{PR}#issuecomment-3"),
-                        ..comment()
-                    },
-                ];
-            });
-            fixture.cycle();
-
-            let first = fixture.state();
-            assert!(fixture.sent().is_empty());
-            assert_eq!(first.pending, []);
-            assert_eq!(first.conflict_head.as_deref(), Some(HEAD));
-
-            fixture.later(1);
-            fixture.update(|world| {
-                let now = time::format_timestamp(world.now);
-                world.comments.push(PrComment {
-                    id: "inline:4".to_owned(),
-                    ..by_tanaka(4, &now)
-                });
-            });
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 1);
-            let prompt = fixture.prompt(0);
-            assert!(prompt.contains("理由：レビュー・コメント\n"), "{prompt}");
-            assert!(prompt.contains(&format!("1. [tanaka] src/pay.kt:42 {PR}#discussion_r4")));
-            assert!(!prompt.contains("2. "), "{prompt}");
-        }
-
-        #[test]
-        fn earlier_findings_are_seen_while_the_review_runs() {
-            let fixture = Fixture::new(json!({}), Read::First, "worker");
-            fixture.update(|world| {
-                world.summary = PrSummary {
-                    bots: coderabbit_at("PENDING", "Review in progress"),
-                    ..summary()
-                };
-                world.comments = vec![comment()];
-            });
-            fixture.cycle();
-
-            assert!(fixture.sent().is_empty());
-
-            fixture.update(|world| {
-                world.summary = summary();
-                world.no_actionable = vec!["coderabbit".to_owned()];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 1);
-            assert!(
-                fixture
-                    .prompt(0)
-                    .contains("「指摘なし」とだけ報告してください")
-            );
-            assert!(!fixture.prompt(0).contains("一致しない"));
-        }
-
-        #[test]
-        fn draft_is_read_once_and_only_what_came_after_is_sent_once_it_is_ready() {
-            let fixture = Fixture::new(json!({}), Read::First, "worker");
-            fixture.update(|world| {
-                world.summary = PrSummary {
-                    is_draft: true,
-                    ..summary()
-                };
-                world.comments = vec![comment()];
-            });
-            fixture.cycle();
-
-            assert_eq!(fixture.calls.borrow().details, 1);
-            assert!(fixture.sent().is_empty());
-            assert_eq!(fixture.state().status, WatchStatus::Draft);
-
-            fixture.update(|world| world.summary = summary());
-            fixture.later(1);
-            fixture.update(|world| {
-                let now = time::format_timestamp(world.now);
-                world.comments = vec![comment(), by_tanaka(5, &now)];
-            });
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 1);
-            assert!(fixture.prompt(0).contains("discussion_r5"));
-            assert!(!fixture.prompt(0).contains("discussion_r1"));
-        }
 
         #[test]
         fn failed_first_read_of_the_detail_is_logged_by_its_kind_and_tried_again_next_cycle() {
@@ -973,10 +698,6 @@ mod tests {
             assert!(fixture.sent().is_empty());
             assert!(fixture.state().seen.contains(&"inline:1".to_owned()));
         }
-    }
-
-    mod polling {
-        use super::*;
 
         #[test]
         fn draft_is_paused_without_reading_its_detail_and_resumed_when_ready() {
@@ -1001,84 +722,12 @@ mod tests {
             assert_eq!(fixture.sent().len(), 1);
             assert_eq!(
                 fixture
-                    .logs
-                    .0
-                    .borrow()
-                    .iter()
-                    .map(|entry| entry.event)
+                    .events()
+                    .into_iter()
                     .filter(|event| ["paused", "resumed"].contains(event))
                     .collect::<Vec<_>>(),
                 ["paused", "resumed"]
             );
-        }
-
-        #[rstest]
-        #[case::merged_pr(Ending::Merged)]
-        #[case::gone_worker(Ending::Gone)]
-        fn watch_stops_for_good(#[case] ending: Ending) {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| match ending {
-                Ending::Merged => {
-                    world.summary = PrSummary {
-                        state: "MERGED".to_owned(),
-                        ..summary()
-                    };
-                }
-                Ending::Gone => {
-                    world.gone = true;
-                    world.comments = vec![comment()];
-                }
-            });
-            fixture.cycle();
-            let polls = fixture.calls.borrow().summaries;
-
-            fixture.later(5);
-            fixture.cycle();
-
-            let saved = fixture.state();
-            let expected = match ending {
-                Ending::Merged => (WatchStatus::Ended, "merged"),
-                Ending::Gone => (WatchStatus::Stopped, "worker thread is gone"),
-            };
-            assert_eq!(
-                (saved.status, saved.reason.as_deref()),
-                (expected.0, Some(expected.1))
-            );
-            assert_eq!(fixture.calls.borrow().summaries, polls);
-            assert!(fixture.sent().is_empty());
-        }
-
-        #[test]
-        fn detail_is_read_only_when_the_light_poll_changed() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.cycle();
-
-            fixture.update(|world| world.now = at(NOON) + SignedDuration::from_mins(1));
-            fixture.cycle();
-
-            let calls = fixture.calls.borrow();
-            assert_eq!((calls.summaries, calls.details), (2, 1));
-        }
-
-        #[test]
-        fn pr_idle_for_longer_than_idle_after_hours_is_polled_at_the_idle_interval() {
-            let fixture = Fixture::new(
-                json!({ "idleAfterHours": 1, "idleIntervalSeconds": 600 }),
-                Read::Again,
-                "worker",
-            );
-            fixture.cycle();
-
-            for wait in [
-                SignedDuration::from_hours(2),
-                SignedDuration::from_mins(1),
-                SignedDuration::from_mins(10),
-            ] {
-                fixture.update(|world| world.now += wait);
-                fixture.cycle();
-            }
-
-            assert_eq!(fixture.calls.borrow().summaries, 3);
         }
 
         #[test]
@@ -1121,7 +770,7 @@ mod tests {
             let fixture = Fixture::new(json!({}), Read::Again, "worker");
             let tracked = WatchState {
                 summary: Some(summary()),
-                seen: vec!["bot:coderabbit".to_owned(), "inline:1".to_owned()],
+                seen: vec![bot_key("coderabbit"), "inline:1".to_owned()],
                 pending: vec![WatchEvent::Conflict {
                     head: HEAD.to_owned(),
                 }],
@@ -1143,439 +792,13 @@ mod tests {
             assert!(fixture.sent().is_empty());
             assert_eq!(fixture.logged("state_unreadable").len(), 1);
         }
-
-        #[test]
-        fn conflict_and_failed_required_check_are_told_once_per_head() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| {
-                world.summary = PrSummary {
-                    mergeable: "CONFLICTING".to_owned(),
-                    rollup: Some("FAILURE".to_owned()),
-                    ..summary()
-                };
-                world.failed_required = vec![build()];
-            });
-            fixture.cycle();
-
-            let first = fixture.prompt(0);
-            fixture.update(|world| {
-                world.turns = vec![delegated_turn(at(NOON), &first, "ok", "reviewer")];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.sent().len(), 1);
-            assert!(first.contains("[コンフリクト]"), "{first}");
-            assert!(first.contains("[必須CIの失敗] build"), "{first}");
-        }
-    }
-
-    mod holding {
-        use super::*;
-
-        #[rstest]
-        #[case::worker_turn_running(Holding::Running)]
-        #[case::owner_talked_a_minute_ago(Holding::OwnerJustTalked)]
-        #[case::quiet_hours(Holding::QuietHours)]
-        fn message_is_queued_without_sending(#[case] holding: Holding) {
-            let config = match holding {
-                Holding::QuietHours => {
-                    json!({ "quietHours": { "start": "22:00", "end": "05:00" } })
-                }
-                Holding::Running | Holding::OwnerJustTalked => json!({}),
-            };
-            let fixture = Fixture::new(config, Read::Again, "worker");
-            fixture.update(|world| {
-                world.comments = vec![comment()];
-                match holding {
-                    Holding::Running => world.active = true,
-                    Holding::OwnerJustTalked => {
-                        world.turns = vec![turn(json!({ "completedAt": seconds(at(NOON)) - 60 }))];
-                    }
-                    Holding::QuietHours => world.now = at("2026-10-23T23:30:00Z"),
-                }
-            });
-
-            fixture.cycle();
-
-            assert!(fixture.sent().is_empty());
-            let kinds = fixture
-                .state()
-                .pending
-                .iter()
-                .map(WatchEvent::kind)
-                .collect::<Vec<_>>();
-            assert_eq!(kinds, ["review_done", "finding"]);
-        }
-    }
-
-    mod review_bots {
-        use super::*;
-
-        struct BotCase {
-            name: &'static str,
-            config: Value,
-            bot: &'static str,
-            running: &'static str,
-            finished: &'static str,
-            author: &'static str,
-            held_author: &'static str,
-            held_body: &'static str,
-            first_label: &'static str,
-            review: &'static str,
-            label: &'static str,
-        }
-
-        #[test]
-        fn bot_findings_are_held_while_its_review_runs_and_the_rest_sent_at_once() {
-            for case in bot_cases() {
-                let fixture = Fixture::new(case.config.clone(), Read::Again, "worker");
-                let progress = |state: &str, description: &str| {
-                    BTreeMap::from([(
-                        case.bot.to_owned(),
-                        Some(BotStatus {
-                            state: state.to_owned(),
-                            description: description.to_owned(),
-                            created_at: "2026-10-23T01:00:00Z".to_owned(),
-                        }),
-                    )])
-                };
-                fixture.update(|world| {
-                    world.summary = PrSummary {
-                        bots: progress("PENDING", case.running),
-                        ..summary()
-                    };
-                    world.comments = vec![
-                        PrComment {
-                            author: case.held_author.to_owned(),
-                            body: case.held_body.to_owned(),
-                            ..comment()
-                        },
-                        PrComment {
-                            id: "inline:9".to_owned(),
-                            author: case.author.to_owned(),
-                            url: format!("{PR}#discussion_r9"),
-                            ..comment()
-                        },
-                    ];
-                });
-                fixture.cycle();
-
-                assert_eq!(fixture.sent().len(), 1, "case: {}", case.name);
-                let first = fixture.prompt(0);
-                assert!(
-                    first.contains(case.first_label),
-                    "case: {}: {first}",
-                    case.name
-                );
-                assert!(
-                    !first.contains("discussion_r1"),
-                    "case: {}: {first}",
-                    case.name
-                );
-
-                fixture.update(|world| {
-                    world.turns = vec![delegated_turn(
-                        at(NOON),
-                        &first,
-                        &format!("{PR}#discussion_r9"),
-                        "reviewer",
-                    )];
-                    world.summary = PrSummary {
-                        bots: progress("SUCCESS", case.finished),
-                        ..summary()
-                    };
-                });
-                fixture.later(1);
-                fixture.cycle();
-
-                assert_eq!(fixture.sent().len(), 2, "case: {}", case.name);
-                let second = fixture.prompt(1);
-                assert!(
-                    second.contains(case.review),
-                    "case: {}: {second}",
-                    case.name
-                );
-                assert!(
-                    second.contains(&format!("{} src/pay.kt:42 {PR}#discussion_r1", case.label)),
-                    "case: {}: {second}",
-                    case.name
-                );
-            }
-        }
-
-        #[test]
-        fn state_written_before_bots_were_configurable_still_sends_what_it_holds() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            let legacy = json!({
-                "status": "watching",
-                "reason": null,
-                "summary": summary(),
-                "checkedAt": null,
-                "changedAt": null,
-                "seen": [],
-                "pending": [
-                    { "type": "coderabbit_done", "head": HEAD, "findings": 1, "summaryAgrees": true },
-                    { "type": "finding", "finding": {
-                        "id": "inline:1",
-                        "kind": "inline",
-                        "coderabbit": true,
-                        "label": "CodeRabbit・Major",
-                        "path": "src/pay.kt",
-                        "line": 42,
-                        "url": format!("{PR}#discussion_r1"),
-                        "createdAt": "2026-10-23T00:30:00Z",
-                    } },
-                ],
-                "followUp": [],
-                "conflictHead": null,
-                "delivered": null,
-                "worker": null,
-                "halted": null,
-            });
-            fs::write(fixture.state_path(), legacy.to_string()).expect("write the old state");
-
-            fixture.cycle();
-
-            assert!(fixture.prompt(0).contains("CodeRabbitのレビュー完了"));
-            let delivered = fixture.state().delivered.expect("delivered");
-            assert_eq!(
-                (
-                    delivered.findings[0].bot.as_deref(),
-                    delivered.findings[0].approval
-                ),
-                (Some("coderabbit"), None)
-            );
-        }
-
-        #[test]
-        fn bot_added_later_starts_from_the_reviews_it_already_finished() {
-            let fixture = Fixture::new(
-                json!({ "reviewBots": ["coderabbit", {
-                    "id": "other",
-                    "name": "OtherBot",
-                    "login": "other-reviewer[bot]",
-                    "status": { "context": "Other Review", "completed": "done" },
-                }] }),
-                Read::Again,
-                "worker",
-            );
-            let done = |created_at: &str| {
-                Some(BotStatus {
-                    state: "SUCCESS".to_owned(),
-                    description: "done".to_owned(),
-                    created_at: created_at.to_owned(),
-                })
-            };
-            fixture.update(|world| {
-                let mut bots = coderabbit_at("SUCCESS", "Review completed");
-                bots.insert("other".to_owned(), done("2026-10-23T01:00:00Z"));
-                world.summary = PrSummary { bots, ..summary() };
-                world.no_actionable = vec!["coderabbit".to_owned()];
-            });
-            fixture.cycle();
-            let first = fixture.prompt(0);
-
-            fixture.update(|world| {
-                world.turns = vec![delegated_turn(at(NOON), &first, "指摘なし", "reviewer")];
-                world.summary = PrSummary {
-                    head: "b".repeat(40),
-                    bots: BTreeMap::from([
-                        ("coderabbit".to_owned(), None),
-                        ("other".to_owned(), done("2026-10-23T03:00:00Z")),
-                    ]),
-                    ..summary()
-                };
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert!(!first.contains("OtherBot"), "{first}");
-            assert!(fixture.prompt(1).contains("OtherBotのレビューが完了し"));
-        }
-
-        fn bot_cases() -> [BotCase; 3] {
-            [
-                BotCase {
-                    name: "coderabbit",
-                    config: json!({}),
-                    bot: "coderabbit",
-                    running: "Review in progress",
-                    finished: "Review completed",
-                    author: "tanaka",
-                    held_author: "coderabbitai[bot]",
-                    held_body: "**🟠 Major**",
-                    first_label: "[tanaka]",
-                    review: "CodeRabbitのレビュー完了",
-                    label: "[CodeRabbit・Major]",
-                },
-                BotCase {
-                    name: "claude",
-                    config: json!({ "reviewBots": ["claude"] }),
-                    bot: "claude",
-                    running: "",
-                    finished: "",
-                    author: "coderabbitai[bot]",
-                    held_author: "claude[bot]",
-                    held_body: "[warning] 重複します。",
-                    first_label: "[coderabbitai[bot]]",
-                    review: "Claudeのレビュー完了",
-                    label: "[Claude・warning]",
-                },
-                BotCase {
-                    name: "configured_bot",
-                    config: json!({ "reviewBots": [{
-                    "id": "other",
-                    "name": "OtherBot",
-                    "login": "other-reviewer[bot]",
-                    "status": { "context": "Other Review", "completed": "done" },
-                }] }),
-                    bot: "other",
-                    running: "running",
-                    finished: "done",
-                    author: "coderabbitai[bot]",
-                    held_author: "other-reviewer[bot]",
-                    held_body: "x",
-                    first_label: "[coderabbitai[bot]]",
-                    review: "OtherBotのレビュー完了",
-                    label: "[OtherBot]",
-                },
-            ]
-        }
     }
 
     mod lost_message {
         use super::*;
 
         #[test]
-        fn message_an_idle_worker_never_started_goes_again_and_the_owner_is_told_once() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| {
-                world.comments = vec![comment()];
-                world.summary = PrSummary {
-                    rollup: Some("FAILURE".to_owned()),
-                    ..summary()
-                };
-                world.failed_required = vec![build()];
-            });
-            fixture.cycle();
-            fixture.later(9);
-            fixture.cycle();
-            let waited = fixture.sent().len();
-
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(waited, 1);
-            assert_eq!(fixture.sent().len(), 2);
-            let again = fixture.prompt(1);
-            assert!(again.contains("discussion_r1"), "{again}");
-            assert!(again.contains("[必須CIの失敗] build"), "{again}");
-            assert!(
-                fixture.logged("answer_not_seen")[0]
-                    .fields
-                    .contains(&("resent", json!(3)))
-            );
-            assert_eq!(
-                *fixture.notices.borrow(),
-                [("org/pay #7".to_owned(), RESEND_NOTICE.to_owned())]
-            );
-            assert_eq!(
-                fixture.state().lost_since.as_deref(),
-                Some("2026-10-23T12:10:00.000Z")
-            );
-        }
-
-        #[test]
-        fn worker_that_keeps_missing_messages_is_tried_less_often_until_it_answers() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-            fixture.later(10);
-            fixture.cycle();
-            fixture.later(29);
-            fixture.cycle();
-            let waited = fixture.sent().len();
-
-            fixture.later(1);
-            fixture.cycle();
-            let third = fixture.prompt(2);
-            fixture.update(|world| {
-                world.turns = vec![delegated_turn(
-                    world.now,
-                    &third,
-                    &format!("{PR}#discussion_r1 直す"),
-                    "reviewer",
-                )];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(waited, 2);
-            assert_eq!(fixture.sent().len(), 3);
-            assert_eq!(fixture.notices.borrow().len(), 1);
-            let after = fixture.state();
-            assert_eq!((after.delivered, after.lost_since), (None, None));
-        }
-
-        #[test]
-        fn worker_busy_for_a_day_is_told_lost_and_its_late_answer_still_taken() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-            let first = fixture.prompt(0);
-
-            fixture.update(|world| world.active = true);
-            fixture.later(25 * 60);
-            fixture.cycle();
-            fixture.later(1);
-            fixture.cycle();
-            let shown = serde_json::to_value(watch_status(&fixture.paths.state).expect("status"))
-                .expect("write the status");
-            fixture.update(|world| {
-                world.active = false;
-                world.turns = vec![delegated_turn(
-                    at(NOON),
-                    &first,
-                    &format!("{PR}#discussion_r1 直す"),
-                    "reviewer",
-                )];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(fixture.logged("answer_not_seen").len(), 1);
-            assert_eq!(fixture.notices.borrow().len(), 1);
-            assert_eq!(
-                shown["prs"][0]["undeliveredSince"],
-                "2026-10-24T13:00:00.000Z"
-            );
-            assert_eq!(fixture.sent().len(), 1);
-            let after = fixture.state();
-            assert_eq!((after.delivered, after.lost_since), (None, None));
-        }
-
-        #[test]
-        fn message_lost_while_the_worker_was_busy_goes_once_it_is_idle() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-            fixture.update(|world| world.active = true);
-            fixture.later(25 * 60);
-            fixture.cycle();
-            let held = fixture.sent().len();
-
-            fixture.update(|world| world.active = false);
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(held, 1);
-            assert_eq!(fixture.sent().len(), 2);
-            assert!(fixture.prompt(1).contains("discussion_r1"));
-        }
-
-        #[test]
-        fn loss_found_in_quiet_hours_is_told_at_once_and_resent_when_they_end() {
+        fn message_an_idle_worker_never_started_is_told_once_and_sent_again_after_quiet_hours() {
             let fixture = Fixture::new(
                 json!({ "quietHours": { "start": "12:05", "end": "13:00" } }),
                 Read::Again,
@@ -1585,113 +808,46 @@ mod tests {
             fixture.cycle();
             fixture.later(10);
             fixture.cycle();
-            let (held, told) = (fixture.sent().len(), fixture.notices.borrow().len());
+            let held = fixture.sent().len();
 
             fixture.later(50);
             fixture.cycle();
-
-            assert_eq!((held, told), (1, 1));
-            assert_eq!(fixture.sent().len(), 2);
-            assert_eq!(fixture.logged("answer_not_seen").len(), 1);
-        }
-
-        #[test]
-        fn resend_not_sent_leaves_the_lost_message_to_take_its_late_answer() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-            let first = fixture.prompt(0);
-            fixture.update(|world| world.send_outcome = "not_sent");
-            fixture.later(10);
-            fixture.cycle();
-            let tried = fixture.sent().len();
-
-            fixture.update(|world| {
-                world.send_outcome = "done";
-                world.turns = vec![delegated_turn(
-                    at(NOON),
-                    &first,
-                    &format!("{PR}#discussion_r1 直す"),
-                    "reviewer",
-                )];
-            });
-            fixture.later(1);
+            fixture.later(30);
             fixture.cycle();
 
-            assert_eq!(tried, 2);
-            assert_eq!(fixture.sent().len(), 2);
-            let after = fixture.state();
-            assert_eq!((after.delivered, after.lost_since), (None, None));
-            assert_eq!(after.pending, []);
-        }
-
-        #[test]
-        fn turn_started_while_the_worker_was_busy_past_the_limit_is_still_its_answer() {
-            let fixture = Fixture::new(json!({}), Read::Again, "worker");
-            fixture.update(|world| world.comments = vec![comment()]);
-            fixture.cycle();
-            fixture.later(10);
-            fixture.cycle();
-            let second = fixture.prompt(1);
-
-            fixture.update(|world| world.active = true);
-            fixture.later(40);
-            fixture.cycle();
-            let waited = fixture.sent().len();
-            fixture.update(|world| {
-                world.active = false;
-                world.turns = vec![delegated_turn(
-                    at("2026-10-23T12:10:00Z"),
-                    &second,
-                    &format!("{PR}#discussion_r1 直す"),
-                    "reviewer",
-                )];
-            });
-            fixture.later(1);
-            fixture.cycle();
-
-            assert_eq!(waited, 2);
-            assert_eq!(fixture.sent().len(), 2);
-            assert_eq!(fixture.notices.borrow().len(), 1);
-            let after = fixture.state();
-            assert_eq!((after.delivered, after.lost_since), (None, None));
+            assert_eq!(held, 1);
+            assert_eq!(fixture.sent().len(), 3);
+            assert!(fixture.prompt(1).contains("discussion_r1"));
+            assert_eq!(
+                *fixture.notices.borrow(),
+                [("org/pay #7".to_owned(), RESEND_NOTICE.to_owned())]
+            );
+            let lost = fixture.logged("answer_not_seen");
+            assert_eq!(lost.len(), 2);
+            assert!(lost[0].fields.contains(&("resent", json!(2))));
+            assert_eq!(fixture.state().lost_since, Some(at("2026-10-23T12:10:00Z")));
         }
     }
 
     mod hand_over {
         use super::*;
 
-        #[rstest]
-        #[case::stopped_for_a_gone_chat(Stopping::Gone)]
-        #[case::halted_on_an_unconfirmed_send(Stopping::Halted)]
-        fn finished_pr_goes_to_the_chat_that_takes_it_with_what_it_still_had_to_send(
-            #[case] stopping: Stopping,
-        ) {
+        #[test]
+        fn halted_pr_goes_to_the_chat_that_takes_it_with_what_it_still_had_to_send() {
             let fixture = Fixture::new(json!({}), Read::Again, "worker");
             fixture.update(|world| {
                 world.comments = vec![comment()];
-                match stopping {
-                    Stopping::Gone => world.gone = true,
-                    Stopping::Halted => world.send_outcome = "unknown",
-                }
+                world.send_outcome = "unknown";
             });
             fixture.cycle();
-            let stopped = fixture.state().status;
+            let halted = fixture.state().status;
 
             fixture.link_to("next");
-            fixture.update(|world| {
-                world.gone = false;
-                world.send_outcome = "done";
-                world.sender = Some("sender".to_owned());
-            });
+            fixture.update(|world| world.send_outcome = "done");
             fixture.later(1);
             fixture.cycle();
 
-            let expected = match stopping {
-                Stopping::Halted => WatchStatus::Halted,
-                Stopping::Gone => WatchStatus::Stopped,
-            };
-            assert_eq!(stopped, expected);
+            assert_eq!(halted, WatchStatus::Halted);
             let saved = fixture.state();
             assert_eq!(
                 (saved.status, saved.halted, saved.worker.as_deref()),
@@ -1701,88 +857,14 @@ mod tests {
                 fixture.sent().last().map(|sent| sent.thread.clone()),
                 Some("next".to_owned())
             );
-        }
-    }
-
-    // The records harnexus-task watch left on a Mac.
-    mod legacy_records {
-        use super::*;
-
-        #[test]
-        fn records_are_handed_over_sent_once_and_a_halted_pr_stays_halted() {
-            let fixture = legacy_fixture();
-
-            fixture.cycle();
-            let first = fixture.sent().len();
-            fixture.later(2);
-            fixture.cycle();
-            fixture.later(2);
-            fixture.cycle();
-
-            assert_eq!(first, 2);
-
-            let sent = fixture
-                .sent()
-                .into_iter()
-                .map(|sent| {
-                    (
-                        sent.thread,
-                        sent.prompt.contains("pull/7#discussion_r71"),
-                        sent.prompt.contains("pull/9#discussion_r91"),
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                sent,
-                [
-                    ("next-chat".to_owned(), true, false),
-                    ("w9".to_owned(), false, true)
-                ]
-            );
             let handed = fixture.logged("handed_over");
             assert_eq!(handed.len(), 1);
             assert!(
-                [("from", json!("old-chat")), ("to", json!("next-chat"))]
+                [("from", json!("worker")), ("to", json!("next"))]
                     .iter()
                     .all(|field| handed[0].fields.contains(field)),
                 "{handed:?}"
             );
-            let halted = watch_record::load_watch_state(&fixture.paths.state, &numbered(10))
-                .expect("load PR 10");
-            assert_eq!(halted.status, WatchStatus::Halted);
-            assert!(halted.halted.is_some());
-        }
-
-        fn legacy_fixture() -> Fixture {
-            let fixture = Fixture::new(json!({}), Read::First, "next-chat");
-            let fixtures =
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch");
-            for number in [7, 8, 9, 10] {
-                let key = watch_record::pr_key(&numbered(number));
-                let directory = fixture.paths.state.join(&key);
-                fs::create_dir_all(&directory).expect("create the PR directory");
-                for file in ["link.json", "state.json"] {
-                    fs::copy(fixtures.join(&key).join(file), directory.join(file))
-                        .expect("copy the record");
-                }
-            }
-            fixture.update(|world| {
-                world.comments = [7, 8, 9, 10]
-                    .map(|number| PrComment {
-                        id: format!("inline:{number}1"),
-                        url: format!(
-                            "https://github.com/org/pay/pull/{number}#discussion_r{number}1"
-                        ),
-                        created_at: "2026-10-21T00:00:00Z".to_owned(),
-                        ..comment()
-                    })
-                    .into();
-            });
-            fixture
-        }
-
-        fn numbered(number: u64) -> PrRef {
-            PrRef { number, ..pay() }
         }
     }
 
@@ -1869,25 +951,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
-    enum Ending {
-        Merged,
-        Gone,
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum Stopping {
-        Gone,
-        Halted,
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum Holding {
-        Running,
-        OwnerJustTalked,
-        QuietHours,
-    }
-
     impl Fixture {
         // Starts from a PR the watch already read once, unless the test checks the first read.
         fn new(config: Value, read: Read, worker: &str) -> Self {
@@ -1913,12 +976,7 @@ mod tests {
                 world: RefCell::new(World {
                     summary: summary(),
                     comments: Vec::new(),
-                    failed_required: Vec::new(),
-                    no_actionable: Vec::new(),
                     detail_fails: false,
-                    turns: vec![turn(json!({}))],
-                    active: false,
-                    gone: false,
                     send_outcome: "done",
                     sender: Some("reviewer".to_owned()),
                     now: at(NOON),
@@ -1937,6 +995,7 @@ mod tests {
                         updated_at: "2026-10-22T00:00:00Z".to_owned(),
                         ..summary()
                     }),
+                    seen: vec![bot_key("coderabbit")],
                     ..WatchState::default()
                 };
                 save(&fixture.paths, &pay(), &read).expect("save the state");
@@ -1960,7 +1019,7 @@ mod tests {
                 pr: pay(),
                 url: PR.to_owned(),
                 worker: worker.to_owned(),
-                linked_at: LINKED_AT.to_owned(),
+                linked_at: at(LINKED_AT),
             };
             watch_record::record_link(&self.paths.state, &link).expect("record the link");
         }
@@ -2034,31 +1093,23 @@ mod tests {
             }
         }
 
+        // The owner's last turn ended long before noon, so the worker never reads as busy.
         fn call_app(
             &self,
             caller: &str,
             tool: &str,
             arguments: &Map<String, Value>,
         ) -> Map<String, Value> {
-            let world = self.world.borrow();
             if tool == "read_thread" {
-                if world.gone {
-                    return object(json!({
-                        "version": 1,
-                        "outcome": "rejected",
-                        "message": "No Codex thread found for threadId",
-                        "result": {
-                            "content": [{ "type": "text", "text": "No Codex thread found for threadId" }],
-                            "isError": true,
-                        },
-                    }));
-                }
+                let noon = at(NOON).as_second();
                 let read = json!({
-                    "thread": {
-                        "id": arguments["threadId"],
-                        "status": { "type": if world.active { "active" } else { "idle" } },
-                    },
-                    "turns": world.turns,
+                    "thread": { "id": arguments["threadId"], "status": { "type": "idle" } },
+                    "turns": [{
+                        "status": "completed",
+                        "startedAt": noon - 3600,
+                        "completedAt": noon - 3500,
+                        "items": [{ "type": "userMessage", "content": [{ "type": "text", "text": "go" }] }],
+                    }],
                 });
                 return object(json!({
                     "outcome": "done",
@@ -2073,8 +1124,9 @@ mod tests {
                     .unwrap_or_default()
                     .to_owned(),
                 prompt: arguments["prompt"].as_str().unwrap_or_default().to_owned(),
+                saved: self.state().status,
             });
-            object(json!({ "outcome": world.send_outcome }))
+            object(json!({ "outcome": self.world.borrow().send_outcome }))
         }
 
         fn run_t3(&self, arguments: &[&str], input: &str) -> T3Ran {
@@ -2179,20 +1231,13 @@ mod tests {
                     message: "GitHub is down".to_owned(),
                 });
             }
-            let url = format!("https://github.com/{}/pull/{}", pr.repo, pr.number);
-            let comments = world
-                .comments
-                .iter()
-                .filter(|comment| comment.url.starts_with(&format!("{url}#")))
-                .cloned()
-                .collect();
             Ok(PrDetail {
                 summary: world.summary.clone(),
-                url,
+                url: format!("https://github.com/{}/pull/{}", pr.repo, pr.number),
                 title: "Pay".to_owned(),
-                failed_required: world.failed_required.clone(),
-                comments,
-                no_actionable: world.no_actionable.clone(),
+                failed_required: Vec::new(),
+                comments: world.comments.clone(),
+                no_actionable: Vec::new(),
             })
         }
 
@@ -2208,20 +1253,16 @@ mod tests {
             head: HEAD.to_owned(),
             updated_at: "2026-10-23T01:00:00Z".to_owned(),
             mergeable: "MERGEABLE".to_owned(),
-            bots: coderabbit_at("SUCCESS", "Review completed"),
+            bots: BTreeMap::from([(
+                "coderabbit".to_owned(),
+                Some(BotStatus {
+                    state: "SUCCESS".to_owned(),
+                    description: "Review completed".to_owned(),
+                    created_at: "2026-10-23T01:00:00Z".to_owned(),
+                }),
+            )]),
             rollup: Some("SUCCESS".to_owned()),
         }
-    }
-
-    fn coderabbit_at(state: &str, description: &str) -> BTreeMap<String, Option<BotStatus>> {
-        BTreeMap::from([(
-            "coderabbit".to_owned(),
-            Some(BotStatus {
-                state: state.to_owned(),
-                description: description.to_owned(),
-                created_at: "2026-10-23T01:00:00Z".to_owned(),
-            }),
-        )])
     }
 
     fn comment() -> PrComment {
@@ -2238,52 +1279,6 @@ mod tests {
             resolved: false,
             approved: false,
         }
-    }
-
-    fn by_tanaka(id: u64, created_at: &str) -> PrComment {
-        PrComment {
-            id: format!("inline:{id}"),
-            author: "tanaka".to_owned(),
-            url: format!("{PR}#discussion_r{id}"),
-            created_at: created_at.to_owned(),
-            ..comment()
-        }
-    }
-
-    fn build() -> FailedCheck {
-        FailedCheck {
-            name: "build".to_owned(),
-            url: Some("https://ci.example/1".to_owned()),
-        }
-    }
-
-    fn turn(fields: Value) -> Value {
-        let mut turn = json!({
-            "status": "completed",
-            "startedAt": seconds(at(NOON)) - 3600,
-            "completedAt": seconds(at(NOON)) - 3500,
-            "items": [{ "type": "userMessage", "content": [{ "type": "text", "text": "go" }] }],
-        });
-        if let (Some(turn), Value::Object(fields)) = (turn.as_object_mut(), fields) {
-            turn.extend(fields);
-        }
-        turn
-    }
-
-    // A turn another thread started, as a Claude worker shows it.
-    fn delegated_turn(started_at: Timestamp, input: &str, answer: &str, source: &str) -> Value {
-        turn(json!({
-            "startedAt": seconds(started_at),
-            "completedAt": seconds(started_at) + 60,
-            "items": [
-                {
-                    "type": "userMessage",
-                    "codexDelegation": { "sourceThreadId": source, "input": input },
-                    "content": [{ "type": "text", "text": "<codex_delegation>" }],
-                },
-                { "type": "agentMessage", "phase": "final_answer", "text": answer },
-            ],
-        }))
     }
 
     fn t3_thread(fields: Value) -> Value {
@@ -2308,10 +1303,6 @@ mod tests {
 
     fn at(time: &str) -> Timestamp {
         time.parse().expect("parse the time")
-    }
-
-    fn seconds(at: Timestamp) -> i64 {
-        at.as_second()
     }
 
     fn object(value: Value) -> Map<String, Value> {

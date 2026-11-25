@@ -98,9 +98,6 @@ pr-wakeのworktreeは自動で消えないため、不要になったら`git wor
 
 `pr-wake review smoke --pr owner/repo#123`で通知からレビューを始めるまでを試せる。
 
-以前の`config.example.json`から作った設定は、プロンプトの`{{.Worktree}}`を読み込めず、レビューの常駐が止まる。
-更新前に、`{{.Worktree}}`を含む文をプロンプトから消す。
-
 ### 再レビュー
 
 pr-wakeが作ったスレッドは、作った時点でPRへ紐づける。

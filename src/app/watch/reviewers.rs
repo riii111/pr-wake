@@ -29,20 +29,20 @@ pub(crate) enum BotProgress {
 #[derive(Debug, Clone)]
 pub(crate) struct Severity(Regex);
 
-pub(crate) const PRESET_NAMES: [&str; 2] = ["coderabbit", "claude"];
+type Preset = (&'static str, fn() -> ReviewBot);
 
-// JavaScript's `\b` is an ASCII word boundary and Rust's a Unicode one, so the preset asks for the ASCII one.
-// It still reads `**éMajor**` as the TypeScript watch did.
+pub(crate) const PRESETS: [Preset; 2] = [("coderabbit", coderabbit), ("claude", claude)];
+
+// A Unicode `\b` would miss a label right after a non-ASCII letter, as in `**éMajor**`, so the preset asks for the ASCII one.
 const CODERABBIT_SEVERITY: &str = r"\*\*[^*\n]*?(?-u:\b)(Critical|Major|Minor|Trivial|Info)\*\*";
 
 const CLAUDE_SEVERITY: &str = r"^\[(critical|warning|suggestion)\]";
 
 pub(crate) fn preset(name: &str) -> Option<ReviewBot> {
-    match name {
-        "coderabbit" => Some(coderabbit()),
-        "claude" => Some(claude()),
-        _ => None,
-    }
+    PRESETS
+        .iter()
+        .find(|(preset, _)| *preset == name)
+        .map(|(_, bot)| bot())
 }
 
 pub(crate) fn coderabbit() -> ReviewBot {

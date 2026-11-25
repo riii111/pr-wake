@@ -24,7 +24,10 @@ use crate::{
             notice::{Notice, Selection, Size},
             one_line,
             request::request_queries,
-            selection::{self, QueueEntry, SelectionRecord, SelectionReport, is_selection_id},
+            selection::{
+                self, QueueEntry, SelectedOutcome, SelectionRecord, SelectionReport,
+                is_selection_id,
+            },
             state::{Found, ReviewState, Status},
             with_request, with_worktree,
         },
@@ -112,21 +115,10 @@ pub(crate) struct Smoke<'smoke> {
 
 // What a launch got to before it ended, which the state keeps either way.
 struct Launched {
-    pr: Option<PullRequest>,
+    head: Option<String>,
     worktree: Option<PathBuf>,
-    route: Option<Route>,
-    result: Result<(), String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Route {
-    Started(String),
-    // The linked chat the review was for, whether or not the send went through.
-    Linked(String),
-    // A new chat with the prompt in its composer, for the reason no chat could be started.
-    Opened(String),
-    // A newer request of the PR already started its review at this head, so nothing was started or sent.
-    AlreadyReviewed,
+    outcome: SelectedOutcome,
+    review_started: bool,
 }
 
 // Well under the one second within which a wait must notice a stop request.
@@ -274,7 +266,8 @@ pub(crate) fn smoke(
     let send = harnexus_sender(env);
     let create = harnexus_creator(env);
     let tools = load_tools(smoke.config, env, run, &send, &create)?;
-    let pr = github(&tools, stop).pull_request(&repo, number)?;
+    let pull = github(&tools, stop).pull_request(&repo, number)?;
+    let pr = pull.pr;
     out(&format!(
         "pr: {}#{} {} head={}",
         pr.repo, pr.number, pr.title, pr.head_sha
@@ -288,11 +281,9 @@ pub(crate) fn smoke(
         requester: smoke.requester.map(str::to_owned),
         team: None,
     };
-    let size = github(&tools, stop)
-        .pull_request_size(&pr.repo, pr.number)
-        .inspect_err(|error| out(&format!("size: {error}")))
-        .ok();
-    let selection = ask_owner(&tools, &request, size.as_ref(), stop, &mut |line| out(line))?;
+    let selection = ask_owner(&tools, &request, Some(&pull.size), stop, &mut |line| {
+        out(line);
+    })?;
     out(&format!("selection: {}", selection.name()));
     let Selection::Chosen(index) = selection else {
         return Ok(());
@@ -322,21 +313,30 @@ pub(crate) fn smoke(
         }
         return Ok(());
     }
-    let launched = launch(&tools, choice, &request, &|_| false, stop);
+    // Read again after the choice, so the review is pinned to the head at the time the owner chose.
+    let pr = github(&tools, stop).pull_request(&repo, number)?.pr;
+    let launched = launch(&tools, choice, &request, &pr, stop);
     if let Some(worktree) = &launched.worktree {
         out(&format!("worktree: {}", worktree.display()));
     }
-    let route = launched.route;
-    launched.result?;
-    match route {
-        Some(Route::Started(chat)) => out(&format!("started: the review runs in chat {chat}")),
-        Some(Route::Linked(chat)) => {
-            out(&format!("sent: the review went to the linked chat {chat}"));
+    match launched.outcome {
+        SelectedOutcome::Started { thread } => {
+            out(&format!("started: the review runs in chat {thread}"));
         }
-        Some(Route::Opened(reason)) => out(&format!(
-            "opened: send the prompt in the new Codex chat to start the review ({reason})"
+        SelectedOutcome::SentToLinked { thread } => {
+            out(&format!(
+                "sent: the review went to the linked chat {thread}"
+            ));
+        }
+        SelectedOutcome::Opened { reason } => out(&format!(
+            "opened: send the prompt in the new Codex chat to start the review ({})",
+            reason.unwrap_or_default()
         )),
-        Some(Route::AlreadyReviewed) | None => {}
+        SelectedOutcome::Failed { error, .. } => return Err(error),
+        SelectedOutcome::Reported { .. }
+        | SelectedOutcome::NotQueued { .. }
+        | SelectedOutcome::Stopped
+        | SelectedOutcome::Unconfirmed => {}
     }
     Ok(())
 }
@@ -351,7 +351,6 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
     }
     // The config is checked before the running agent stops, so a bad config leaves it running.
     check_from_terminal(config, env)?;
-    agent::remove_legacy(agent::LEGACY_REVIEW, &env.home)?;
     agent::install(agent::REVIEW, &env.home, env.user.as_deref(), &|name| {
         env::var_os(name)
     })
@@ -624,52 +623,43 @@ fn load_tools<'run>(
 }
 
 fn harnexus_sender(env: &ReviewEnv) -> impl Fn(&str, &str, &StopRequest) -> Delivery + Sync {
-    |thread, prompt, stop| {
-        let socket = call_socket_path(
-            env::var_os("HARNEXUS_CALL_SOCKET").as_deref(),
-            env::var_os("HARNEXUS_STATE_PATH").as_deref(),
-            Some(&env.home),
-        );
-        send_to_chat(&env.watch_state, socket, thread, prompt, stop)
+    |thread, prompt, stop| match harnexus_bridge(env, thread, stop) {
+        Ok((bridge, sender)) => send_to_chat(&bridge, &sender, thread, prompt),
+        Err(reason) => Delivery::NotSent(reason),
     }
 }
 
 fn harnexus_creator(env: &ReviewEnv) -> impl Fn(&NewChat<'_>, &StopRequest) -> Created + Sync {
-    |chat, stop| {
-        let socket = call_socket_path(
-            env::var_os("HARNEXUS_CALL_SOCKET").as_deref(),
-            env::var_os("HARNEXUS_STATE_PATH").as_deref(),
-            Some(&env.home),
-        );
-        let registered =
-            watch_record::load_sender(&env.watch_state).map_err(|error| error.to_string());
-        let sender = match worker::sender_for(registered, "") {
-            Ok(sender) => sender,
-            Err(reason) => return Created::NotSent(reason),
-        };
-        let bridge = Bridge::new(socket, CallTimeouts::STANDARD, stop.clone());
-        create_chat(
+    |chat, stop| match harnexus_bridge(env, "", stop) {
+        Ok((bridge, sender)) => create_chat(
             &mut |tool, arguments| bridge.call(&sender, tool, &arguments),
             chat,
-        )
+        ),
+        Err(reason) => Created::NotSent(reason),
     }
 }
 
-fn send_to_chat(
-    watch_state: &Path,
-    socket: Result<PathBuf, String>,
+// The bridge to harnexus and the chat to call it as, which is never `thread` itself.
+fn harnexus_bridge(
+    env: &ReviewEnv,
     thread: &str,
-    prompt: &str,
     stop: &StopRequest,
-) -> Delivery {
-    let registered = watch_record::load_sender(watch_state).map_err(|error| error.to_string());
+) -> Result<(Bridge, String), String> {
+    let registered = watch_record::load_sender(&env.watch_state).map_err(|error| error.to_string());
     // Sent from the chat registered for the watch, as a chat cannot message itself.
-    let sender = match worker::sender_for(registered, thread) {
-        Ok(sender) => sender,
-        Err(reason) => return Delivery::NotSent(reason),
-    };
+    let sender = worker::sender_for(registered, thread)?;
+    let socket = call_socket_path(
+        env::var_os("HARNEXUS_CALL_SOCKET").as_deref(),
+        env::var_os("HARNEXUS_STATE_PATH").as_deref(),
+        Some(&env.home),
+    );
+    Ok((
+        Bridge::new(socket, CallTimeouts::STANDARD, stop.clone()),
+        sender,
+    ))
+}
 
-    let bridge = Bridge::new(socket, CallTimeouts::STANDARD, stop.clone());
+fn send_to_chat(bridge: &Bridge, sender: &str, thread: &str, prompt: &str) -> Delivery {
     let message = RefCell::new(String::new());
     let mut codex = CodexWorkers::new(
         Box::new(|caller, tool, arguments| {
@@ -683,7 +673,7 @@ fn send_to_chat(
         }),
         Box::new(|| Ok(None)),
     );
-    let sent = codex.send(&sender, thread, prompt);
+    let sent = codex.send(sender, thread, prompt);
     let reason = format!("{}: {}", sent.reported, message.borrow());
     match sent.outcome {
         SendOutcome::Done => Delivery::Sent,
@@ -727,65 +717,70 @@ fn ask_owner(
     }
 }
 
-// `reviewed` tells a head already reviewed for the request, which then starts nothing.
 fn launch(
     tools: &Tools<'_>,
     choice: &Choice,
     request: &Found,
-    reviewed: &dyn Fn(&PullRequest) -> bool,
+    pr: &PullRequest,
     stop: &StopRequest,
 ) -> Launched {
-    // Read again, so the review is pinned to the head at the time the owner chose.
-    let pr = match github(tools, stop).pull_request(&request.repo, request.number) {
-        Ok(pr) => pr,
-        Err(error) => {
-            return Launched {
-                pr: None,
-                worktree: None,
-                route: None,
-                result: Err(error),
-            };
-        }
-    };
-    let ended = |route, worktree, result| Launched {
-        pr: Some(pr.clone()),
+    let ended = |worktree, outcome, review_started| Launched {
+        head: Some(pr.head_sha.clone()),
         worktree,
-        route,
-        result,
+        outcome,
+        review_started,
     };
-    if reviewed(&pr) {
-        return ended(Some(Route::AlreadyReviewed), None, Ok(()));
-    }
-    let linked = match linked_chat(tools, &pr) {
+    let failed = |worktree, error| {
+        ended(
+            worktree,
+            SelectedOutcome::Failed {
+                error,
+                thread: None,
+            },
+            false,
+        )
+    };
+    let linked = match linked_chat(tools, pr) {
         Ok(linked) => linked,
-        Err(error) => return ended(None, None, Err(error)),
+        Err(error) => return failed(None, error),
     };
-    let worktree = match prepare(tools, &pr, stop) {
+    let worktree = match prepare(tools, pr, stop) {
         Ok(worktree) => worktree,
-        Err(error) => return ended(None, None, Err(error)),
+        Err(error) => return failed(None, error),
     };
     let prompt = with_request(
         &with_worktree(
-            &choice.render(&pr, request.requester.as_deref()),
+            &choice.render(pr, request.requester.as_deref()),
             &worktree,
-            &pr,
+            pr,
         ),
         &request.key,
     );
 
     // A linked PR stays in its chat, so a failed send is reported rather than split off into a new chat.
     if let Some(chat) = linked {
-        let result = match (tools.send)(&chat.thread, &prompt, stop) {
-            Delivery::Sent => Ok(()),
-            Delivery::NotSent(reason) => {
-                Err(format!("could not send to chat {}: {reason}", chat.thread))
+        let thread = chat.thread;
+        let error = match (tools.send)(&thread, &prompt, stop) {
+            Delivery::Sent => {
+                return ended(
+                    Some(worktree),
+                    SelectedOutcome::SentToLinked { thread },
+                    true,
+                );
             }
-            Delivery::Unknown(reason) => Err(format!(
-                "the send to chat {} could not be confirmed; check that chat before asking it again: {reason}",
-                chat.thread
-            )),
+            Delivery::NotSent(reason) => format!("could not send to chat {thread}: {reason}"),
+            Delivery::Unknown(reason) => format!(
+                "the send to chat {thread} could not be confirmed; check that chat before asking it again: {reason}"
+            ),
         };
-        return ended(Some(Route::Linked(chat.thread)), Some(worktree), result);
+        return ended(
+            Some(worktree),
+            SelectedOutcome::Failed {
+                error,
+                thread: Some(thread),
+            },
+            false,
+        );
     }
 
     let title = format!("Review｜{} PR#{}", one_line(&pr.title), pr.number);
@@ -798,26 +793,39 @@ fn launch(
         stop,
     );
     let unstarted = match created {
+        // A confirmed new chat has begun even if its link fails afterwards, so it keeps an older request from a second chat.
         Created::Started(thread) => {
-            let linked = link_started(tools, &pr, &thread);
-            return ended(Some(Route::Started(thread)), Some(worktree), linked);
+            let outcome = match link_started(tools, pr, &thread) {
+                Ok(()) => SelectedOutcome::Started { thread },
+                Err(error) => SelectedOutcome::Failed {
+                    error,
+                    thread: Some(thread),
+                },
+            };
+            return ended(Some(worktree), outcome, true);
         }
         // Opening another chat could leave two reviews of one request.
         Created::Unknown(reason) => {
-            return ended(
-                None,
+            return failed(
                 Some(worktree),
-                Err(format!(
+                format!(
                     "the new review chat could not be confirmed; check Codex App before choosing again: {reason}"
-                )),
+                ),
             );
         }
         Created::NotSent(reason) => reason,
     };
     let link = new_chat_link(&prompt, &tools.config.chat_home);
-    let result = open_link(tools.run, &tools.commands.open, &link, stop)
-        .map_err(|error| format!("open deep link: {error}"));
-    ended(Some(Route::Opened(unstarted)), Some(worktree), result)
+    match open_link(tools.run, &tools.commands.open, &link, stop) {
+        Ok(()) => ended(
+            Some(worktree),
+            SelectedOutcome::Opened {
+                reason: Some(unstarted),
+            },
+            false,
+        ),
+        Err(error) => failed(Some(worktree), format!("open deep link: {error}")),
+    }
 }
 
 fn link_started(tools: &Tools<'_>, pr: &PullRequest, thread: &str) -> Result<(), String> {
@@ -881,8 +889,9 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
 }
 
 fn is_own_pull_request(github: &GhRest<'_>, repo: &str, number: u64) -> Result<bool, String> {
+    // gh may have switched accounts since the review saved its login, so the login is asked of GitHub every time.
     let login = github.current_login()?;
-    let author = github.pull_request_author(repo, number)?;
+    let author = github.pull_request(repo, number)?.author;
     Ok(author.is_some_and(|author| author.eq_ignore_ascii_case(&login)))
 }
 
@@ -1060,10 +1069,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::{
-            review::selection::SelectedOutcome,
-            watch::pr::{PrLink, PrRef},
-        },
+        app::watch::pr::{PrLink, PrRef},
         infra::command::ToolCall,
     };
 
@@ -1282,7 +1288,7 @@ mod tests {
             pr: pr.clone(),
             url: "https://github.com/acme/app/pull/3".to_owned(),
             worker: "worker-chat".to_owned(),
-            linked_at: "2026-11-12T00:00:00.000Z".to_owned(),
+            linked_at: "2026-11-12T00:00:00Z".parse().expect("parse the time"),
         };
         watch_record::record_link(&home.env.watch_state, &watched).expect("link the worker");
 
@@ -1387,6 +1393,9 @@ mod tests {
     #[test]
     fn link_that_cannot_tell_the_author_is_refused_without_a_link() {
         let home = ReviewHome::new();
+        let mut state = ReviewState::default();
+        state.login = Some("me".to_owned());
+        review_record::save_state(&home.env.paths, &state).expect("save the state");
 
         let linked = link(
             &home.env,
@@ -1602,7 +1611,6 @@ mod tests {
         let repeated = select(&home.env, id, &["acme/app#4@4".to_owned()], &|_| true, 0)
             .expect("read the same selection");
         let submitted = review_record::load_selection(&home.env.paths, id).expect("read it");
-        let spooled = review_record::take_now_requests(&home.env.paths).expect("read the spool");
         let waiting = selection_outcome(&home.env, id, &|_| true, 0).expect("read the selection");
         let mut record = SelectionRecord::of(&keys);
         record.accepted = true;
@@ -1644,11 +1652,6 @@ mod tests {
             }),
             "a repeated id leaves the first submission as it was"
         );
-        assert_eq!(
-            spooled.len(),
-            0,
-            "a selection never goes through the legacy spool"
-        );
         assert!(done.complete);
         assert_eq!(
             done.requests[0].link.as_deref(),
@@ -1661,35 +1664,19 @@ mod tests {
     }
 
     #[test]
-    fn send_without_a_sender_or_a_bridge_is_not_sent() {
-        for (name, sender, expected) in [
-            ("no_sender", None, "no chat is registered to send from"),
-            (
-                "sender_is_the_chat",
-                Some("review-chat"),
-                "the registered sender is this chat itself",
-            ),
-            ("no_bridge", Some("sender-chat"), "not_sent: no socket"),
-        ] {
-            let directory = tempfile::tempdir().expect("create a directory");
-            if let Some(sender) = sender {
-                watch_record::record_sender(directory.path(), sender, "2026-11-13T00:00:00.000Z")
-                    .expect("register the sender");
-            }
+    fn send_without_a_bridge_is_not_sent() {
+        let bridge = Bridge::new(
+            Err("no socket".to_owned()),
+            CallTimeouts::STANDARD,
+            StopRequest::default(),
+        );
 
-            let delivery = send_to_chat(
-                directory.path(),
-                Err("no socket".to_owned()),
-                "review-chat",
-                "review again",
-                &StopRequest::default(),
-            );
+        let delivery = send_to_chat(&bridge, "sender-chat", "review-chat", "review again");
 
-            let Delivery::NotSent(reason) = delivery else {
-                panic!("case: {name}: {delivery:?}");
-            };
-            assert!(reason.contains(expected), "case: {name}: {reason}");
-        }
+        let Delivery::NotSent(reason) = delivery else {
+            panic!("{delivery:?}");
+        };
+        assert!(reason.contains("not_sent: no socket"), "{reason}");
     }
 
     impl ReviewHome {
@@ -1752,7 +1739,7 @@ mod tests {
             let answer = match line.as_str() {
                 "/x/gh api user" => r#"{"login":"me"}"#.to_owned(),
                 "/x/gh api repos/acme/app/pulls/3" => format!(
-                    r#"{{"number":3,"title":"T","html_url":"https://github.com/acme/app/pull/3","additions":12,"deletions":3,"changed_files":2,"user":{{"login":"{}"}},"head":{{"sha":"{HEAD}"}},"base":{{"ref":"main","repo":{{"full_name":"acme/app"}}}}}}"#,
+                    r#"{{"number":3,"title":"T","html_url":"https://github.com/acme/app/pull/3","state":"open","additions":12,"deletions":3,"changed_files":2,"user":{{"login":"{}"}},"head":{{"sha":"{HEAD}"}},"base":{{"ref":"main","repo":{{"full_name":"acme/app"}}}}}}"#,
                     self.author.lock().expect("read the author")
                 ),
                 "/x/gh api --paginate repos/acme/app/issues/3/events?per_page=100" => events.to_owned(),

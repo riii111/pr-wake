@@ -63,7 +63,7 @@ pub(crate) struct ConfigFile {
     repositories: BTreeMap<String, String>,
     #[serde(default)]
     teams: Vec<String>,
-    // A number left out or written as 0 takes its default, as the Go review read it.
+    // Existing configs may write 0 for a default, so 0 takes the default as a number left out does.
     #[serde(default)]
     poll_interval_seconds: i64,
     #[serde(default)]
@@ -384,7 +384,7 @@ fn expand_home(path: &str, home: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from(path), |rest| home.join(rest))
 }
 
-// Lexically, as Go's `filepath.Clean` wrote the paths into the state and the prompts.
+// Lexically, as the worktree root may not exist until the first review adds a worktree.
 fn clean(path: &Path) -> PathBuf {
     let mut cleaned = PathBuf::new();
     for component in path.components() {

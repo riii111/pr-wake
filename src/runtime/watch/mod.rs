@@ -176,9 +176,6 @@ const T3_THREAD_ENV: &str = "T3CODE_THREAD_ID";
 const CODEX_THREAD_ENV: &str = "CODEX_THREAD_ID";
 const EXECUTION_ENV: &str = "HARNEXUS_EXECUTION_ENV";
 
-// A PR no watch has linked has no state, so it is shown as a first read and this link time is never used.
-const EPOCH: &str = "1970-01-01T00:00:00.000Z";
-
 // The watch has no command config, and macOS keeps osascript here.
 const OSASCRIPT: &str = "/usr/bin/osascript";
 
@@ -220,7 +217,6 @@ pub(crate) fn install(env: Env<'_>) -> Result<(), String> {
     run(Mode::DryRun(Vec::new()), env).map_err(|failure| failure.to_string())?;
 
     let home = home_of(env).ok_or("the home directory is unknown")?;
-    agent::remove_legacy(agent::LEGACY_WATCH, &home)?;
     agent::install(agent::WATCH, &home, agent::user().as_deref(), env)
 }
 
@@ -420,7 +416,7 @@ fn link(
     // Linking the same PR again keeps its start, so comments made since are still reported.
     let linked_at = match current {
         Some(current) if current.worker == worker => current.linked_at,
-        _ => time::format_timestamp(now),
+        _ => now,
     };
     watch_record::record_link(
         root,
@@ -453,8 +449,16 @@ fn release(root: &Path, url: &str) -> Result<ReleaseOutput, Failure> {
             "pr-wake watch release needs a GitHub pull request URL".to_owned(),
         ));
     };
-    let link = find_link(root, &named.pr)?
+    let link = watch_record::load_link(root, &named.pr)
+        .map_err(Failure::State)?
         .ok_or_else(|| Failure::Refused(format!("{} is not linked to a worker", named.url)))?;
+    // The link is found by a hash of the PR rather than by reading every link, so one naming another PR is refused before anything is written.
+    if !link.pr.is_same(&named.pr) {
+        return Err(Failure::Refused(format!(
+            "the record of {} names {}#{}, so nothing is released",
+            named.url, link.pr.repo, link.pr.number
+        )));
+    }
     let state = watch_record::load_watch_state(root, &link.pr).map_err(Failure::State)?;
     let Some(released) = watch::release(&state) else {
         return Err(Failure::Refused(format!("{} is not halted", named.url)));
@@ -490,8 +494,8 @@ fn status(root: &Path) -> Result<StatusOutput, Failure> {
                     pending: state.pending.len(),
                     follow_up: state.follow_up.len(),
                     awaiting_answer: state.delivered.is_some(),
-                    undelivered_since: state.lost_since,
-                    checked_at: state.checked_at,
+                    undelivered_since: state.lost_since.map(time::format_timestamp),
+                    checked_at: state.checked_at.map(time::format_timestamp),
                 }),
             },
         )
@@ -578,7 +582,8 @@ fn dry_run(
         let detail = github
             .detail(account, &target, &config.review_bots)
             .map_err(Failure::Github)?;
-        let linked_at = link.map_or(EPOCH, |link| link.linked_at.as_str());
+        // A PR no chat has linked has no state, so its first read takes everything as seen and no link time is compared.
+        let linked_at = link.map_or(Timestamp::UNIX_EPOCH, |link| link.linked_at);
         reports.push(report_of(&detail, &state, linked_at, account, &config));
     }
     Ok(DryRunOutput {
@@ -617,7 +622,7 @@ fn dry_run_targets(
 fn report_of(
     detail: &PrDetail,
     state: &WatchState,
-    linked_at: &str,
+    linked_at: Timestamp,
     account: &str,
     config: &WatchConfig,
 ) -> Report {
@@ -659,13 +664,6 @@ fn report_of(
         ignored,
         prompt,
     }
-}
-
-fn find_link(root: &Path, pr: &PrRef) -> Result<Option<PrLink>, Failure> {
-    Ok(watch_record::list_links(root, &HashSet::new())
-        .map_err(Failure::State)?
-        .into_iter()
-        .find(|link| link.pr.is_same(pr)))
 }
 
 fn gh_api(stop: &StopRequest) -> GhApi<'_> {
@@ -826,7 +824,7 @@ impl Display for Failure {
 mod tests {
     use std::{cell::Cell, fs};
 
-    use jiff::tz::TimeZone;
+    use jiff::{SignedDuration, tz::TimeZone};
     use serde_json::json;
 
     use super::*;
@@ -966,19 +964,22 @@ mod tests {
             let state = WatchState {
                 status: WatchStatus::Halted,
                 reason: Some("x".to_owned()),
+                checked_at: Some(noon().timestamp()),
                 pending: vec![WatchEvent::Conflict {
                     head: "a".to_owned(),
                 }],
+                worker: Some("old-chat".to_owned()),
+                lost_since: Some(noon().timestamp() + SignedDuration::from_mins(10)),
                 ..WatchState::default()
             };
             watch_record::save_watch_state(root, &pay(7), &state).expect("save the state");
 
             let shown = status(root).expect("status");
 
-            // In the order the TypeScript watch printed, so old and new outputs compare line by line.
+            // Other programs parse this line, so its keys, their order and the time format stay as they are.
             assert_eq!(
                 serde_json::to_string(&shown).expect("write it"),
-                r#"{"sender":null,"prs":[{"pr":"https://github.com/org/pay/pull/7","worker":"worker","status":"halted","reason":"x","pending":1,"followUp":0,"awaitingAnswer":false,"handingOver":false,"checkedAt":null}]}"#
+                r#"{"sender":null,"prs":[{"pr":"https://github.com/org/pay/pull/7","worker":"worker","status":"halted","reason":"x","pending":1,"followUp":0,"awaitingAnswer":false,"undeliveredSince":"2026-10-23T12:10:00.000Z","handingOver":true,"checkedAt":"2026-10-23T12:00:00.000Z"}]}"#
             );
         }
 
@@ -1121,80 +1122,171 @@ mod tests {
         }
     }
 
-    // The records harnexus-task watch left on a Mac.
-    mod legacy_records {
+    mod commands {
         use super::*;
 
         #[test]
-        fn watch_ends_before_writing_once_the_bridge_stops_offering_protocol_1() {
-            let records = Records::legacy();
-            let refusals = Cell::new(0);
-            let unsupported = RefCell::new(None);
-            let log = Recorded::default();
-            let bridge = |_: &str, tool: &str, arguments: &Map<String, Value>| {
-                if tool == "read_thread" {
-                    return idle_thread(arguments);
-                }
-                refusals.set(refusals.get() + 1);
-                Map::from_iter([
-                    ("outcome".to_owned(), json!("unsupported")),
-                    ("message".to_owned(), json!("old bridge")),
-                ])
-            };
-            let asked = RefCell::new(Vec::new());
-            let mut github = legacy_github(&asked);
-            let mut workers = AppWorkers {
-                codex: CodexWorkers::new(
-                    watched_call(&bridge, &unsupported, &log),
-                    Box::new(|| Ok(Some("sender-chat".to_owned()))),
-                ),
-                t3: T3Workers::new(Box::new(|_, _, _| T3Ran::NotRan {
-                    started: false,
-                    message: "no t3".to_owned(),
-                })),
-            };
-            let now = || noon();
-            let stop = StopRequest::default();
-
-            let ended = cycle::watch_forever(Watch {
-                cycle: CycleDeps {
-                    paths: &records.paths,
-                    github: &mut github,
-                    workers: &mut workers,
-                    now: &now,
-                    log: &log,
-                    notify: &|_, _| Ok(()),
-                },
-                stop: &stop,
-                pause: &mut |_| {},
-                replaced: None,
-                ended: &|| ended_by(&unsupported),
-            });
-
-            assert!(
-                matches!(&ended, Err(Failure::Refused(reason)) if reason == "cannot use the harnexus call socket: old bridge"),
-                "{ended:?}"
-            );
-            assert_eq!(refusals.get(), 2);
+        fn same_chat_keeps_its_link_time_and_another_chat_must_take_over() {
+            let records = Records::new();
             let root = &records.paths.state;
-            let queued = watch_record::load_watch_state(root, &pay(9)).expect("load PR 9");
-            assert_eq!(
-                (queued.status, queued.pending.len()),
-                (WatchStatus::Watching, 1)
+            let (first, later) = (
+                noon().timestamp(),
+                noon().timestamp() + SignedDuration::from_hours(1),
             );
-            let handed = watch_record::load_watch_state(root, &pay(7)).expect("load PR 7");
-            assert_eq!(handed.status, WatchStatus::Watching);
-            let logged = log.0.borrow();
-            let events = logged.iter().map(|entry| entry.event).collect::<Vec<_>>();
+            link(&from("w7"), root, PR, false, first).expect("link the PR");
+
+            let again = link(&from("w7"), root, PR, false, later);
+            let kept = watch_record::load_link(root, &pay(7)).expect("load the link");
+            let refused = link(&from("other"), root, PR, false, later);
+            let taken = link(&from("other"), root, PR, true, later);
+            let moved = watch_record::load_link(root, &pay(7)).expect("load the link");
+
+            assert!(again.is_ok());
             assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| **event == "protocol_unsupported")
-                    .count(),
-                1
+                kept.map(|link| (link.worker, link.linked_at)),
+                Some(("w7".to_owned(), first))
             );
-            assert_eq!(events.last(), Some(&"ended_watch"));
+            assert!(refused.is_err_and(|failure| {
+                failure.to_string().contains("already watched for chat w7")
+            }));
+            assert!(taken.is_ok());
+            assert_eq!(
+                moved.map(|link| (link.worker, link.linked_at)),
+                Some(("other".to_owned(), later))
+            );
         }
+
+        #[test]
+        fn halted_pr_is_released_with_its_message_taken_as_delivered() {
+            let records = Records::new();
+            let root = &records.paths.state;
+            watch_record::record_link(root, &link_of(7, "worker")).expect("record the link");
+            let halted = WatchState {
+                status: WatchStatus::Halted,
+                pending: vec![WatchEvent::Conflict {
+                    head: HEAD.to_owned(),
+                }],
+                halted: Some(Map::new()),
+                ..WatchState::default()
+            };
+            watch_record::save_watch_state(root, &pay(7), &halted).expect("save the state");
+            // PR 9's record holds the link of the halted PR 7, as a copied record would.
+            let misplaced = root.join(watch_record::pr_key(&pay(9)));
+            fs::create_dir_all(&misplaced).expect("create the record");
+            fs::copy(
+                root.join(watch_record::pr_key(&pay(7))).join("link.json"),
+                misplaced.join("link.json"),
+            )
+            .expect("copy the link");
+
+            let mismatched = release(root, "https://github.com/org/pay/pull/9");
+            let untouched = watch_record::load_watch_state(root, &pay(7)).expect("load the state");
+            let released = release(root, "https://github.com/Org/Pay/pull/7/files");
+            let again = release(root, PR);
+            let unlinked = release(root, "https://github.com/org/pay/pull/8");
+
+            assert!(mismatched.is_err_and(|failure| {
+                failure
+                    .to_string()
+                    .contains("names org/pay#7, so nothing is released")
+            }));
+            assert_eq!(untouched, halted);
+            assert!(!misplaced.join("state.json").exists());
+            assert_eq!(
+                serde_json::to_value(released.expect("release")).expect("write it"),
+                json!({ "released": "https://github.com/Org/Pay/pull/7", "worker": "worker" })
+            );
+            assert_eq!(
+                watch_record::load_watch_state(root, &pay(7)).expect("load the state"),
+                watch::release(&halted).expect("the PR is halted")
+            );
+            assert!(again.is_err_and(|failure| failure.to_string().contains("is not halted")));
+            assert!(unlinked.is_err_and(|failure| {
+                failure.to_string().contains("is not linked to a worker")
+            }));
+        }
+
+        fn from(chat: &'static str) -> impl Fn(&str) -> Option<OsString> {
+            move |variable| (variable == CODEX_THREAD_ENV).then(|| OsString::from(chat))
+        }
+    }
+
+    #[test]
+    fn watch_ends_before_its_next_cycle_once_the_bridge_stops_offering_protocol_1() {
+        let records = Records::new();
+        let root = &records.paths.state;
+        let read = WatchState {
+            summary: Some(summary()),
+            seen: vec!["bot:coderabbit".to_owned()],
+            ..WatchState::default()
+        };
+        for number in [7, 9] {
+            watch_record::record_link(root, &link_of(number, "worker")).expect("record the link");
+            watch_record::save_watch_state(root, &pay(number), &read).expect("save the state");
+        }
+        let refusals = Cell::new(0);
+        let unsupported = RefCell::new(None);
+        let log = Recorded::default();
+        let bridge = |_: &str, tool: &str, arguments: &Map<String, Value>| {
+            if tool == "read_thread" {
+                return idle_thread(arguments);
+            }
+            refusals.set(refusals.get() + 1);
+            Map::from_iter([
+                ("outcome".to_owned(), json!("unsupported")),
+                ("message".to_owned(), json!("old bridge")),
+            ])
+        };
+        let asked = RefCell::new(Vec::new());
+        let mut github = github(&asked);
+        let mut workers = AppWorkers {
+            codex: CodexWorkers::new(
+                watched_call(&bridge, &unsupported, &log),
+                Box::new(|| Ok(Some("sender-chat".to_owned()))),
+            ),
+            t3: T3Workers::new(Box::new(|_, _, _| T3Ran::NotRan {
+                started: false,
+                message: "no t3".to_owned(),
+            })),
+        };
+        let now = || noon();
+        let stop = StopRequest::default();
+
+        let ended = cycle::watch_forever(Watch {
+            cycle: CycleDeps {
+                paths: &records.paths,
+                github: &mut github,
+                workers: &mut workers,
+                now: &now,
+                log: &log,
+                notify: &|_, _| Ok(()),
+            },
+            stop: &stop,
+            pause: &mut |_| {},
+            replaced: None,
+            ended: &|| ended_by(&unsupported),
+        });
+
+        assert!(
+            matches!(&ended, Err(Failure::Refused(reason)) if reason == "cannot use the harnexus call socket: old bridge"),
+            "{ended:?}"
+        );
+        assert_eq!(refusals.get(), 2);
+        let queued = watch_record::load_watch_state(root, &pay(9)).expect("load PR 9");
+        assert_eq!(
+            (queued.status, queued.pending.len()),
+            (WatchStatus::Watching, 2)
+        );
+        let logged = log.0.borrow();
+        let events = logged.iter().map(|entry| entry.event).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == "protocol_unsupported")
+                .count(),
+            1
+        );
+        assert_eq!(events.last(), Some(&"ended_watch"));
     }
 
     #[test]
@@ -1333,25 +1425,6 @@ mod tests {
             .expect("write the config");
             Self { _root: root, paths }
         }
-
-        fn legacy() -> Self {
-            let records = Self::new();
-            fs::write(
-                &records.paths.config,
-                json!({
-                    "repositories": { "org/pay": { "account": "owner" } },
-                    "quietHours": null,
-                    "instructions": "$task-worker",
-                })
-                .to_string(),
-            )
-            .expect("write the config");
-            copy_directory(
-                &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch"),
-                &records.paths.state,
-            );
-            records
-        }
     }
 
     impl Log for Recorded {
@@ -1464,33 +1537,6 @@ mod tests {
         }
     }
 
-    // Each PR reads as updated later than every record and holds no comments.
-    fn legacy_github(asked: &RefCell<Vec<String>>) -> FakeGitHub<'_> {
-        let summary = PrSummary {
-            updated_at: "2026-10-23T01:00:00Z".to_owned(),
-            bots: BTreeMap::from([(
-                "coderabbit".to_owned(),
-                Some(BotStatus {
-                    state: "SUCCESS".to_owned(),
-                    description: "Review completed".to_owned(),
-                    created_at: "2026-10-22T00:00:00Z".to_owned(),
-                }),
-            )]),
-            ..summary()
-        };
-        FakeGitHub {
-            asked,
-            detail: PrDetail {
-                summary,
-                url: PR.to_owned(),
-                title: "Pay".to_owned(),
-                failed_required: Vec::new(),
-                comments: Vec::new(),
-                no_actionable: Vec::new(),
-            },
-        }
-    }
-
     // Every worker is idle and last talked to an hour ago, so nothing holds a message back.
     fn idle_thread(arguments: &Map<String, Value>) -> Map<String, Value> {
         let noon = noon().timestamp().as_second();
@@ -1529,7 +1575,7 @@ mod tests {
             pr: pay(number),
             url: format!("https://github.com/org/pay/pull/{number}"),
             worker: worker.to_owned(),
-            linked_at: "2026-09-01T00:00:00Z".to_owned(),
+            linked_at: "2026-09-01T00:00:00Z".parse().expect("parse the time"),
         }
     }
 
@@ -1545,18 +1591,5 @@ mod tests {
             .parse::<Timestamp>()
             .expect("parse the time")
             .to_zoned_datetime(TimeZone::UTC)
-    }
-
-    fn copy_directory(from: &Path, to: &Path) {
-        fs::create_dir_all(to).expect("create the directory");
-        for entry in fs::read_dir(from).expect("list the fixture") {
-            let entry = entry.expect("read an entry");
-            let target = to.join(entry.file_name());
-            if entry.path().is_dir() {
-                copy_directory(&entry.path(), &target);
-            } else {
-                fs::copy(entry.path(), target).expect("copy the fixture");
-            }
-        }
     }
 }

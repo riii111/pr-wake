@@ -3,9 +3,11 @@ use std::{
     ffi::OsString,
     fmt::{self, Display, Formatter},
     io::{self, Read, Write},
+    mem::MaybeUninit,
     os::unix::process::{CommandExt, ExitStatusExt},
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
+    sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -116,8 +118,8 @@ impl ExternalCommand {
             .spawn()
             .map_err(|error| self.error(CommandErrorKind::Launch(error)))?;
         let deadline = Instant::now() + self.timeout;
-        let streams = Streams::start(&mut child, self.input.clone());
-        let ending = wait_for_end(&mut child, &streams, deadline, self.timeout, stop)
+        let mut streams = Streams::start(&mut child, self.input.clone());
+        let ending = wait_for_end(&mut child, &mut streams, deadline, self.timeout, stop)
             .map_err(|error| self.error(CommandErrorKind::Io(error)))?;
 
         let kind = match ending {
@@ -279,7 +281,7 @@ enum Ending {
 
 fn wait_for_end(
     child: &mut Child,
-    streams: &Streams,
+    streams: &mut Streams,
     deadline: Instant,
     timeout: Duration,
     stop: &StopRequest,
@@ -294,6 +296,9 @@ fn wait_for_end(
     let mut termination: Option<(Termination, Instant)> = None;
     let mut killed = false;
     loop {
+        // Read before the ends already signaled are taken, so a command that ended before the deadline is never judged timed out.
+        let now = Instant::now();
+        streams.take_ends();
         // Reaping releases the group ID, so the child is reaped only after its streams close or are given up on.
         if streams.are_closed()
             && let Some(status) = reap(child)?
@@ -304,7 +309,6 @@ fn wait_for_end(
             });
         }
 
-        let now = Instant::now();
         match termination {
             None => {
                 let cause = if stop.is_requested() {
@@ -330,7 +334,7 @@ fn wait_for_end(
                 }
             }
         }
-        thread::sleep(POLL_INTERVAL);
+        streams.wait(POLL_INTERVAL);
     }
 }
 
@@ -354,28 +358,65 @@ struct Streams {
     input: Option<JoinHandle<io::Result<()>>>,
     stdout: JoinHandle<io::Result<Vec<u8>>>,
     stderr: JoinHandle<io::Result<Vec<u8>>>,
+    // JoinHandle::is_finished can still be false when its thread's signal wakes the wait, so ended streams are counted from the signals.
+    open: usize,
+    ends: Receiver<End>,
+    // Held so the channel stays connected after every thread ends, and a wait then times out rather than returning at once.
+    _sender: Sender<End>,
 }
+
+enum End {
+    Stream,
+    Child,
+}
+
+// Signals from its destructor, so a stream thread that panics still counts as ended.
+struct StreamEnd(Sender<End>);
 
 impl Streams {
     fn start(child: &mut Child, input: Option<Vec<u8>>) -> Self {
+        let (sender, ends) = mpsc::channel();
+        // The last stream can close before the child can be reaped, so the child's exit also wakes the wait.
+        notify_exit(child.id(), sender.clone());
         let input = child.stdin.take().zip(input).map(|(mut stdin, input)| {
-            thread::spawn(move || match stdin.write_all(&input) {
+            spawn_stream(&sender, move || match stdin.write_all(&input) {
                 // A child may end without reading all of its input, which is not a failure.
                 Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
                 written => written,
             })
         });
+        let stdout = spawn_reader(child.stdout.take(), &sender);
+        let stderr = spawn_reader(child.stderr.take(), &sender);
         Self {
+            open: 2 + usize::from(input.is_some()),
             input,
-            stdout: spawn_reader(child.stdout.take()),
-            stderr: spawn_reader(child.stderr.take()),
+            stdout,
+            stderr,
+            ends,
+            _sender: sender,
         }
     }
 
-    fn are_closed(&self) -> bool {
-        self.input.as_ref().is_none_or(JoinHandle::is_finished)
-            && self.stdout.is_finished()
-            && self.stderr.is_finished()
+    const fn are_closed(&self) -> bool {
+        self.open == 0
+    }
+
+    fn take_ends(&mut self) {
+        while let Ok(end) = self.ends.try_recv() {
+            self.count(&end);
+        }
+    }
+
+    fn wait(&mut self, limit: Duration) {
+        if let Ok(end) = self.ends.recv_timeout(limit) {
+            self.count(&end);
+        }
+    }
+
+    const fn count(&mut self, end: &End) {
+        if matches!(end, End::Stream) {
+            self.open -= 1;
+        }
     }
 
     fn collect(self) -> io::Result<(Vec<u8>, Vec<u8>)> {
@@ -387,14 +428,56 @@ impl Streams {
     }
 }
 
-fn spawn_reader(stream: Option<impl Read + Send + 'static>) -> JoinHandle<io::Result<Vec<u8>>> {
-    thread::spawn(move || {
+impl Drop for StreamEnd {
+    fn drop(&mut self) {
+        let _ = self.0.send(End::Stream);
+    }
+}
+
+fn spawn_reader(
+    stream: Option<impl Read + Send + 'static>,
+    ends: &Sender<End>,
+) -> JoinHandle<io::Result<Vec<u8>>> {
+    spawn_stream(ends, move || {
         let mut bytes = Vec::new();
         if let Some(mut stream) = stream {
             stream.read_to_end(&mut bytes)?;
         }
         Ok(bytes)
     })
+}
+
+fn spawn_stream<T: Send + 'static>(
+    ends: &Sender<End>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> JoinHandle<T> {
+    let end = StreamEnd(ends.clone());
+    thread::spawn(move || {
+        let _end = end;
+        work()
+    })
+}
+
+fn notify_exit(pid: u32, end: Sender<End>) {
+    thread::spawn(move || {
+        let mut info = MaybeUninit::<libc::siginfo_t>::uninit();
+        loop {
+            // Reaping releases the group ID, so WNOWAIT leaves the child for the wait to reap once its streams close.
+            // SAFETY: waitid only writes the child's state into info, which is never read.
+            let waited = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if waited == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+        let _ = end.send(End::Child);
+    });
 }
 
 fn join<T>(handle: JoinHandle<io::Result<T>>) -> io::Result<T> {
@@ -484,6 +567,37 @@ mod tests {
         };
         assert_eq!(status.signal(), Some(libc::SIGKILL));
         assert!(error.started());
+    }
+
+    // The wait starts past its deadline, as when its thread resumes late, with every end already signaled.
+    #[test]
+    fn command_that_ended_before_a_passed_deadline_keeps_its_output() {
+        let command = shell("printf out; exit 3", TEN_SECONDS);
+        let mut child = command.spawn().expect("run sh");
+        let mut streams = Streams::start(&mut child, None);
+        let (exit, exited) = mpsc::channel();
+        notify_exit(child.id(), exit);
+        exited.recv().expect("wait for the exit");
+        let closing = Instant::now() + TEN_SECONDS;
+        while !(streams.stdout.is_finished() && streams.stderr.is_finished()) {
+            assert!(Instant::now() < closing, "the streams never closed");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let ending = wait_for_end(
+            &mut child,
+            &mut streams,
+            Instant::now(),
+            TEN_SECONDS,
+            &StopRequest::default(),
+        )
+        .expect("wait for the end");
+
+        let Ending::Finished(status) = ending else {
+            panic!("a command that had ended was stopped");
+        };
+        assert_eq!(status.code(), Some(3));
+        assert_eq!(streams.collect().expect("collect the output").0, b"out");
     }
 
     #[test]

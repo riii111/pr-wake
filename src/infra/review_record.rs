@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn state_is_saved_in_the_go_layout_and_read_back() {
+    fn state_is_saved_in_its_layout_and_read_back() {
         let directory = tempfile::tempdir().expect("create a directory");
         let paths = ReviewPaths {
             config: directory.path().join("review.json"),
@@ -357,6 +357,32 @@ mod tests {
         assert!(taken[0].is_err(), "{taken:?}");
         assert_eq!(taken[1..], [Ok(NowRequest::default()), Ok(one_pr)]);
         assert_eq!(again.len(), 0);
+    }
+
+    #[test]
+    fn selection_is_created_only_once_and_the_first_record_kept() {
+        let directory = tempfile::tempdir().expect("create a directory");
+        let paths = ReviewPaths {
+            config: directory.path().join("review.json"),
+            state: directory.path().join("review"),
+        };
+        let first = SelectionRecord {
+            run: "run-1".to_owned(),
+            ..SelectionRecord::of(&["acme/app#12@30".to_owned()])
+        };
+        let second = SelectionRecord {
+            run: "run-2".to_owned(),
+            ..SelectionRecord::of(&["acme/app#13@40".to_owned()])
+        };
+
+        let created = create_selection(&paths, "one", &first).expect("create the selection");
+        let again = create_selection(&paths, "one", &second).expect("find it created");
+
+        assert!(created && !again);
+        assert_eq!(
+            load_selection(&paths, "one").expect("read the selection"),
+            Some(first)
+        );
     }
 
     #[test]

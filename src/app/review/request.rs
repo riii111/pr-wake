@@ -386,6 +386,18 @@ mod tests {
                 expected,
                 "case: {name}"
             );
+            assert!(
+                !still_requested(
+                    &LiveRequest {
+                        open: false,
+                        ..live
+                    },
+                    &found,
+                    "me",
+                    &teams
+                ),
+                "case: {name}: a closed PR asks for nothing"
+            );
         }
     }
 
@@ -500,10 +512,29 @@ mod tests {
             "me",
             &teams,
         );
+        let both_asked = current_request(
+            &history,
+            Some(&asked(&["me"], &["backend"])),
+            &hit("acme/app", 3, "u"),
+            "me",
+            &teams,
+        );
+        let team_removed = current_request(
+            &history,
+            Some(&asked(&["me"], &[])),
+            &hit("acme/app", 3, "u"),
+            "me",
+            &teams,
+        );
 
         assert_eq!(
             neither_asked_yet.key, "acme/app#3@20",
             "the reviewers may lag the search, so the latest event stands as before"
+        );
+        assert_eq!(both_asked.key, "acme/app#3@20");
+        assert_eq!(
+            team_removed.key, "acme/app#3@10",
+            "the direct request left after the team's removal names the request"
         );
         assert_eq!(
             direct_without_its_event.key, "acme/app#3@unknown",

@@ -14,6 +14,8 @@ use std::{
 
 use regex::Regex;
 
+use self::{notice::Size, request::LiveRequest};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PullRequest {
     pub(crate) repo: String,
@@ -22,6 +24,17 @@ pub(crate) struct PullRequest {
     pub(crate) url: String,
     pub(crate) head_sha: String,
     pub(crate) base_ref: String,
+}
+
+// What one read of a pull request tells, so no later step reads it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullDetails {
+    pub(crate) pr: PullRequest,
+    pub(crate) author: Option<String>,
+    pub(crate) live: LiveRequest,
+    // The requested users who are not bots, as bots never count as reviewers.
+    pub(crate) requested: Vec<String>,
+    pub(crate) size: Size,
 }
 
 static REPOSITORY: LazyLock<Regex> = LazyLock::new(|| {

@@ -177,96 +177,66 @@ fn watch_ends_before_it_can_send_when_harnexus_cannot_be_asked(#[case] link: Opt
     assert!(!home.state().join("watch.lock").exists());
 }
 
-// The records harnexus-task watch left on a Mac.
-mod legacy_records {
-    use super::*;
+#[test]
+fn status_shows_an_answer_awaited_for_the_recorded_delivery() {
+    let home = Home::new();
+    home.watch(&["sender"], &[("CODEX_THREAD_ID", "sender-chat")]);
+    home.watch(&["link", PR_9], &[]);
+    home.write_pr_state(&pr_state(&[(
+        "delivered",
+        json!({
+            "at": "2026-10-23T12:00:00.000Z",
+            "sender": "sender-chat",
+            "prompt": format!("$task-worker\n{PR_9}#discussion_r1"),
+            "findings": [],
+            "followUp": false,
+            "events": [],
+            "lost": false,
+        }),
+    )]));
 
-    #[test]
-    fn status_shows_the_sender_queues_awaited_answers_and_a_pending_hand_over() {
-        let home = Home::legacy();
+    let shown = home.watch(&["status", "--json"], &[]);
 
-        let shown = home.watch(&["status", "--json"], &[]);
+    assert_eq!(shown.code, Some(0), "{}", shown.stderr);
+    // Other programs parse this line, so its keys and their order are compared as written.
+    assert_eq!(
+        shown.stdout,
+        concat!(
+            r#"{"sender":"sender-chat","prs":[{"pr":"https://github.com/org/pay/pull/9","worker":"caller","status":"watching","reason":null,"pending":0,"followUp":0,"awaitingAnswer":true,"handingOver":false,"checkedAt":"2026-10-23T12:00:00.000Z"}]}"#,
+            "\n"
+        )
+    );
+}
 
-        let shown = shown.json();
-        assert_eq!(shown["sender"], "sender-chat");
-        let prs = shown["prs"]
-            .as_array()
-            .expect("the PRs")
-            .iter()
-            .map(|pr| {
-                json!([
-                    pr["pr"],
-                    pr["worker"],
-                    pr["status"],
-                    pr["pending"],
-                    pr["awaitingAnswer"],
-                    pr["handingOver"]
-                ])
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            prs,
-            [
-                json!([url(7), "next-chat", "watching", 0, true, true]),
-                json!([url(8), "w8", "watching", 0, false, false]),
-                json!([url(9), "w9", "watching", 1, false, false]),
-                json!([url(10), "w10", "halted", 0, false, false]),
-            ]
-        );
-    }
+#[test]
+fn halted_pr_is_released_with_one_json_line() {
+    let home = Home::new();
+    home.watch(&["link", PR_9], &[]);
+    home.write_pr_state(&pr_state(&[
+        ("status", json!("halted")),
+        ("reason", json!("the delivery could not be confirmed")),
+        (
+            "pending",
+            json!([{ "type": "conflict", "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]),
+        ),
+        ("halted", json!({ "prompt": "$task-worker" })),
+    ]));
 
-    #[test]
-    fn halted_pr_is_released_and_its_message_taken_as_delivered() {
-        let home = Home::legacy();
+    let released = home.watch(&["release", PR_9], &[]);
 
-        let released = home.watch(&["release", &url(10)], &[]);
-
-        assert_eq!(
-            released.json(),
-            json!({ "released": url(10), "worker": "w10" })
-        );
-        let state = home.record("e4fa9c7ae05e70a7", "state");
-        assert_eq!(
-            [&state["status"], &state["halted"], &state["pending"]],
-            [&json!("watching"), &Value::Null, &json!([])]
-        );
-    }
-
-    #[test]
-    fn same_chat_keeps_its_link_time_and_another_chat_must_take_over() {
-        let home = Home::legacy();
-
-        let again = home.watch(&["link", &url(9)], &[("CODEX_THREAD_ID", "w9")]);
-        let refused = home.watch(&["link", &url(9)], &[("CODEX_THREAD_ID", "other")]);
-        let kept = home.record("6db070b27f9194fb", "link");
-        let taken = home.watch(
-            &["link", &url(9), "--take-over"],
-            &[("CODEX_THREAD_ID", "other")],
-        );
-        let moved = home.record("6db070b27f9194fb", "link");
-
-        assert_eq!(again.json(), json!({ "threadId": "w9", "watched": url(9) }));
-        assert_eq!(
-            [&kept["worker"], &kept["linkedAt"]],
-            [&json!("w9"), &json!("2026-10-20T00:00:00.000Z")]
-        );
-        assert_eq!(refused.code, Some(1));
-        assert!(
-            refused.stderr.contains("already watched for chat w9"),
-            "{}",
-            refused.stderr
-        );
-        assert_eq!(
-            taken.json(),
-            json!({ "threadId": "other", "watched": url(9) })
-        );
-        assert_eq!(moved["worker"], "other");
-        assert_ne!(moved["linkedAt"], "2026-10-20T00:00:00.000Z");
-    }
-
-    fn url(number: u64) -> String {
-        format!("https://github.com/org/pay/pull/{number}")
-    }
+    assert_eq!(released.code, Some(0), "{}", released.stderr);
+    assert_eq!(
+        released.stdout,
+        concat!(
+            r#"{"released":"https://github.com/org/pay/pull/9","worker":"caller"}"#,
+            "\n"
+        )
+    );
+    let state = home.pr_state();
+    assert_eq!(
+        [&state["status"], &state["halted"], &state["pending"]],
+        [&json!("watching"), &Value::Null, &json!([])]
+    );
 }
 
 impl Home {
@@ -275,15 +245,6 @@ impl Home {
             root: tempfile::tempdir().expect("create a directory"),
         };
         home.write_config(&json!({ "repositories": { "org/pay": { "account": "owner" } } }));
-        home
-    }
-
-    fn legacy() -> Self {
-        let home = Self::new();
-        copy_directory(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-watch"),
-            &home.state(),
-        );
         home
     }
 
@@ -297,10 +258,26 @@ impl Home {
         self.root.path().join("state/harnexus-crew/watch")
     }
 
-    fn record(&self, key: &str, file: &str) -> Value {
-        let path = self.state().join(key).join(format!("{file}.json"));
-        serde_json::from_str(&fs::read_to_string(path).expect("read the record"))
-            .expect("parse the record")
+    fn write_pr_state(&self, state: &Value) {
+        fs::write(self.pr_directory().join("state.json"), state.to_string())
+            .expect("write the state");
+    }
+
+    fn pr_state(&self) -> Value {
+        let state =
+            fs::read_to_string(self.pr_directory().join("state.json")).expect("read the state");
+        serde_json::from_str(&state).expect("parse the state")
+    }
+
+    // Named by a hash the binary keeps to itself, so the one directory `watch link` made is found rather than computed.
+    fn pr_directory(&self) -> PathBuf {
+        let mut directories = fs::read_dir(self.state())
+            .expect("list the records")
+            .map(|entry| entry.expect("read an entry").path())
+            .filter(|path| path.is_dir());
+        let directory = directories.next().expect("a linked PR");
+        assert!(directories.next().is_none(), "more than one linked PR");
+        directory
     }
 
     fn watch(&self, arguments: &[&str], env: &[(&str, &str)]) -> Run {
@@ -345,15 +322,25 @@ fn run(arguments: &[&str]) -> Output {
         .expect("run pr-wake")
 }
 
-fn copy_directory(from: &Path, to: &Path) {
-    fs::create_dir_all(to).expect("create the directory");
-    for entry in fs::read_dir(from).expect("list the fixture") {
-        let entry = entry.expect("read an entry");
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_directory(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).expect("copy the record");
-        }
+// Every field the watch writes is present, as a record missing one is refused rather than read as empty.
+fn pr_state(fields: &[(&str, Value)]) -> Value {
+    let mut state = json!({
+        "status": "watching",
+        "reason": null,
+        "summary": null,
+        "checkedAt": "2026-10-23T12:00:00.000Z",
+        "changedAt": null,
+        "seen": [],
+        "pending": [],
+        "followUp": [],
+        "conflictHead": null,
+        "delivered": null,
+        "worker": "caller",
+        "halted": null,
+        "lostSince": null,
+    });
+    for (name, value) in fields {
+        state[*name] = value.clone();
     }
+    state
 }
