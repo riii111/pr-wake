@@ -34,7 +34,7 @@ pub(super) enum ReviewCommand {
         pr: Option<String>,
     },
     #[command(about = "List pending review requests")]
-    List(JsonFlag),
+    List(ListFlags),
     // Called by the pr-wake-review-queue Skill, which reads its JSON; `list` is the command for people.
     #[command(hide = true)]
     Select {
@@ -71,9 +71,15 @@ pub(super) struct ConfigFlag {
 }
 
 #[derive(Debug, PartialEq, Eq, Args)]
-pub(super) struct JsonFlag {
+pub(super) struct ListFlags {
     #[arg(long, help = "Print one line of JSON instead of text")]
     json: bool,
+    #[arg(
+        long,
+        conflicts_with = "json",
+        help = "Show PR and chat URLs as plain text"
+    )]
+    plain: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Args)]
@@ -122,7 +128,7 @@ pub(super) fn run(command: ReviewCommand) -> Result<(), String> {
         }
         ReviewCommand::Link { pr } => review::link_from_chat(&env()?, &pr),
         ReviewCommand::Now { pr } => review::request_now_from_terminal(&env()?, pr.as_deref()),
-        ReviewCommand::List(flag) => review::queue_from_terminal(&env()?, flag.json),
+        ReviewCommand::List(flag) => review::queue_from_terminal(&env()?, flag.json, flag.plain),
         ReviewCommand::Select { id, keys } => review::select_from_skill(&env()?, &id, &keys),
         ReviewCommand::Outcome { id } => review::selection_outcome_from_skill(&env()?, &id),
         ReviewCommand::Install => review::install(&env()?),
@@ -146,7 +152,10 @@ mod tests {
             (
                 "list_as_json",
                 &["review", "list", "--json"][..],
-                ReviewCommand::List(JsonFlag { json: true }),
+                ReviewCommand::List(ListFlags {
+                    json: true,
+                    plain: false,
+                }),
             ),
             (
                 "select_two",

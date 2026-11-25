@@ -1,8 +1,10 @@
 mod daemon;
+mod queue_table;
 
 use std::{
     cell::RefCell,
     env,
+    io::{self, IsTerminal as _},
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process, thread,
@@ -507,10 +509,31 @@ pub(crate) fn selection_outcome(
     await_selection(&env.paths, id, pause, waits)
 }
 
-pub(crate) fn queue_from_terminal(env: &ReviewEnv, json: bool) -> Result<(), String> {
+pub(crate) fn queue_from_terminal(env: &ReviewEnv, json: bool, plain: bool) -> Result<(), String> {
     let entries = queue(&env.paths)?;
     if json {
         print_json(&serde_json::json!({ "requests": entries }))
+    } else if plain
+        || (io::stdout().is_terminal() && env::var_os("TERM").is_some_and(|term| term == "dumb"))
+    {
+        output::write_stdout(&queue_table::plain_links(&entries));
+        Ok(())
+    } else if io::stdout().is_terminal() {
+        let width =
+            terminal_size::terminal_size_of(io::stdout()).map_or(80, |(w, _)| usize::from(w.0));
+        output::write_stdout(&queue_table::render(
+            &entries,
+            width,
+            env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
+            env::var("COLORFGBG").ok().as_deref().and_then(|colors| {
+                match colors.rsplit(';').next()? {
+                    "0" | "8" => Some("\x1b[48;5;235m"),
+                    "7" | "15" => Some("\x1b[48;5;254m"),
+                    _ => None,
+                }
+            }),
+        ));
+        Ok(())
     } else {
         output::write_stdout(&selection::queue_lines(&entries));
         Ok(())
