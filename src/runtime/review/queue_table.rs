@@ -5,7 +5,8 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::{QueueEntry, one_line};
 
-const CHAT: &str = "レビューチャット";
+const CHAT: &str = "Review chat";
+const OPEN_CHAT: &str = "チャットを開く";
 
 fn clipped(text: &str, limit: usize) -> String {
     if text.width() <= limit {
@@ -78,14 +79,19 @@ pub(super) fn render(
         })
         .collect();
     let pr_width = prs.iter().map(|pr| pr.width()).max().unwrap_or(2).max(2);
-    let title_width = width.saturating_sub(pr_width + 4 + CHAT.width());
+    let chat_width = if entries.iter().any(|entry| entry.review_thread.is_some()) {
+        CHAT.width().max(OPEN_CHAT.width())
+    } else {
+        CHAT.width()
+    };
+    let title_width = width.saturating_sub(pr_width + 4 + chat_width);
     let compact = title_width < 16;
     if !compact {
         let _ = writeln!(
             out,
-            "\nPR{}  タイトル{}  {CHAT}",
+            "\nPR{}  Title{}  {CHAT}",
             " ".repeat(pr_width - 2),
-            " ".repeat(title_width - "タイトル".width())
+            " ".repeat(title_width - "Title".width())
         );
         let _ = writeln!(out, "{}", "-".repeat(width));
     }
@@ -93,7 +99,7 @@ pub(super) fn render(
         let title = one_line(&entry.title).replace(char::is_control, "");
         let chat = entry.review_thread.as_ref().map_or_else(
             || "-".into(),
-            |id| link("チャットを開く", &format!("codex://threads/{id}"), color),
+            |id| link(OPEN_CHAT, &format!("codex://threads/{id}"), color),
         );
         let pr_link = link(&pr, &entry.url, color);
         if compact {
