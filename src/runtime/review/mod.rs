@@ -911,7 +911,7 @@ fn prepare(tools: &Tools<'_>, pr: &PullRequest, stop: &StopRequest) -> Result<Pa
         &Checkout {
             run: tools.run,
             git: &tools.commands.git,
-            path: checkout,
+            path: &checkout,
             stop,
         },
         &review::worktree_path(&tools.config.worktree_root, pr),
@@ -1256,7 +1256,7 @@ mod tests {
         ));
         let prompt = "https://github.com/acme/app/pull/3 tanaka";
         let opened = format!(
-            "pr-wakeの依頼ID: smoke:acme/app#3\n\n{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。",
+            "pr-wakeの依頼ID: smoke:acme/app#3\n\n{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。\n\nレビュー結果はこのレビューチャットで回答してください。調査を分担する場合は、このチャットのサブエージェントを使ってください。",
             worktree.display()
         );
         assert_eq!(
