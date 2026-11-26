@@ -48,6 +48,8 @@ pub(super) enum ReviewCommand {
         #[arg(value_name = "SELECTION")]
         id: String,
     },
+    #[command(hide = true)]
+    CheckReply { watch_state: PathBuf },
     #[command(about = "Check the config, then start the LaunchAgent")]
     Install,
     #[command(about = "Stop and remove the LaunchAgent")]
@@ -131,6 +133,7 @@ pub(super) fn run(command: ReviewCommand) -> Result<(), String> {
         ReviewCommand::List(flag) => review::queue_from_terminal(&env()?, flag.json, flag.plain),
         ReviewCommand::Select { id, keys } => review::select_from_skill(&env()?, &id, &keys),
         ReviewCommand::Outcome { id } => review::selection_outcome_from_skill(&env()?, &id),
+        ReviewCommand::CheckReply { watch_state } => review::check_reply(&watch_state),
         ReviewCommand::Install => review::install(&env()?),
         ReviewCommand::Uninstall => agent::uninstall(agent::REVIEW, &env()?.home),
         ReviewCommand::Start => agent::start(agent::REVIEW, &env()?.home),

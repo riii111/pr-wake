@@ -1,5 +1,6 @@
 mod daemon;
 mod queue_table;
+mod reply_hook;
 
 use std::{
     cell::RefCell,
@@ -351,9 +352,26 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
     }
     // The config is checked before the running agent stops, so a bad config leaves it running.
     check_from_terminal(config, env)?;
+    let hook = reply_hook::install(
+        &env.home.join("review-home"),
+        &agent::program()?,
+        &env.watch_state,
+    )?;
+    print_line(&format!(
+        "Review the reply hook in Codex Settings > Hooks: {}",
+        hook.display()
+    ));
     agent::install(agent::REVIEW, &env.home, env.user.as_deref(), &|name| {
         env::var_os(name)
     })
+}
+
+pub(crate) fn check_reply(watch_state: &Path) -> Result<(), String> {
+    let event = serde_json::from_reader(io::stdin().lock()).map_err(|error| error.to_string())?;
+    if let Some(denial) = reply_hook::denial(&event, watch_state)? {
+        print_line(&denial.to_string());
+    }
+    Ok(())
 }
 
 // Run in the review chat, which `CODEX_THREAD_ID` names.
