@@ -84,7 +84,9 @@ pub(crate) fn with_worktree(prompt: &str, worktree: &Path, pr: &PullRequest) -> 
 #[must_use]
 pub(crate) fn with_request(prompt: &str, key: &str) -> String {
     // One chat holds a PR's every review, so the report finds this request's turn by the key, put first to survive a cut-short read.
-    format!("pr-wakeの依頼ID: {key}\n\n{prompt}")
+    format!(
+        "pr-wakeの依頼ID: {key}\n\n{prompt}\n\nレビュー結果はこのレビューチャットで回答してください。調査を分担する場合は、このチャットのサブエージェントを使ってください。"
+    )
 }
 
 #[must_use]

@@ -1,5 +1,6 @@
 mod daemon;
 mod queue_table;
+mod reply_hook;
 
 use std::{
     cell::RefCell,
@@ -351,9 +352,26 @@ pub(crate) fn install(env: &ReviewEnv) -> Result<(), String> {
     }
     // The config is checked before the running agent stops, so a bad config leaves it running.
     check_from_terminal(config, env)?;
+    let hook = reply_hook::install(
+        &env.home.join("review-home"),
+        &agent::program()?,
+        &env.watch_state,
+    )?;
+    print_line(&format!(
+        "Review the reply hook in Codex Settings > Hooks: {}",
+        hook.display()
+    ));
     agent::install(agent::REVIEW, &env.home, env.user.as_deref(), &|name| {
         env::var_os(name)
     })
+}
+
+pub(crate) fn check_reply(watch_state: &Path) -> Result<(), String> {
+    let event = serde_json::from_reader(io::stdin().lock()).map_err(|error| error.to_string())?;
+    if let Some(denial) = reply_hook::denial(&event, watch_state)? {
+        print_line(&denial.to_string());
+    }
+    Ok(())
 }
 
 // Run in the review chat, which `CODEX_THREAD_ID` names.
@@ -911,7 +929,7 @@ fn prepare(tools: &Tools<'_>, pr: &PullRequest, stop: &StopRequest) -> Result<Pa
         &Checkout {
             run: tools.run,
             git: &tools.commands.git,
-            path: checkout,
+            path: &checkout,
             stop,
         },
         &review::worktree_path(&tools.config.worktree_root, pr),
@@ -1256,7 +1274,7 @@ mod tests {
         ));
         let prompt = "https://github.com/acme/app/pull/3 tanaka";
         let opened = format!(
-            "pr-wakeの依頼ID: smoke:acme/app#3\n\n{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。",
+            "pr-wakeの依頼ID: smoke:acme/app#3\n\n{prompt}\n\nコードは{}（{HEAD}に固定した専用worktree）を読んでください。branchやcheckoutは変更しないでください。\n\nレビュー結果はこのレビューチャットで回答してください。調査を分担する場合は、このチャットのサブエージェントを使ってください。",
             worktree.display()
         );
         assert_eq!(

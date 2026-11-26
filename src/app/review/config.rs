@@ -15,7 +15,7 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewConfig {
-    // `owner/repo` as written, to the checkout its worktrees are added from.
+    // `owner/repo` maps to a checkout and `owner/*` maps to their parent directory.
     pub(crate) repositories: BTreeMap<String, PathBuf>,
     // `org/team-slug` whose review requests are notified too; direct requests always are.
     pub(crate) teams: Vec<String>,
@@ -158,12 +158,25 @@ impl ReviewConfig {
     }
 
     #[must_use]
-    pub(crate) fn checkout_of(&self, repo: &str) -> Option<&Path> {
-        self.repositories
+    pub(crate) fn checkout_of(&self, repo: &str) -> Option<PathBuf> {
+        let exact = self
+            .repositories
             .iter()
             // GitHub matches repository names without case.
-            .find(|(name, _)| name.eq_ignore_ascii_case(repo))
-            .map(|(_, checkout)| checkout.as_path())
+            .find(|(name, _)| name.eq_ignore_ascii_case(repo));
+        if let Some((_, checkout)) = exact {
+            return Some(checkout.clone());
+        }
+        let (owner, name) = repo.split_once('/')?;
+        if !is_repo_name(repo) || matches!(name, "." | "..") {
+            return None;
+        }
+        self.repositories.iter().find_map(|(pattern, root)| {
+            let configured_owner = pattern.strip_suffix("/*")?;
+            configured_owner
+                .eq_ignore_ascii_case(owner)
+                .then(|| root.join(name))
+        })
     }
 }
 
@@ -301,8 +314,11 @@ fn checked_repositories(
     repositories
         .into_iter()
         .map(|(repo, path)| {
-            if !is_repo_name(&repo) {
-                return Err(format!("repositories: {repo:?} is not owner/repo"));
+            let name = repo.strip_suffix("/*").map(|owner| format!("{owner}/repo"));
+            if !is_repo_name(name.as_deref().unwrap_or(&repo)) {
+                return Err(format!(
+                    "repositories: {repo:?} is not owner/repo or owner/*"
+                ));
             }
             let expanded = expand_home(&path, home);
             if !expanded.is_absolute() {
@@ -590,7 +606,10 @@ mod tests {
         assert_eq!(config.notification_timeout_seconds, 5);
         assert_eq!(config.max_notifications, 10);
         assert_eq!(config.worktree_root, Path::new(HOME));
-        assert_eq!(config.checkout_of("acme/app"), Some(Path::new("/src/app2")));
+        assert_eq!(
+            config.checkout_of("acme/app"),
+            Some(PathBuf::from("/src/app2"))
+        );
         assert_eq!(config.commands.gh.as_deref(), Some(Path::new("/opt/gh")));
         assert_eq!(config.commands.alerter, None);
         assert_eq!(config.owners(), ["Acme"]);
@@ -605,6 +624,27 @@ mod tests {
         .expect("a valid config");
 
         assert_eq!(config.owners(), ["acme", "zeta"]);
+    }
+
+    #[test]
+    fn organization_directory_resolves_new_repositories_and_respects_explicit_checkouts() {
+        let config = resolve(
+            r#"{"repositories":{"acme/*":"~/src/acme","acme/app":"/custom/app"},"choices":[CODE]}"#,
+        )
+        .expect("a valid config");
+
+        assert_eq!(config.owners(), ["acme"]);
+        assert_eq!(
+            config.checkout_of("ACME/new"),
+            Some(PathBuf::from("/Users/me/src/acme/new"))
+        );
+        assert_eq!(
+            config.checkout_of("acme/app"),
+            Some(PathBuf::from("/custom/app"))
+        );
+        for repo in ["other/new", "acme/..", "acme/.", "acme/other/new"] {
+            assert_eq!(config.checkout_of(repo), None, "{repo}");
+        }
     }
 
     #[test]

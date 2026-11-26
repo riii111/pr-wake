@@ -176,7 +176,7 @@ fn plist_of(
     .render())
 }
 
-fn program() -> Result<String, String> {
+pub(crate) fn program() -> Result<String, String> {
     // Links stay unresolved, so the agent runs whatever a reinstall later puts at this path.
     let program = env::current_exe()
         .and_then(path::absolute)

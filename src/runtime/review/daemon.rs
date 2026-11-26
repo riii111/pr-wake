@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::{self, Scope},
     time::{Duration, SystemTime},
@@ -1078,20 +1078,16 @@ impl<'deps> Daemon<'deps> {
         self.lock_state().reviewed_at(key, head)
     }
 
-    fn checkout_of(&self, repo: &str) -> Option<PathBuf> {
-        self.deps
-            .tools
-            .config
-            .checkout_of(repo)
-            .map(Path::to_path_buf)
-    }
-
     fn checkout_lock(&self, repo: &str) -> Arc<Mutex<()>> {
         let mut checkouts = self
             .checkouts
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(checkouts.entry(self.checkout_of(repo)).or_default())
+        Arc::clone(
+            checkouts
+                .entry(self.deps.tools.config.checkout_of(repo))
+                .or_default(),
+        )
     }
 
     // The oldest queued request becomes notifying, saved before it is shown.
@@ -1264,6 +1260,7 @@ mod tests {
         collections::BTreeMap,
         ffi::OsString,
         iter,
+        path::Path,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         time::Instant,
     };
